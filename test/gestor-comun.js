@@ -41,29 +41,6 @@ process.env.GIT_CONFIG_NOSYSTEM = '1';
 /** Ruta del ejecutable falso de opencode. */
 export const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'opencode-falso.js');
 
-/**
- * Copia del fixture en el sistema de archivos NATIVO del tmp.
- *
- * POR QUÉ: el repo vive en `/mnt/c` (9p, lento). Lanzar decenas de procesos que
- * lean el fixture desde ahí compite con otros tests de temporización fina que
- * también arrancan procesos desde `/mnt/c` (p. ej. el de inactividad del runner).
- * Ejecutarlo desde /tmp elimina esa contención sin tocar esos tests. La copia es
- * por proceso y se borra al salir.
- */
-export const FIXTURE_TMP = path.join(os.tmpdir(), `orq-fake-${process.pid}.js`);
-try {
-  fs.copyFileSync(FIXTURE, FIXTURE_TMP);
-} catch {
-  /* si falla, se usa la ruta original */
-}
-process.on('exit', () => {
-  try {
-    fs.rmSync(FIXTURE_TMP, { force: true });
-  } catch {
-    /* best-effort */
-  }
-});
-
 /** Intérprete de Node actual (se usa como `cmd` del opencode falso). */
 export const NODE = process.execPath;
 
@@ -177,12 +154,16 @@ export function leerJob(estadoDir, id) {
  * Crea un Gestor con el opencode falso ya cableado.
  * @param {import('../src/core/store.js').AlmacenDeTrabajos} almacen
  * @param {object} opciones
+ * @param {string} [opciones.fake] ruta del fixture a ejecutar (por defecto el del repo)
  * @returns {Gestor}
  */
-export function crearGestor(almacen, { entorno, concurrencia = 2, home, graceMs = 300, esperaMaximaMs = 60000, ejecutarPsql } = {}) {
+export function crearGestor(
+  almacen,
+  { entorno, concurrencia = 2, home, graceMs = 300, esperaMaximaMs = 60000, ejecutarPsql, fake = FIXTURE } = {},
+) {
   return new Gestor({
     almacen,
-    opencode: { cmd: NODE, argsPrefijo: [FIXTURE_TMP] },
+    opencode: { cmd: NODE, argsPrefijo: [fake] },
     concurrencia,
     entornoBase: entorno,
     home,
@@ -219,7 +200,7 @@ export async function esperarEstado(gestor, id, estado, topeMs = 15000) {
  *
  * @param {import('node:test').TestContext} t contexto del test
  * @param {{ perfil?: object, perfilCrudo?: string|null }} [opciones]
- * @returns {Promise<{ base: string, repo: string, rootDir: string, estadoDir: string, home: string, baseCommit: string, almacen: import('../src/core/store.js').AlmacenDeTrabajos }>}
+ * @returns {Promise<{ base: string, repo: string, rootDir: string, estadoDir: string, home: string, baseCommit: string, almacen: import('../src/core/store.js').AlmacenDeTrabajos, fake: string }>}
  */
 export async function montar(t, { perfil = {}, perfilCrudo = null } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'orq-gestor-'));
@@ -266,38 +247,64 @@ export async function montar(t, { perfil = {}, perfilCrudo = null } = {}) {
   const baseCommit = (await gitOK(['rev-parse', 'HEAD'], repo)).trim();
 
   const almacen = new AlmacenDeTrabajos({ dir: estadoDir });
+  // Copia del fixture en el sistema de archivos NATIVO del tmp. POR QUÉ: el repo
+  // vive en `/mnt/c` (9p, lento); lanzar decenas de procesos que lean el fixture
+  // desde ahí compite con tests de temporización fina de otros módulos. La copia
+  // vive dentro del tmp del test y se borra con él en `t.after`.
+  const fake = path.join(base, 'opencode-falso.js');
+  fs.copyFileSync(FIXTURE, fake);
   t.after(async () => {
     await limpiarBase(base, almacen);
   });
-  return { base, repo, rootDir, estadoDir, home, baseCommit, almacen };
+  return { base, repo, rootDir, estadoDir, home, baseCommit, almacen, fake };
 }
 
 /**
  * Limpieza best-effort: mata los grupos de procesos registrados que sigan vivos
  * y borra el directorio temporal. POR QUÉ matar por pgid: si una aserción falla
  * a mitad de un test, el worktree y su opencode falso podrían quedar vivos.
+ *
+ * POR QUÉ se reintenta el borrado: un trabajo que termina justo cuando arranca la
+ * limpieza puede escribir un último evento (que RECREA `estado/jobs/<id>`) después
+ * del primer borrado. Se insiste hasta que el directorio deje de reaparecer.
  * @param {string} base
  * @param {import('../src/core/store.js').AlmacenDeTrabajos} [almacen]
  * @returns {Promise<void>}
  */
 export async function limpiarBase(base, almacen) {
-  try {
-    const { trabajos } = almacen?.listar() ?? { trabajos: [] };
-    for (const trabajo of trabajos) {
-      if (Number.isInteger(trabajo.pgid) && trabajo.pgid > 0) {
-        try {
-          process.kill(-trabajo.pgid, 'SIGKILL');
-        } catch {
-          /* ya no existe */
+  /** Mata los grupos de procesos de todos los trabajos registrados. */
+  const matarGrupos = () => {
+    try {
+      const { trabajos } = almacen?.listar() ?? { trabajos: [] };
+      for (const trabajo of trabajos) {
+        if (Number.isInteger(trabajo.pgid) && trabajo.pgid > 0) {
+          try {
+            process.kill(-trabajo.pgid, 'SIGKILL');
+          } catch {
+            /* ya no existe */
+          }
         }
       }
+    } catch {
+      /* best-effort */
     }
-  } catch {
-    /* la limpieza nunca debe enmascarar el resultado del test */
+  };
+
+  matarGrupos();
+  const limite = Date.now() + 5000;
+  while (Date.now() < limite) {
+    try {
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+    } catch {
+      /* reintentar */
+    }
+    if (!fs.existsSync(base)) return;
+    await dormir(50);
+    matarGrupos();
   }
   try {
-    fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    fs.rmSync(base, { recursive: true, force: true });
   } catch {
-    /* best-effort */
+    /* nada más que hacer */
   }
 }

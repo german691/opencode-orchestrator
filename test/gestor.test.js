@@ -67,7 +67,7 @@ const PERFIL_RECURSO = {
 test('1. camino feliz con worktree: commit aislado, base intacta y entorno inyectado', async (t) => {
   const m = await montar(t);
   const volcado = path.join(m.base, 'volcado.json');
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'src/nuevo.js', ORQ_FAKE_VOLCADO: volcado }),
     home: m.home,
   });
@@ -127,9 +127,9 @@ test('1. camino feliz con worktree: commit aislado, base intacta y entorno inyec
   await gestor.cerrar();
 });
 
-test('1b. cada transición queda como evento en events.jsonl', { todo: 'BUG: la transición a verifying no emite evento en events.jsonl' }, async (t) => {
+test('1b. cada transición queda como evento en events.jsonl', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'src/nuevo.js' }),
     home: m.home,
   });
@@ -153,7 +153,7 @@ test('1b. cada transición queda como evento en events.jsonl', { todo: 'BUG: la 
 
 test('2a. escritura fuera de writes -> rejected con violación exacta y sin aceptación', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'otro/x.js' }),
     home: m.home,
   });
@@ -182,7 +182,7 @@ test('2a. escritura fuera de writes -> rejected con violación exacta y sin acep
 
 test('2b. escribir en un patrón protegido (estando en writes **) -> motivo protegido', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'secretos/x.txt' }),
     home: m.home,
   });
@@ -203,7 +203,7 @@ test('2b. escribir en un patrón protegido (estando en writes **) -> motivo prot
 
 test('3. aceptación que falla -> rejected con exit y cola, sin commit', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'src/a.js' }),
     home: m.home,
   });
@@ -233,7 +233,7 @@ test('3. aceptación que falla -> rejected con exit y cola, sin commit', async (
 
 test('4. los artefactos de la aceptación NO entran al commit', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'src/a.js' }),
     home: m.home,
   });
@@ -267,7 +267,7 @@ test('4. los artefactos de la aceptación NO entran al commit', async (t) => {
 
 test('5a. timeout total -> failed timeout y el grupo de procesos desaparece', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_DORMIR: '60000' }),
     home: m.home,
   });
@@ -291,7 +291,7 @@ test('5a. timeout total -> failed timeout y el grupo de procesos desaparece', as
 
 test('5b. timeout por inactividad -> failed idle', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_SALIDA_BYTES: '64', ORQ_FAKE_DORMIR: '60000' }),
     home: m.home,
   });
@@ -316,7 +316,7 @@ test('5b. timeout por inactividad -> failed idle', async (t) => {
 
 test('5c. el grupo de procesos no existe tras cancelar (sonda de espera)', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_DORMIR: '60000' }),
     home: m.home,
   });
@@ -333,7 +333,7 @@ test('5c. el grupo de procesos no existe tras cancelar (sonda de espera)', async
 
 test('6. exit distinto de cero -> failed sin commit y el worktree sigue para inspección', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_SALIDA_CODIGO: '7', ORQ_FAKE_ESCRIBIR: 'src/a.js' }),
     home: m.home,
   });
@@ -359,7 +359,7 @@ test('6. exit distinto de cero -> failed sin commit y el worktree sigue para ins
 test('7a. cancelar un trabajo en ejecución mata el grupo y al nieto', async (t) => {
   const m = await montar(t);
   const archivoPid = path.join(m.base, 'nieto.pid');
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_NIETO: '1', ORQ_FAKE_PIDFILE: archivoPid, ORQ_FAKE_DORMIR: '60000' }),
     home: m.home,
   });
@@ -379,7 +379,7 @@ test('7a. cancelar un trabajo en ejecución mata el grupo y al nieto', async (t)
 
 test('7b. cancelar un trabajo en cola no lo provisiona', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_DORMIR: '60000' }),
     concurrencia: 1,
     home: m.home,
@@ -407,7 +407,7 @@ test('7b. cancelar un trabajo en cola no lo provisiona', async (t) => {
 
 test('8a. concurrencia 2 con writes disjuntos: nunca más de 2 en running y cada commit es suyo', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'out.txt', ORQ_FAKE_DORMIR: '400' }),
     concurrencia: 2,
     home: m.home,
@@ -449,7 +449,7 @@ test('8a. concurrencia 2 con writes disjuntos: nunca más de 2 en running y cada
 
 test('8b. writes superpuestos con worktrees se serializan (nunca 2 en running)', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'src/a.js', ORQ_FAKE_DORMIR: '400' }),
     concurrencia: 2,
     home: m.home,
@@ -485,7 +485,7 @@ test('8b. writes superpuestos con worktrees se serializan (nunca 2 en running)',
 
 test('9a. B con after [A] no arranca hasta que A esté succeeded', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'out.txt', ORQ_FAKE_DORMIR: '300' }),
     concurrencia: 2,
     home: m.home,
@@ -511,7 +511,7 @@ test('9a. B con after [A] no arranca hasta que A esté succeeded', async (t) => 
 
 test('9b. si A falla, B queda cancelled dependencia_fallida sin provisionar', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_DORMIR: '300', ORQ_FAKE_SALIDA_CODIGO: '7' }),
     concurrencia: 2,
     home: m.home,
@@ -538,7 +538,7 @@ test('9b. si A falla, B queda cancelled dependencia_fallida sin provisionar', as
 
 test('9c. after con un id inexistente se rechaza al enviar', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, { entorno: entornoFalso(), home: m.home });
+  const gestor = crearGestor(m.almacen, { fake: m.fake, entorno: entornoFalso(), home: m.home });
 
   await assert.rejects(
     () => gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['src/**'], after: ['noexiste'] }),
@@ -555,7 +555,7 @@ test('9c. after con un id inexistente se rechaza al enviar', async (t) => {
 
 test('10. validaciones al enviar rechazan con mensaje y SIN crear trabajo', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, { entorno: entornoFalso(), home: m.home });
+  const gestor = crearGestor(m.almacen, { fake: m.fake, entorno: entornoFalso(), home: m.home });
 
   const casos = [
     { nombre: 'prompt vacío', spec: { prompt: '   ', cwd: m.repo }, re: /prompt.*obligatorio/ },
@@ -594,7 +594,7 @@ test('10. validaciones al enviar rechazan con mensaje y SIN crear trabajo', asyn
 
 test('10b. perfil inválido (JSON roto) se rechaza sin dejar un trabajo en queued', async (t) => {
   const m = await montar(t, { perfilCrudo: '{ "version": 1, ' });
-  const gestor = crearGestor(m.almacen, { entorno: entornoFalso(), home: m.home });
+  const gestor = crearGestor(m.almacen, { fake: m.fake, entorno: entornoFalso(), home: m.home });
 
   await assert.rejects(
     () => gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['src/**'] }),
@@ -612,7 +612,7 @@ test('10b. perfil inválido (JSON roto) se rechaza sin dejar un trabajo en queue
 
 test('11a. integrar trabajos succeeded -> merged, staging con los commits y main intacta', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'out.txt' }),
     home: m.home,
   });
@@ -648,14 +648,14 @@ test('11b. integrar con conflicto devuelve {ok:false} y deja staging intacta', a
   // Dos gestores sobre el mismo almacén para poder dar a cada trabajo un
   // ORQ_FAKE_ESCRIBIR distinto que, no obstante, apunta al MISMO archivo
   // ('conflicto.txt' vs './conflicto.txt') con contenidos distintos.
-  const g1 = crearGestor(m.almacen, {
+  const g1 = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'conflicto.txt' }),
     home: m.home,
   });
   const a = await g1.enviar({ prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['conflicto.txt'] });
   await g1.esperar(a.id, 30000);
 
-  const g2 = crearGestor(m.almacen, {
+  const g2 = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: './conflicto.txt' }),
     home: m.home,
   });
@@ -679,7 +679,7 @@ test('11b. integrar con conflicto devuelve {ok:false} y deja staging intacta', a
 
 test('11c. no se integran trabajos que no están succeeded (corriendo o rejected)', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_DORMIR: '60000' }),
     home: m.home,
   });
@@ -689,7 +689,7 @@ test('11c. no se integran trabajos que no están succeeded (corriendo o rejected
   await assert.rejects(() => gestor.integrar(corriendo.id), /Solo se integran trabajos succeeded/);
   await gestor.cancelar(corriendo.id);
 
-  const g2 = crearGestor(m.almacen, {
+  const g2 = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'otro/x.js' }),
     home: m.home,
   });
@@ -708,7 +708,7 @@ test('11c. no se integran trabajos que no están succeeded (corriendo o rejected
 
 test('12a. readonly sin aislamiento y sin escribir nada -> succeeded sin commit', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, { entorno: entornoFalso(), home: m.home });
+  const gestor = crearGestor(m.almacen, { fake: m.fake, entorno: entornoFalso(), home: m.home });
 
   const trabajo = await gestor.enviar({ prompt: 'solo mirá', cwd: m.repo, mode: 'readonly' });
   const fin = await gestor.esperar(trabajo.id, 15000);
@@ -723,7 +723,7 @@ test('12a. readonly sin aislamiento y sin escribir nada -> succeeded sin commit'
 
 test('12b. readonly que escribe -> rejected solo_lectura', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'arruina.txt' }),
     home: m.home,
   });
@@ -742,7 +742,7 @@ test('12c. un cambio previo del árbol real que no se toca NO es violación', as
   const m = await montar(t);
   // Modificación hecha ANTES de empezar el trabajo y que el trabajo no cambia.
   fs.writeFileSync(path.join(m.repo, 'base.txt'), 'modificado antes\n');
-  const gestor = crearGestor(m.almacen, { entorno: entornoFalso(), home: m.home });
+  const gestor = crearGestor(m.almacen, { fake: m.fake, entorno: entornoFalso(), home: m.home });
 
   const trabajo = await gestor.enviar({ prompt: 'no toques nada', cwd: m.repo, mode: 'readonly' });
   const fin = await gestor.esperar(trabajo.id, 15000);
@@ -760,7 +760,7 @@ test('12c. un cambio previo del árbol real que no se toca NO es violación', as
 
 test('13a. limpiar elimina worktree y rama de terminados y no toca los activos', async (t) => {
   const m = await montar(t);
-  const g1 = crearGestor(m.almacen, {
+  const g1 = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'src/a.js' }),
     home: m.home,
   });
@@ -768,7 +768,7 @@ test('13a. limpiar elimina worktree y rama de terminados y no toca los activos',
   const finTerminado = await g1.esperar(terminado.id, 15000);
   assert.equal(finTerminado.estado, 'succeeded');
 
-  const g2 = crearGestor(m.almacen, {
+  const g2 = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_DORMIR: '60000' }),
     home: m.home,
   });
@@ -791,7 +791,7 @@ test('13a. limpiar elimina worktree y rama de terminados y no toca los activos',
 
 test('13b. cerrar cancela lo que corre, descarta la cola y rechaza envíos nuevos', async (t) => {
   const m = await montar(t);
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({ ORQ_FAKE_DORMIR: '60000' }),
     concurrencia: 1,
     home: m.home,
@@ -828,7 +828,7 @@ test('14a. recurso db: se crea antes, se libera con DROP después y exporta la U
     llamadas.push(args.at(-1));
     return { code: 0, stdout: '', stderr: '' };
   };
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({
       ORQ_FAKE_ESCRIBIR: 'src/a.js',
       ORQ_PG_ADMIN_URL: 'postgres://u:p@localhost:5432/postgres',
@@ -860,7 +860,7 @@ test('14b. el recurso se libera aunque el trabajo falle', async (t) => {
     llamadas.push(args.at(-1));
     return { code: 0, stdout: '', stderr: '' };
   };
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({
       ORQ_FAKE_ESCRIBIR: 'src/a.js',
       ORQ_FAKE_SALIDA_CODIGO: '7',
@@ -889,7 +889,7 @@ test('14c. el recurso se libera aunque el trabajo se cancele', async (t) => {
     llamadas.push(args.at(-1));
     return { code: 0, stdout: '', stderr: '' };
   };
-  const gestor = crearGestor(m.almacen, {
+  const gestor = crearGestor(m.almacen, { fake: m.fake,
     entorno: entornoFalso({
       ORQ_FAKE_DORMIR: '60000',
       ORQ_PG_ADMIN_URL: 'postgres://u:p@localhost:5432/postgres',

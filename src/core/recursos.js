@@ -9,13 +9,21 @@
  * `{job}` se sustituye por el id del trabajo (único). Cualquier otro nombre se
  * rechaza ANTES de invocar `psql`.
  *
- * POR QUÉ psql con argumentos en array (nunca shell): la URL de administración y
- * el SQL no deben pasar por una capa que interprete `;`, `$()` ni comillas. Con
- * `execFile('psql', args)` cada valor es un argumento literal.
+ * POR QUÉ psql con argumentos en array (nunca shell): el SQL no debe pasar por una
+ * capa que interprete `;`, `$()` ni comillas. Con `execFile('psql', args)` cada
+ * valor es un argumento literal.
+ *
+ * POR QUÉ las credenciales viajan por el ENTORNO del hijo y no por `argv`: la URL
+ * de administración lleva la contraseña. Si se pasara como `-d <url>`, cualquier
+ * usuario del sistema podría leerla en `/proc/<pid>/cmdline` mientras psql corre.
+ * Por eso se parsea la URL y se arma un entorno con PGHOST/PGPORT/PGUSER/
+ * PGPASSWORD/PGDATABASE (y PGSSLMODE si la URL trae `sslmode`); `argv` solo lleva
+ * el SQL. La URL exportada al trabajo SÍ conserva la contraseña (la app la
+ * necesita) pero también se entrega por el entorno del trabajo, no por argumentos.
  *
  * POR QUÉ `ejecutarPsql` es inyectable: permite probar toda la lógica (SQL exacto,
- * validaciones, idempotencia) sin una base de Postgres real; el test de
- * integración usa el real y se saltea si no está disponible.
+ * validaciones, idempotencia y el entorno recibido) sin una base de Postgres real;
+ * el test de integración usa el real y se saltea si no está disponible.
  */
 
 import { execFile } from 'node:child_process';
@@ -26,7 +34,8 @@ export const NOMBRE_BASE_TEST = /^[a-z][a-z0-9_]{0,62}_test$/;
 /** Ejecutable de Postgres; fijo y sin shell. */
 const PSQL = 'psql';
 
-/** Argumentos comunes de psql: sin `.psqlrc` (`-X`) y abortando ante el primer error. */
+/** Argumentos comunes de psql: sin `.psqlrc` (`-X`), abortando ante el primer error
+ * y sin `-d` (los datos de conexión van por entorno, no por `argv`). */
 const PSQL_BASE = ['-X', '-v', 'ON_ERROR_STOP=1'];
 
 /**
@@ -48,18 +57,85 @@ function citarLiteral(texto) {
 }
 
 /**
- * Ejecuta `psql` con una lista de argumentos y devuelve el resultado normalizado.
- * Es la implementación por defecto de `ejecutarPsql`; no usa shell.
+ * Traduce una URL de Postgres a las variables PG* que entiende `psql`. Es la
+ * pieza que evita exponer la contraseña en `argv`: estos valores van al entorno
+ * del proceso hijo.
  *
- * @param {string[]} args argumentos de psql
+ * @param {URL} url URL ya parseada (no se valida aquí)
+ * @returns {Record<string,string>} SOLO variables PG* (nunca PGPASSFILE/PGSERVICE/PGOPTIONS)
+ */
+export function entornoPgDesdeUrl(url) {
+  /**
+   * Decodifica un componente de la URL con tolerancia: una `%` suelta (entrada
+   * malformada) no debe tumbar la conexión con un URIError críptico.
+   * @param {string} valor
+   * @returns {string}
+   */
+  const decodificar = (valor) => {
+    try {
+      return decodeURIComponent(valor);
+    } catch {
+      return valor;
+    }
+  };
+
+  /** @type {Record<string,string>} */
+  const entorno = {};
+  if (url.hostname) entorno.PGHOST = url.hostname;
+  if (url.port) entorno.PGPORT = url.port;
+  const usuario = decodificar(url.username);
+  if (usuario) entorno.PGUSER = usuario;
+  const contrasena = decodificar(url.password);
+  // Solo si la URL trae contraseña: no se inventa una vacía que psql interpretaría.
+  if (contrasena) entorno.PGPASSWORD = contrasena;
+  // Operaciones administrativas: la base de la URL tal cual (normalmente 'postgres').
+  const base = decodificar(url.pathname.replace(/^\//, ''));
+  if (base) entorno.PGDATABASE = base;
+  const sslmode = url.searchParams.get('sslmode');
+  if (sslmode) entorno.PGSSLMODE = sslmode;
+  return entorno;
+}
+
+/**
+ * Combina el entorno heredado (para conservar PATH y demás, necesario para
+ * localizar el binario) con las PG* de la URL, que siempre mandan. Elimina del
+ * heredado PGPASSFILE/PGSERVICE/PGOPTIONS: podrían desviar la conexión a otro
+ * host/servicio y saltarse la credencial de la URL.
+ *
+ * @param {Record<string,string|undefined>} env variables PG* calculadas desde la URL
+ * @param {Record<string,string|undefined>} [heredado=process.env] entorno del orquestador
+ * @returns {Record<string,string|undefined>} entorno final del proceso hijo (sin mutar el heredado)
+ */
+export function entornoDePsql(env, heredado = process.env) {
+  const base = { ...heredado };
+  delete base.PGPASSFILE;
+  delete base.PGSERVICE;
+  delete base.PGOPTIONS;
+  return { ...base, ...env };
+}
+
+/**
+ * Ejecuta `psql` con una lista de argumentos y devuelve el resultado normalizado.
+ * Es la implementación por defecto de `ejecutarPsql`; no usa shell. Los datos de
+ * conexión llegan en `env` (PG*) y se inyectan en el entorno del proceso hijo; la
+ * implementación real los mezcla con `process.env` (PATH, etc.).
+ *
+ * @param {string[]} args argumentos de psql (solo SQL e indicadores, sin `-d`)
+ * @param {{ env?: Record<string,string> }} [opciones] variables PG* de la conexión
  * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
  */
-export function ejecutarPsql(args) {
+export function ejecutarPsql(args, { env } = {}) {
   return new Promise((resolve) => {
     execFile(
       PSQL,
       args,
-      { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        maxBuffer: 16 * 1024 * 1024,
+        // Las PG* de la URL mandan; del heredado se limpian las que desvían la conexión.
+        env: entornoDePsql(env ?? {}),
+      },
       (error, stdout, stderr) => {
         // `error.code` puede ser numérico (código de salida) o ENOENT; normalizamos.
         const code = error ? (Number.isInteger(error.code) ? error.code : 1) : 0;
@@ -76,8 +152,9 @@ export function ejecutarPsql(args) {
  *   `{ kind, adminUrlEnv, template?, name (con '{job}'), exportAs }`
  * @param {object} [opciones]
  * @param {Record<string,string>} [opciones.env={}] entorno de donde leer la URL de administración
- * @param {(args: string[]) => Promise<{code:number,stdout:string,stderr:string}>} [opciones.ejecutarPsql]
- *   inyectable para tests; por defecto ejecuta el `psql` real
+ * @param {(args: string[], opciones?: { env?: Record<string,string> }) => Promise<{code:number,stdout:string,stderr:string}>} [opciones.ejecutarPsql]
+ *   inyectable para tests; recibe los argumentos de psql y las PG* de la conexión;
+ *   por defecto ejecuta el `psql` real
  * @returns {{ definicion: object, provisionar: (job?: object) => Promise<{ env: Record<string,string>, liberar: () => Promise<void> }> }}
  * @throws {Error} si el `kind` es desconocido o la definición está incompleta
  */
@@ -112,8 +189,8 @@ export function crearProveedor(definicion, opciones = {}) {
   /** SQL de borrado, idempotente por `IF EXISTS` y `FORCE` (corta conexiones). */
   const sqlBorrar = (nombre) => `DROP DATABASE IF EXISTS ${citarIdentificador(nombre)} WITH (FORCE)`;
 
-  /** Arma los argumentos de una sentencia `-c` sobre la URL de administración. */
-  const argsSql = (adminUrl, sql) => [...PSQL_BASE, '-d', adminUrl, '-c', sql];
+  /** Arma los argumentos de una sentencia `-c`. La conexión va por entorno, no aquí. */
+  const argsSql = (sql) => [...PSQL_BASE, '-c', sql];
 
   /**
    * Provisiona la base del trabajo: valida el nombre, limpia cualquier resto con
@@ -148,11 +225,15 @@ export function crearProveedor(definicion, opciones = {}) {
       throw new Error(`La variable ${adminUrlEnv} no contiene una URL de Postgres válida`);
     }
 
+    // Datos de conexión derivados de la URL: viajan por el entorno del hijo, NUNCA por argv.
+    const envPg = entornoPgDesdeUrl(url);
+
     // ¿Existe la plantilla declarada? Solo entonces se usa TEMPLATE.
     let usarTemplate = false;
     if (template) {
       const consulta = await ejecutar(
-        argsSql(adminUrl, `SELECT 1 FROM pg_database WHERE datname = ${citarLiteral(template)}`),
+        argsSql(`SELECT 1 FROM pg_database WHERE datname = ${citarLiteral(template)}`),
+        { env: envPg },
       );
       if (consulta.code !== 0) {
         throw new Error(`No se pudo comprobar la plantilla '${template}': ${(consulta.stderr || '').trim()}`);
@@ -161,15 +242,15 @@ export function crearProveedor(definicion, opciones = {}) {
     }
 
     // Limpia un resto previo con el mismo nombre (el id es único, así que es seguro).
-    await ejecutar(argsSql(adminUrl, sqlBorrar(nombre)));
+    await ejecutar(argsSql(sqlBorrar(nombre)), { env: envPg });
 
     const sqlCrear =
       `CREATE DATABASE ${citarIdentificador(nombre)}` +
       (usarTemplate ? ` TEMPLATE ${citarIdentificador(template)}` : '');
-    const creacion = await ejecutar(argsSql(adminUrl, sqlCrear));
+    const creacion = await ejecutar(argsSql(sqlCrear), { env: envPg });
     if (creacion.code !== 0) {
       // "No deja nada": intentamos borrar el posible resto y propagamos el error.
-      await ejecutar(argsSql(adminUrl, sqlBorrar(nombre)));
+      await ejecutar(argsSql(sqlBorrar(nombre)), { env: envPg });
       throw new Error(`No se pudo crear la base '${nombre}': ${(creacion.stderr || '').trim()}`);
     }
 
@@ -183,7 +264,7 @@ export function crearProveedor(definicion, opciones = {}) {
      * @returns {Promise<void>}
      */
     async function liberar() {
-      const borrado = await ejecutar(argsSql(adminUrl, sqlBorrar(nombre)));
+      const borrado = await ejecutar(argsSql(sqlBorrar(nombre)), { env: envPg });
       if (borrado.code !== 0) {
         throw new Error(`No se pudo eliminar la base '${nombre}': ${(borrado.stderr || '').trim()}`);
       }

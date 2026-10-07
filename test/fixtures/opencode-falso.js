@@ -86,6 +86,10 @@ if (env.ORQ_FAKE_VOLCADO) {
       ORQ_WORKTREE: env.ORQ_WORKTREE ?? null,
       ORQ_BRANCH: env.ORQ_BRANCH ?? null,
       TEST_DATABASE_URL: env.TEST_DATABASE_URL ?? null,
+      // Credenciales de administración: NUNCA deben llegar al trabajo (ver gestor.js).
+      ORQ_PG_ADMIN_URL: env.ORQ_PG_ADMIN_URL ?? null,
+      OTRA_ADMIN_URL: env.OTRA_ADMIN_URL ?? null,
+      VARIABLE_COMUN: env.VARIABLE_COMUN ?? null,
     },
   };
   const archivoVolcado = path.resolve(env.ORQ_FAKE_VOLCADO);

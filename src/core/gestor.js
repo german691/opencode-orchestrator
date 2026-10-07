@@ -83,6 +83,27 @@ function hashDeArchivo(ruta) {
   }
 }
 
+/**
+ * Copia del entorno SIN las credenciales de administración de los recursos.
+ *
+ * POR QUÉ: la URL de administración de Postgres (`adminUrlEnv`, p. ej. ORQ_PG_ADMIN_URL) puede
+ * crear y borrar CUALQUIER base. Solo la usa el gestor para provisionar; si llegara al entorno
+ * del trabajo, un agente con shell podría saltarse la barrera de nombres `_test` y borrar una
+ * base real. El trabajo recibe únicamente la URL de SU base (la que exporta el recurso).
+ *
+ * @param {NodeJS.ProcessEnv} entorno
+ * @param {object} perfil
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function sinSecretosDeAdministracion(entorno, perfil) {
+  const copia = { ...entorno };
+  delete copia.ORQ_PG_ADMIN_URL;
+  for (const recurso of Object.values(perfil?.resources ?? {})) {
+    if (recurso && typeof recurso.adminUrlEnv === 'string') delete copia[recurso.adminUrlEnv];
+  }
+  return copia;
+}
+
 /** Error de uso del gestor (entrada inválida del cliente): se reporta tal cual, sin traza. */
 export class ErrorDeGestor extends Error {
   /** @param {string} mensaje */
@@ -478,7 +499,7 @@ export class Gestor {
       const entorno = entornoDeTrabajo({
         rutaConfig,
         base: {
-          ...this.entornoBase,
+          ...sinSecretosDeAdministracion(this.entornoBase, perfil),
           ...perfil.env,
           ...envRecursos,
           ORQ_JOB_ID: id,
