@@ -52,6 +52,9 @@ const CLAVES_RECURSO = new Set(['kind', 'adminUrlEnv', 'template', 'name', 'expo
 /** Tipos de recurso soportados. */
 const KINDS_RECURSO = new Set(['postgres-db']);
 
+/** `name` del perfil: segmento de ruta seguro (se usa para armar directorios). */
+const NOMBRE_SEGURO = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
+
 /** Nombre de variable de entorno válido (y por tanto de `exportAs`/`adminUrlEnv`). */
 const NOMBRE_VARIABLE_ENV = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -91,6 +94,11 @@ function validarRama(campo, valor, errores) {
   if (valor.endsWith('/')) errores.push(`${campo}: no puede terminar en '/'`);
   if (valor.endsWith('.lock')) errores.push(`${campo}: no puede terminar en '.lock'`);
   if (valor.startsWith('-')) errores.push(`${campo}: no puede empezar con '-'`);
+  if (valor.startsWith('/')) errores.push(`${campo}: no puede empezar con '/'`);
+  // Mismos caracteres que rechaza workspace.js: mejor fallar al validar el perfil que al crear el worktree.
+  for (const caracter of ['~', '^', ':', '?', '*', '[', '\\']) {
+    if (valor.includes(caracter)) errores.push(`${campo}: no puede contener '${caracter}'`);
+  }
 }
 
 /**
@@ -119,6 +127,9 @@ export function validarPerfil(objeto) {
   if (objeto.version !== 1) errores.push('version: debe ser 1');
   if (typeof objeto.name !== 'string' || objeto.name.trim() === '') {
     errores.push('name: debe ser un texto no vacío');
+  } else if (!NOMBRE_SEGURO.test(objeto.name)) {
+    // `name` forma parte de rutas (~/work/{name}): no puede escapar con '/', '..' ni caracteres raros.
+    errores.push('name: solo letras, dígitos, punto, guion y guion bajo (1 a 64, sin empezar con punto ni guion)');
   }
 
   validarRama('baseBranch', objeto.baseBranch, errores);
@@ -156,8 +167,18 @@ export function validarPerfil(objeto) {
       for (const clave of Object.keys(wt)) {
         if (!CLAVES_WORKTREES.has(clave)) errores.push(`worktrees.${clave}: campo desconocido`);
       }
-      if (wt.root !== undefined && (typeof wt.root !== 'string' || wt.root.trim() === '')) {
-        errores.push('worktrees.root: debe ser un texto no vacío');
+      if (wt.root !== undefined) {
+        if (typeof wt.root !== 'string' || wt.root.trim() === '') {
+          errores.push('worktrees.root: debe ser un texto no vacío');
+        } else {
+          const raiz = wt.root.replace(/\\/g, '/');
+          const absoluta = raiz.startsWith('/') || /^[A-Za-z]:\//.test(raiz) || raiz === '~' || raiz.startsWith('~/');
+          if (!absoluta) {
+            errores.push("worktrees.root: debe ser absoluta o empezar con '~/' (una ruta relativa depende del directorio del servidor)");
+          } else if (raiz.split('/').includes('..')) {
+            errores.push("worktrees.root: no puede contener '..'");
+          }
+        }
       }
       if (wt.link !== undefined) {
         if (!Array.isArray(wt.link)) {

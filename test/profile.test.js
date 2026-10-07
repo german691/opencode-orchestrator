@@ -270,3 +270,41 @@ test('validarPerfil: el template del recurso postgres-db es OPCIONAL pero si se 
     );
   }
 });
+
+test('validarPerfil: name es un segmento de ruta seguro (no puede escapar de ~/work/{name})', () => {
+  for (const malo of ['../../etc', 'a/b', 'a\\b', '.oculto', '-guion', 'con espacio', 'x'.repeat(65), '..']) {
+    assert.throws(
+      () => validarPerfil({ version: 1, name: malo }),
+      (error) => error.errores.some((e) => e.startsWith('name:')),
+      `name ${JSON.stringify(malo)} debe rechazarse`,
+    );
+  }
+  for (const bueno of ['sistema', 'mi-repo_2.0', 'A1', '_x']) {
+    assert.doesNotThrow(() => validarPerfil({ version: 1, name: bueno }), `name ${bueno} es válido`);
+  }
+});
+
+test('validarPerfil: worktrees.root debe ser absoluta o con ~ y sin ".."', () => {
+  const base = { version: 1, name: 'x' };
+  for (const malo of ['relativa/dir', './x', 'work', '/tmp/../etc', '~/a/../../b']) {
+    assert.throws(
+      () => validarPerfil({ ...base, worktrees: { root: malo } }),
+      (error) => error.errores.some((e) => e.startsWith('worktrees.root:')),
+      `root ${JSON.stringify(malo)} debe rechazarse`,
+    );
+  }
+  for (const bueno of ['/var/work/{name}', '~/work/{name}', '~', 'C:/work']) {
+    assert.doesNotThrow(() => validarPerfil({ ...base, worktrees: { root: bueno } }), `root ${bueno} es válido`);
+  }
+});
+
+test('validarPerfil: las ramas rechazan los mismos caracteres que el resto del código', () => {
+  for (const malo of ['a:b', 'a~1', 'a^', 'a?', 'a*', 'a[0]', 'a\\b', '/abs']) {
+    assert.throws(
+      () => validarPerfil({ version: 1, name: 'x', baseBranch: malo }),
+      (error) => error.errores.some((e) => e.startsWith('baseBranch:')),
+      `rama ${JSON.stringify(malo)} debe rechazarse`,
+    );
+  }
+  assert.doesNotThrow(() => validarPerfil({ version: 1, name: 'x', baseBranch: 'feature/ok-1', integrationBranch: 'staging' }));
+});
