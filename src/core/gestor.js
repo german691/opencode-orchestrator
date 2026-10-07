@@ -338,12 +338,14 @@ export class Gestor {
     }
     const files = lista(spec.files, 'files', []).map((f) => aRutaDelServidor(f));
 
-    // Aceptación: clave del perfil o comando literal; sin nada, la de 'default' si existe.
+    // Aceptación: clave del perfil o comando literal; sin nada, la de 'default' si existe,
+    // salvo en readonly: un trabajo que no escribe no tiene nada que aceptar y el comando
+    // por defecto (lint, tests) correría en vano sobre el árbol real. Una `accept` explícita sí corre.
     let aceptacion = null;
     if (spec.accept !== undefined && spec.accept !== null && spec.accept !== '') {
       if (typeof spec.accept !== 'string') throw new ErrorDeGestor('`accept` debe ser un texto');
       aceptacion = Object.hasOwn(perfil.accept ?? {}, spec.accept) ? perfil.accept[spec.accept] : spec.accept;
-    } else if (perfil.accept && typeof perfil.accept.default === 'string') {
+    } else if (modo !== 'readonly' && perfil.accept && typeof perfil.accept.default === 'string') {
       aceptacion = perfil.accept.default;
     }
 

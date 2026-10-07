@@ -90,7 +90,7 @@ no modifica nada (revisiones, análisis); `auto` solo cuando el usuario lo pide.
 Versionado en la raíz del repo objetivo. Sin archivo se usan valores seguros (rama actual como base,
 sin recursos, `**/.env` protegido). Ejemplo en [`docs/DISENO.md`](docs/DISENO.md) §6:
 `baseBranch`, `integrationBranch`, `protected`, `worktrees` (`root`, `link`, `setup`), `env`,
-`resources` (`postgres-db`: una base de datos propia por trabajo) y `accept` (comandos de aceptación).
+`resources` (`postgres-db`: una base de datos propia por trabajo) y `accept` (comandos de aceptación; el `default` se corre tras cada trabajo salvo en `readonly`, donde solo corre una `accept` explícita).
 
 ## Flujo recomendado para el orquestador
 

@@ -742,6 +742,25 @@ test('12a. readonly sin aislamiento y sin escribir nada -> succeeded sin commit'
   await gestor.cerrar();
 });
 
+test('12a2. la aceptación por defecto del perfil corre en safe pero NO en readonly (la explícita sí)', async (t) => {
+  const m = await montar(t, { perfil: { accept: { default: 'true' } } });
+  const gestor = crearGestor(m.almacen, { fake: m.fake, entorno: entornoFalso(), home: m.home });
+
+  const lectura = await gestor.enviar({ prompt: 'solo mirá', cwd: m.repo, mode: 'readonly' });
+  const escritura = await gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['src/**'] });
+  const explicita = await gestor.enviar({ prompt: 'solo mirá', cwd: m.repo, mode: 'readonly', accept: 'true' });
+  const [finLectura, finEscritura, finExplicita] = await Promise.all(
+    [lectura, escritura, explicita].map((j) => gestor.esperar(j.id, 20000)),
+  );
+
+  assert.equal(finLectura.estado, 'succeeded');
+  assert.equal(finLectura.resultado.aceptacion.ejecutada, false, 'readonly no corre la aceptación por defecto');
+  assert.equal(finEscritura.resultado.aceptacion.ejecutada, true, 'safe sí corre la aceptación por defecto');
+  assert.equal(finExplicita.resultado.aceptacion.ejecutada, true, 'una accept explícita corre también en readonly');
+
+  await gestor.cerrar();
+});
+
 test('12b. readonly que escribe -> rejected solo_lectura', async (t) => {
   const m = await montar(t);
   const gestor = crearGestor(m.almacen, { fake: m.fake,
