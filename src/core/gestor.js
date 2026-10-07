@@ -25,6 +25,7 @@ import path from 'node:path';
 import { esTerminal } from './estados.js';
 import { compilar } from './glob.js';
 import { identidadDeProceso } from './identidad.js';
+import { aRutaDelServidor } from '../rutas.js';
 import {
   construirArgs,
   construirPrompt,
@@ -281,7 +282,7 @@ export class Gestor {
     if (typeof spec.cwd !== 'string' || spec.cwd.trim() === '') {
       throw new ErrorDeGestor('`cwd` es obligatorio (ruta del repositorio)');
     }
-    const cwd = path.resolve(spec.cwd);
+    const cwd = path.resolve(aRutaDelServidor(spec.cwd));
     if (!fs.existsSync(cwd)) throw new ErrorDeGestor(`cwd no existe: ${cwd}`);
 
     let repo;
@@ -335,7 +336,7 @@ export class Gestor {
     for (const dep of after) {
       if (!this.trabajos.has(dep)) throw new ErrorDeGestor(`after: no existe el trabajo '${dep}'`);
     }
-    const files = lista(spec.files, 'files', []);
+    const files = lista(spec.files, 'files', []).map((f) => aRutaDelServidor(f));
 
     // Aceptación: clave del perfil o comando literal; sin nada, la de 'default' si existe.
     let aceptacion = null;
@@ -496,7 +497,7 @@ export class Gestor {
         nombreAgente: NOMBRE_AGENTE,
       });
       const rutaConfig = escribirConfigDeTrabajo(rutas.dir, config);
-      const entorno = entornoDeTrabajo({
+      const entornoBaseDelTrabajo = entornoDeTrabajo({
         rutaConfig,
         base: {
           ...sinSecretosDeAdministracion(this.entornoBase, perfil),
@@ -507,6 +508,9 @@ export class Gestor {
           ORQ_BRANCH: this.trabajos.get(id).rama ?? '',
         },
       });
+      // PWD heredado apuntaría al directorio de arranque del servidor y el agente lo tomaría
+      // por su carpeta de trabajo (observado en vivo): se fija al cwd real del trabajo.
+      const entorno = { ...entornoBaseDelTrabajo, PWD: cwdTrabajo };
       const prompt = construirPrompt({
         prompt: job.prompt,
         modo: job.mode,
@@ -870,7 +874,7 @@ export class Gestor {
     if (typeof cwd !== 'string' || cwd.trim() === '') throw new ErrorDeGestor("`cwd` es obligatorio");
     let repo;
     try {
-      repo = await raizGit(path.resolve(cwd));
+      repo = await raizGit(path.resolve(aRutaDelServidor(cwd)));
     } catch (error) {
       throw new ErrorDeGestor(error.message);
     }

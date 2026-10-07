@@ -30,6 +30,17 @@ cmd /c "opencode auth export 2>nul | wsl -d Debian -u root -- opencode auth impo
 
 Copiá también `~/.config/opencode/opencode.jsonc` y `agent/` si querés los mismos modelos y agentes.
 
+Si los repositorios viven en el disco de Windows (`/mnt/c/...`), git de Linux los ve con otro dueño
+y responde «dubious ownership». Declaralos una sola vez como seguros (el servidor NO lo hace por
+vos: relajar esa protección es una decisión del usuario):
+
+```bash
+git config --global --add safe.directory '/mnt/c/Users/<usuario>/Documents/GitHub/<repo>'
+```
+
+Las rutas de Windows (`C:\Users\...`, `C:/...`, `\\wsl$\Debian\...`) que lleguen en `cwd` o `files`
+se traducen solas a rutas de Linux.
+
 ## Conexión desde Claude Desktop (el servidor corre dentro de WSL)
 
 ```json

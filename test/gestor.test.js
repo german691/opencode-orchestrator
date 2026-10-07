@@ -114,6 +114,11 @@ test('1. camino feliz con worktree: commit aislado, base intacta y entorno inyec
   assert.equal(volcadoDatos.env.ORQ_JOB_ID, trabajo.id);
   assert.equal(volcadoDatos.env.ORQ_WORKTREE, fin.worktree);
   assert.equal(volcadoDatos.env.ORQ_BRANCH, `job/${trabajo.id}`);
+  assert.equal(
+    fs.realpathSync(volcadoDatos.env.PWD),
+    fs.realpathSync(volcadoDatos.cwd),
+    'PWD debe ser el cwd real del trabajo y no el directorio de arranque del servidor',
+  );
   assert.ok(volcadoDatos.opencodeConfig, 'OPENCODE_CONFIG debe apuntar a la config del trabajo');
   assert.equal(volcadoDatos.opencodeConfigDir, null, 'OPENCODE_CONFIG_DIR nunca debe pasarse');
 
@@ -588,6 +593,22 @@ test('10. validaciones al enviar rechazan con mensaje y SIN crear trabajo', asyn
     await assert.rejects(() => gestor.enviar(caso.spec), caso.re, caso.nombre);
     assert.equal(gestor.listar().length, 0, `${caso.nombre}: no debe crear ningún trabajo`);
   }
+
+  await gestor.cerrar();
+});
+
+test('10a. un cwd con ruta de Windows se traduce a /mnt/<letra> (en enviar y en verPerfil)', async (t) => {
+  const m = await montar(t);
+  const gestor = crearGestor(m.almacen, { fake: m.fake, entorno: entornoFalso(), home: m.home });
+
+  // La unidad inexistente permite comprobar la traducción sin depender de WSL: el mensaje
+  // de error muestra la ruta YA convertida (sin traducir sería una ruta relativa rara).
+  await assert.rejects(
+    () => gestor.enviar({ prompt: 'x', cwd: 'Z:\\no\\existe', mode: 'safe', writes: ['src/**'] }),
+    /cwd no existe: \/mnt\/z\/no\/existe$/,
+  );
+  await assert.rejects(() => gestor.verPerfil('Z:\\no\\existe'), /\/mnt\/z\/no\/existe/);
+  assert.equal(gestor.listar().length, 0);
 
   await gestor.cerrar();
 });
