@@ -229,3 +229,42 @@ Decisiones de implementación que se apartan del texto original:
   como violación si no cambian durante el trabajo.
 - `opencode_cleanup` y `opencode_merge` operan sobre trabajos terminados; `limpiar` no borra el registro.
 - Pendiente (Fase 3): `opencode_mutate`, plantillas de tarea, métricas de consumo y `concurrency` por perfil.
+
+## 16. Seguridad: decisiones y limitaciones conocidas
+
+Decisiones (con su test):
+
+- **Credenciales de administración fuera del agente.** La URL de administración de Postgres (`adminUrlEnv`,
+  `ORQ_PG_ADMIN_URL`) solo la usa el gestor para provisionar; se quita del entorno de los trabajos. El trabajo
+  recibe únicamente la URL de SU base (`exportAs`). Sin esto un agente con shell podría saltarse la barrera de
+  nombres `_test` y borrar una base real.
+- **`psql` recibe la conexión por variables `PG*`, no por argumentos**: la contraseña no aparece en
+  `/proc/<pid>/cmdline`. Los mensajes de error nunca contienen la URL.
+- **Protegidos sin distinguir mayúsculas.** El repo real puede vivir en un sistema de archivos que no las
+  distingue (drvfs de Windows) mientras el worktree está en ext4; `Backend/prisma/MIGRATIONS/x` debe contar
+  como protegido. Los `writes` sí distinguen (más estricto).
+- **`external_directory: deny`** en `safe` y `readonly` (medido: no rompe leer a través de enlaces simbólicos ni los
+  comandos relativos).
+- **Advertencia por cambios en el árbol real** durante un trabajo aislado (archivos o `HEAD`): el agente pudo salir
+  del worktree. Es una advertencia, no un rechazo (una edición manual produce lo mismo).
+- **Perfil validado**: `name` es un segmento de ruta seguro, `worktrees.root` absoluta (o `~`) sin `..`, ramas sin
+  los caracteres que git rechaza, patrones válidos, `postgres-db` solo con nombre `*_test`.
+- **Un solo servidor por directorio de estado** y reconciliación segura tras una caída (identidad del proceso).
+- **El MCP v2 dejaba sesiones vivas** porque ejecutaba `opencode run` contra el servicio compartido: un corte por
+  tiempo mataba al cliente pero la sesión seguía editando archivos. La v3 usa `--standalone` (un servidor privado
+  por trabajo, que muere con su grupo de procesos).
+
+Limitaciones conocidas (no resueltas):
+
+- **El shell del agente puede escribir donde quiera** (`echo > ruta`): las reglas `edit` del agente reducen el
+  riesgo, pero la garantía real es la verificación del `git diff` y la advertencia por cambios en el árbol real.
+  Un agente podría escribir **fuera** del repo y de su worktree (p. ej. en `$HOME`); no hay forma de detectarlo
+  sin un sandbox de sistema de archivos.
+- **Archivos ignorados por `.gitignore`** que el agente cree dentro del worktree no aparecen en el diff (ni se
+  commitean); son inofensivos para la rama pero existen en el disco hasta `opencode_cleanup`.
+- **`link` comparte directorios con el repo real** (p. ej. `node_modules`): un `npm install` dentro del trabajo
+  modifica el original. Usar `setup` (`npm ci`) para dependencias propias si la tarea toca dependencias.
+- **El perfil del repo ejecuta comandos** (`setup`, `accept`): se confía en el repo objetivo igual que en sus
+  scripts de `npm`. No usar el orquestador sobre repositorios no confiables.
+- **`concurrency` del perfil** no limita por repositorio todavía (solo `ORQ_CONCURRENCY` global).
+- Los trabajos en cola no sobreviven a un reinicio (pasan a `lost`).
