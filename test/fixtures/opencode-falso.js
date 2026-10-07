@@ -79,6 +79,13 @@ if (env.ORQ_FAKE_VOLCADO) {
       ORQ_FAKE_IGNORA_TERM: env.ORQ_FAKE_IGNORA_TERM ?? null,
       ORQ_FAKE_NIETO: env.ORQ_FAKE_NIETO ?? null,
       ORQ_FAKE_PIDFILE: env.ORQ_FAKE_PIDFILE ?? null,
+      // POR QUÉ además las variables del Gestor: los tests de integración
+      // comprueban que ORQ_JOB_ID/ORQ_WORKTREE/ORQ_BRANCH y las de recursos
+      // (p. ej. TEST_DATABASE_URL) llegan de verdad al proceso de opencode.
+      ORQ_JOB_ID: env.ORQ_JOB_ID ?? null,
+      ORQ_WORKTREE: env.ORQ_WORKTREE ?? null,
+      ORQ_BRANCH: env.ORQ_BRANCH ?? null,
+      TEST_DATABASE_URL: env.TEST_DATABASE_URL ?? null,
     },
   };
   const archivoVolcado = path.resolve(env.ORQ_FAKE_VOLCADO);

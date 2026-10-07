@@ -229,13 +229,15 @@ test('runner: la actividad reinicia el timeout por inactividad', async () => {
     args: [fixture('pulso.js')],
     cwd: dir,
     stdoutPath: path.join(dir, 'out.log'),
-    timeoutMs: 400,
-    idleTimeoutMs: 150,
+    // Márgenes holgados a propósito: bajo carga (muchos procesos a la vez) el arranque de
+    // node puede tardar más que la inactividad y el test fallaba por 'idle' sin ser un bug.
+    timeoutMs: 1500,
+    idleTimeoutMs: 800,
     graceMs: 200,
   });
 
   try {
-    // Con pulsos cada 40 ms nunca se supera la inactividad de 150 ms.
+    // Con pulsos cada 40 ms nunca se supera la inactividad de 800 ms.
     assert.equal(resultado.motivo, 'timeout');
     assert.equal(existeGrupo(resultado.pgid), false);
   } finally {

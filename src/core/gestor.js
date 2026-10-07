@@ -546,6 +546,7 @@ export class Gestor {
 
       // 5) Verificación de alcance (la garantía real, §4)
       this.#guardar(id, { estado: 'verifying' });
+      this.#evento(id, { tipo: 'verificando' });
       const { archivos, resumen } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
       const archivosTrabajo = archivos.filter((archivo) => {
         if (!previos.has(archivo)) return true;
