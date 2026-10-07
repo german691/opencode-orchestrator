@@ -34,6 +34,7 @@ import {
   generarConfigDeTrabajo,
   resolverModo,
 } from './opencode.js';
+import { resumirFallos } from './fallos.js';
 import { elegibles } from './planificador.js';
 import { cargarPerfil, perfilPorDefecto, resolverRaizWorktrees } from './profile.js';
 import { crearProveedor } from './recursos.js';
@@ -628,6 +629,14 @@ export class Gestor {
           motivo: salida.motivo,
           cola: leerColaArchivo(path.join(rutas.dir, 'aceptacion.log'), 2000),
         };
+        // Solo si falló: el bloque de fallos (qué test, qué error) suele estar en stderr o en
+        // medio del stdout; sin esto había que abrir los logs a mano para saber por qué se rechazó.
+        if (salida.motivo !== 'exit' || salida.code !== 0) {
+          aceptado.fallos = resumirFallos({
+            stdout: leerColaArchivo(path.join(rutas.dir, 'aceptacion.log'), 400_000),
+            stderr: leerColaArchivo(path.join(rutas.dir, 'aceptacion.err.log'), 400_000),
+          });
+        }
         if (salida.motivo === 'cancelado') return this.#terminar(id, 'cancelled', { proceso, motivoFin: 'cancelado', aceptacion: aceptado });
         if (salida.motivo !== 'exit' || salida.code !== 0) {
           return this.#terminar(id, 'rejected', {

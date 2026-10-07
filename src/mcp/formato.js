@@ -87,7 +87,9 @@ export function describirTerminado(trabajo, colas = {}) {
   if (r.aceptacion?.ejecutada) {
     const ok = r.aceptacion.exit === 0 && r.aceptacion.motivo === 'exit';
     partes.push(`aceptacion: ${ok ? 'OK' : 'FALLO'} (exit=${r.aceptacion.exit}) $ ${r.aceptacion.cmd}`);
-    if (!ok && r.aceptacion.cola) partes.push(`--- salida de la aceptacion ---\n${cola(r.aceptacion.cola, 1500)}`);
+    // Primero QUÉ falló (bloque de fallos extraído); el final del stdout solo si no se reconoció ninguno.
+    if (!ok && r.aceptacion.fallos) partes.push(`--- fallos de la aceptacion ---\n${cola(r.aceptacion.fallos, 2500)}`);
+    else if (!ok && r.aceptacion.cola) partes.push(`--- salida de la aceptacion ---\n${cola(r.aceptacion.cola, 1500)}`);
   }
   if (colas.salida) partes.push(`--- salida de opencode (final) ---\n${cola(colas.salida, 3000)}`);
   if (colas.errores) partes.push(`--- stderr (final) ---\n${cola(colas.errores, 1000)}`);

@@ -236,6 +236,40 @@ test('3. aceptación que falla -> rejected con exit y cola, sin commit', async (
   await gestor.cerrar();
 });
 
+test('3b. una aceptación que falla informa QUÉ falló (bloque de fallos de stdout o stderr)', async (t) => {
+  const m = await montar(t);
+  const gestor = crearGestor(m.almacen, { fake: m.fake, entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'src/a.js' }), home: m.home });
+
+  const trabajo = await gestor.enviar({
+    prompt: 'escribe src/a.js',
+    cwd: m.repo,
+    mode: 'safe',
+    writes: ['src/**'],
+    // El fallo real queda en el MEDIO del stdout y hay mucho ruido después: el final no lo muestra.
+    accept: 'echo "ok 1 - bien"; echo "not ok 2 - falla simulada"; echo "  error: detalle"; seq 1 1500; echo "ruido en stderr" >&2; exit 3',
+  });
+  const fin = await gestor.esperar(trabajo.id, 15000);
+
+  assert.equal(fin.estado, 'rejected');
+  assert.equal(fin.motivoFin, 'aceptacion');
+  assert.match(fin.resultado.aceptacion.fallos, /^not ok 2 - falla simulada/);
+  assert.doesNotMatch(fin.resultado.aceptacion.cola, /falla simulada/, 'el final del stdout no contiene el fallo: por eso hace falta extraerlo');
+
+  await gestor.cerrar();
+});
+
+test('3c. una aceptación que pasa no deja campo de fallos', async (t) => {
+  const m = await montar(t);
+  const gestor = crearGestor(m.almacen, { fake: m.fake, entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'src/a.js' }), home: m.home });
+  const trabajo = await gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['src/**'], accept: 'echo "not ok falso positivo en un log"; exit 0' });
+  const fin = await gestor.esperar(trabajo.id, 15000);
+
+  assert.equal(fin.estado, 'succeeded');
+  assert.equal(fin.resultado.aceptacion.fallos, undefined);
+
+  await gestor.cerrar();
+});
+
 test('4. los artefactos de la aceptación NO entran al commit', async (t) => {
   const m = await montar(t);
   const gestor = crearGestor(m.almacen, { fake: m.fake,
