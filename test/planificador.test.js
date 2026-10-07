@@ -351,6 +351,39 @@ const ESCENARIOS = [
     esperado: { arrancar: ['a'], bloqueados: [] },
   },
   {
+    // Regresión (cola estancada en vivo): dos veteranos que chocan entre sí, sin nadie
+    // corriendo, se bloqueaban mutuamente. Debe arrancar el primero del orden.
+    nombre: 'anti-inanición: dos veteranos en conflicto no se bloquean entre sí (arranca el primero)',
+    entrada: {
+      cola: ['a', 'b'],
+      corriendo: [],
+      concurrencia: 3,
+      ahora: AHORA,
+      esperaMaximaMs: 60000,
+      trabajos: {
+        a: job({ writes: ['src/x.js'], reads: [], encoladoEn: AHORA - 100000 }),
+        b: job({ writes: ['src/x.js'], reads: [], encoladoEn: AHORA - 90000 }),
+      },
+    },
+    esperado: { arrancar: ['a'], bloqueados: [] },
+  },
+  {
+    nombre: 'anti-inanición: tres veteranos en conflicto arrancan de a uno en orden de llegada y prioridad',
+    entrada: {
+      cola: ['a', 'b', 'c'],
+      corriendo: [],
+      concurrencia: 3,
+      ahora: AHORA,
+      esperaMaximaMs: 60000,
+      trabajos: {
+        a: job({ writes: ['src/x.js'], reads: [], encoladoEn: AHORA - 100000, prioridad: 0 }),
+        b: job({ writes: ['src/x.js'], reads: [], encoladoEn: AHORA - 90000, prioridad: 5 }),
+        c: job({ writes: ['src/x.js'], reads: [], encoladoEn: AHORA - 80000, prioridad: 0 }),
+      },
+    },
+    esperado: { arrancar: ['b'], bloqueados: [] },
+  },
+  {
     nombre: 'sin superar la espera máxima, gana la prioridad',
     entrada: {
       cola: ['a', 'b'],

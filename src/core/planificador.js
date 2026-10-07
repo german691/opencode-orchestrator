@@ -279,6 +279,8 @@ export function elegibles(entrada = {}) {
 
   /** @type {Map<string, object>} descriptores por id, para consultar a los veteranos */
   const porId = new Map(candidatos.map((c) => [c.id, c.trabajo]));
+  /** @type {Map<string, number>} posición en el orden de arranque (prioridad y llegada) */
+  const posicion = new Map(candidatos.map((c, i) => [c.id, i]));
 
   /** @type {string[]} */
   const arrancar = [];
@@ -295,6 +297,13 @@ export function elegibles(entrada = {}) {
     let chocaConVeterano = false;
     for (const idVeterano of veteranos) {
       if (idVeterano === candidato.id) continue;
+      // Un veterano frena siempre a los que NO son veteranos (de eso trata la
+      // anti-inanición), pero entre veteranos manda el orden de arranque: uno solo
+      // frena a los que están DETRÁS de él. Si frenara también a los de adelante, dos
+      // veteranos que chocan entre sí se bloquearían mutuamente para siempre (cola
+      // estancada con cero trabajos corriendo, observado en vivo): el primer
+      // veterano del orden siempre debe poder arrancar.
+      if (veteranos.has(candidato.id) && posicion.get(idVeterano) > posicion.get(candidato.id)) continue;
       const trabajoVeterano = porId.get(idVeterano);
       if (!trabajoVeterano) continue;
       if (
