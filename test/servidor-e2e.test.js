@@ -321,3 +321,31 @@ test('opencode_profile muestra el perfil resuelto y detecta un perfil inválido'
   s.proceso.stdin.end();
   await s.salida;
 });
+
+test('si el cliente se va con stderr roto el servidor termina solo y no queda girando en CPU', async () => {
+  // Regresión (observada en vivo): al irse el cliente, stderr queda con el pipe roto; cada
+  // log() provocaba un EPIPE asíncrono → uncaughtException → otro log → otro EPIPE, en un
+  // bucle infinito que dejaba el proceso huérfano al 100 % de CPU durante horas.
+  const estado = tmp();
+  const hijo = spawn(process.execPath, [SERVIDOR], {
+    env: { ...process.env, ORQ_STATE_DIR: estado },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  servidoresVivos.add(hijo);
+  const salio = new Promise((resolve) => hijo.once('exit', (codigo, senal) => resolve({ codigo, senal })));
+
+  const respondio = new Promise((resolve) => hijo.stdout.once('data', () => resolve(true)));
+  hijo.stdin.write(
+    `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'e2e', version: '1' } } })}\n`,
+  );
+  assert.equal(await Promise.race([respondio, dormir(10000).then(() => false)]), true, 'el servidor debe responder initialize');
+
+  // El cliente "se va": se rompe el pipe de stderr y se cierra la entrada.
+  hijo.stderr.destroy();
+  hijo.stdout.destroy();
+  hijo.stdin.end();
+
+  const resultado = await Promise.race([salio, dormir(10000).then(() => null)]);
+  assert.notEqual(resultado, null, 'el servidor debe terminar solo cuando el cliente se va');
+  servidoresVivos.delete(hijo);
+});

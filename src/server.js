@@ -24,7 +24,20 @@ import { crearServidorMcp } from './mcp/protocolo.js';
 const NOMBRE = 'opencode-orchestrator';
 const VERSION = '3.0.0-dev';
 
-const log = (...partes) => process.stderr.write(`[${NOMBRE}] ${partes.join(' ')}\n`);
+// El log NUNCA puede romper ni realimentar al servidor: si el cliente se fue, el pipe de
+// stderr está roto y cada escritura dispara un EPIPE asíncrono; sin este manejador ese
+// error llegaba a `uncaughtException`, cuyo manejador volvía a loguear y generaba otro
+// EPIPE, en un bucle infinito que dejaba un proceso huérfano al 100 % de CPU (observado
+// en vivo: 11 h de CPU). Se ignoran los errores de escritura de stderr.
+process.stderr.on('error', () => {});
+
+const log = (...partes) => {
+  try {
+    process.stderr.write(`[${NOMBRE}] ${partes.join(' ')}\n`);
+  } catch {
+    /* sin stderr no hay a dónde loguear: se ignora */
+  }
+};
 
 /** Ejecutable de opencode: variable de entorno, ruta nativa de Linux, o el del PATH. */
 function ejecutableDeOpencode() {
@@ -96,6 +109,8 @@ async function main() {
   const cerrar = async (motivo, codigo = 0) => {
     if (cerrando) return;
     cerrando = true;
+    // Red de seguridad: si algo del cierre ordenado se cuelga, el proceso igual termina.
+    setTimeout(() => process.exit(codigo), 30_000).unref();
     log(`cerrando (${motivo})`);
     servidor.detener();
     try {
@@ -119,7 +134,14 @@ async function main() {
   process.on('SIGTERM', () => void cerrar('SIGTERM'));
   process.on('SIGINT', () => void cerrar('SIGINT'));
   process.on('SIGHUP', () => void cerrar('SIGHUP'));
+  // Si el cliente cerró stdout/stdin, no hay nadie para leer respuestas: se cierra.
+  process.stdout.on('error', () => void cerrar('stdout cerrado'));
   process.on('uncaughtException', (error) => {
+    // Un pipe roto (EPIPE) significa que el cliente se fue: se cierra sin loguear más.
+    if (error?.code === 'EPIPE') {
+      void cerrar('pipe roto');
+      return;
+    }
     log('excepción no capturada:', error?.stack ?? error);
     void cerrar('excepción no capturada', 1);
   });
