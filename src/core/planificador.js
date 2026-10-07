@@ -9,8 +9,10 @@
  * Reglas implementadas:
  *  - Cola FIFO con prioridad opcional (mayor prioridad primero; empate por llegada).
  *  - Tope de concurrencia: nunca devuelve más de `concurrencia - corriendo.length`.
- *  - Dependencias `after`: todas deben estar `succeeded`. Si alguna falló/rechazó/
- *    canceló/se perdió, el trabajo queda `bloqueado_por_dependencia`.
+ *  - Dependencias `after`: todas deben estar `succeeded` (o `merged`, que es un
+ *    `succeeded` ya integrado: mismo efecto para el dependiente). Si alguna
+ *    falló/rechazó/canceló/se perdió, el trabajo queda
+ *    `bloqueado_por_dependencia`.
  *  - Conflictos de alcance (§5): un trabajo `isolation: none` con `writes` choca con
  *    cualquier trabajo del mismo repo que lea o escriba patrones superpuestos.
  *    Dos `worktree` cuyos `writes` se superponen se serializan (si
@@ -18,13 +20,22 @@
  *  - Recursos con capacidad (`recursos`: nombre -> capacidad; ausente = 1, exclusivo).
  *  - Un trabajo que no puede arrancar no bloquea a los siguientes.
  *  - Anti-inanición: un trabajo listo que lleva más de `esperaMaximaMs` en cola
- *    reserva su lugar; ningún candidato con conflicto con él lo adelanta.
+ *    reserva su lugar; ningún candidato que choque con él (alcance O recursos)
+ *    lo adelanta.
  */
 
 import { gruposSeSuperponen } from './scope.js';
 
 /** Estados de dependencia que impiden para siempre arrancar un trabajo. */
 const ESTADOS_FALLIDOS = new Set(['failed', 'rejected', 'cancelled', 'lost']);
+
+/**
+ * Estados que SATISFACEN una dependencia `after`. `merged` se incluye a propósito:
+ * es un `succeeded` que ya se integró (§3), y para quien depende de él el efecto es
+ * el mismo. Exigir 'succeeded' exacto dejaría al dependiente esperando para siempre.
+ * @type {ReadonlySet<string>}
+ */
+const ESTADOS_SATISFECHOS = new Set(['succeeded', 'merged']);
 
 /**
  * Obtiene un trabajo de una colección que puede ser Map u objeto plano.
@@ -102,6 +113,25 @@ function seChocan(a, b, serializarEscrituras) {
 }
 
 /**
+ * ¿Dos trabajos piden algún recurso con el mismo nombre?
+ *
+ * POR QUÉ importa para la anti-inanición: dos trabajos que comparten un recurso
+ * compiten por la misma capacidad; si uno es un veterano bloqueado, dejar pasar al
+ * otro puede dejarlo sin hueco indefinidamente.
+ *
+ * @param {object} a trabajo normalizado
+ * @param {object} b trabajo normalizado
+ * @returns {boolean}
+ */
+function comparteRecurso(a, b) {
+  if (a.resources.length === 0 || b.resources.length === 0) return false;
+  for (const recurso of a.resources) {
+    if (b.resources.includes(recurso)) return true;
+  }
+  return false;
+}
+
+/**
  * Capacidad de un recurso (ausente = 1, es decir exclusivo).
  * @param {Record<string, number>} recursos
  * @param {string} nombre
@@ -145,13 +175,18 @@ function estadoDependencia(trabajos, id) {
 }
 
 /**
- * ¿Todas las dependencias `after` están `succeeded`?
- * @param {object} trabajo normalizado
+ * ¿Todas las dependencias `after` están satisfechas?
+ *
+ * `succeeded` y `merged` cuentan por igual: un trabajo ya integrado es un
+ * `succeeded` que cumplió su parte. El resto de estados (incluidos los pendientes
+ * como `queued`/`running`) no satisfacen la dependencia.
+ *
+ * @param {object} trabajo trabajo normalizado
  * @param {Map<string, object>|Record<string, object>|undefined} trabajos
  * @returns {boolean}
  */
 function dependenciasListas(trabajo, trabajos) {
-  return trabajo.after.every((dependencia) => estadoDependencia(trabajos, dependencia) === 'succeeded');
+  return trabajo.after.every((dependencia) => ESTADOS_SATISFECHOS.has(estadoDependencia(trabajos, dependencia)));
 }
 
 /**
@@ -255,12 +290,17 @@ export function elegibles(entrada = {}) {
     if (bloqueadosIds.has(candidato.id)) continue;
     if (!listos.has(candidato.id)) continue; // dependencias aún pendientes
 
-    // Anti-inanición: no adelantar a un veterano con el que chocamos.
+    // Anti-inanición: no adelantar a un veterano con el que chocamos, ya sea por
+    // alcance de archivos o porque ambos compiten por el mismo recurso.
     let chocaConVeterano = false;
     for (const idVeterano of veteranos) {
       if (idVeterano === candidato.id) continue;
       const trabajoVeterano = porId.get(idVeterano);
-      if (trabajoVeterano && seChocan(candidato.trabajo, trabajoVeterano, serializarEscrituras)) {
+      if (!trabajoVeterano) continue;
+      if (
+        seChocan(candidato.trabajo, trabajoVeterano, serializarEscrituras) ||
+        comparteRecurso(candidato.trabajo, trabajoVeterano)
+      ) {
         chocaConVeterano = true;
         break;
       }

@@ -422,6 +422,87 @@ const ESCENARIOS = [
     },
     esperado: { arrancar: [], bloqueados: [{ id: 'a', ...DEP }] },
   },
+  {
+    // Bug (a): `merged` es un `succeeded` ya integrado y debe satisfacer igual.
+    nombre: 'after merged (ya integrado) satisface la dependencia',
+    entrada: {
+      cola: ['a'],
+      corriendo: [],
+      concurrencia: 1,
+      trabajos: { a: job({ after: ['d'] }), d: job({ estado: 'merged' }) },
+    },
+    esperado: { arrancar: ['a'], bloqueados: [] },
+  },
+  {
+    nombre: 'after succeeded y merged a la vez satisface',
+    entrada: {
+      cola: ['a'],
+      corriendo: [],
+      concurrencia: 1,
+      trabajos: {
+        a: job({ after: ['d1', 'd2'] }),
+        d1: job({ estado: 'succeeded' }),
+        d2: job({ estado: 'merged' }),
+      },
+    },
+    esperado: { arrancar: ['a'], bloqueados: [] },
+  },
+  {
+    // Bug (b): el veterano v necesita db+cache; db está ocupado (no puede arrancar
+    // todavía). El candidato c compite por cache y, sin el arreglo, se adelantaría.
+    nombre: 'anti-inanición: no adelantar a un veterano bloqueado por recurso',
+    entrada: {
+      cola: ['v', 'c'],
+      corriendo: ['x'],
+      concurrencia: 2,
+      ahora: AHORA,
+      esperaMaximaMs: 60000,
+      recursos: { db: 1, cache: 1 },
+      trabajos: {
+        v: job({ resources: ['db', 'cache'], encoladoEn: AHORA - 100000, prioridad: 0 }),
+        c: job({ resources: ['cache'], prioridad: 10 }),
+        x: job({ resources: ['db'] }),
+      },
+    },
+    esperado: { arrancar: [], bloqueados: [] },
+  },
+  {
+    // Bug (b) con capacidad > 1: hay hueco para db (capacidad 2, x usa 1), pero si
+    // el candidato se adelanta consume el último hueco y el veterano no arranca.
+    nombre: 'anti-inanición: recurso con capacidad 2 no deja adelantar al candidato',
+    entrada: {
+      cola: ['v', 'c'],
+      corriendo: ['x'],
+      concurrencia: 2,
+      ahora: AHORA,
+      esperaMaximaMs: 60000,
+      recursos: { db: 2 },
+      trabajos: {
+        v: job({ resources: ['db'], encoladoEn: AHORA - 100000, prioridad: 0 }),
+        c: job({ resources: ['db'], prioridad: 10 }),
+        x: job({ resources: ['db'] }),
+      },
+    },
+    esperado: { arrancar: ['v'], bloqueados: [] },
+  },
+  {
+    // La reserva por recurso solo aplica cuando hay recurso compartido: un candidato
+    // con recursos disjuntos sigue arrancando (y en su orden de prioridad).
+    nombre: 'anti-inanición por recurso no bloquea a un candidato sin recurso común',
+    entrada: {
+      cola: ['v', 'c'],
+      corriendo: [],
+      concurrencia: 2,
+      ahora: AHORA,
+      esperaMaximaMs: 60000,
+      recursos: { db: 1 },
+      trabajos: {
+        v: job({ isolation: 'none', writes: ['src/**'], reads: [], resources: ['db'], encoladoEn: AHORA - 100000, prioridad: 0 }),
+        c: job({ isolation: 'none', writes: ['docs/**'], reads: [], resources: ['cache'], prioridad: 10 }),
+      },
+    },
+    esperado: { arrancar: ['c', 'v'], bloqueados: [] },
+  },
 ];
 
 for (const escenario of ESCENARIOS) {
