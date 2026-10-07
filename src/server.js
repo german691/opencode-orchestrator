@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 
 import { Gestor } from './core/gestor.js';
+import { cargarEntornoDeArchivo } from './entorno.js';
 import { AlmacenDeTrabajos } from './core/store.js';
 import { crearHerramientas } from './mcp/herramientas.js';
 import { crearServidorMcp } from './mcp/protocolo.js';
@@ -47,6 +48,10 @@ function herramientasBloqueadas(motivo, herramientas) {
 }
 
 async function main() {
+  // Variables opcionales de ~/.config/opencode-orchestrator/env (no pisan las del entorno).
+  const entornoArchivo = cargarEntornoDeArchivo({ log });
+  if (entornoArchivo.cargadas.length > 0) log(`variables cargadas del archivo de entorno: ${entornoArchivo.cargadas.join(', ')}`);
+
   const almacen = new AlmacenDeTrabajos();
   const concurrencia = Math.min(16, enteroDeEntorno('ORQ_CONCURRENCY', 3));
   const esperaMs = enteroDeEntorno('ORQ_WAIT_MS', 45000);
