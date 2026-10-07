@@ -703,3 +703,53 @@ test('conCerrojo serializa por repo, libera tras un error y no cruza repos disti
   assert.equal(lentoTermino, false, 'otro repo no debe esperar al cerrojo de raiz');
   await lento;
 });
+
+test('commitearTrabajo con soloArchivos commitea ÚNICAMENTE esas rutas (lo que genera un comando posterior no entra)', async () => {
+  const { raiz, rootDir } = await montar();
+  const res = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'solo1', rootDir });
+
+  // Dos archivos "del trabajo" (uno nuevo, uno borrado) y un artefacto posterior.
+  fs.writeFileSync(path.join(res.ruta, 'verificado con [corchetes].txt'), 'v\n');
+  fs.rmSync(path.join(res.ruta, 'base.txt'));
+  fs.writeFileSync(path.join(res.ruta, 'artefacto.log'), 'generado por la aceptación\n');
+
+  const sha = await commitearTrabajo({
+    ruta: res.ruta,
+    mensaje: 'solo lo verificado',
+    soloArchivos: ['verificado con [corchetes].txt', 'base.txt'],
+  });
+  assert.ok(sha, 'debe commitear');
+
+  const arbol = (await gitOK(['ls-tree', '-r', '--name-only', sha], res.ruta)).trim().split('\n');
+  assert.ok(arbol.includes('verificado con [corchetes].txt'), 'el verificado entra (nombre con corchetes, literal)');
+  assert.equal(arbol.includes('base.txt'), false, 'el borrado verificado queda borrado en el commit');
+  assert.equal(arbol.includes('artefacto.log'), false, 'el artefacto posterior NO entra');
+  // El artefacto sigue en el árbol de trabajo, sin commitear.
+  assert.equal(fs.existsSync(path.join(res.ruta, 'artefacto.log')), true);
+});
+
+test('commitearTrabajo con soloArchivos vacío no agrega nada y nunca cae a "."', async () => {
+  const { raiz, rootDir } = await montar();
+  const res = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'solo2', rootDir });
+  fs.writeFileSync(path.join(res.ruta, 'suelto.txt'), 's\n');
+  assert.equal(await commitearTrabajo({ ruta: res.ruta, mensaje: 'nada', soloArchivos: [] }), null);
+  await assert.rejects(
+    commitearTrabajo({ ruta: res.ruta, mensaje: 'x', soloArchivos: ['../fuera.txt'] }),
+    /soloArchivos|\.\./,
+  );
+});
+
+test('cambiosDelWorktree lista los ARCHIVOS de un directorio nuevo, no el directorio colapsado', async () => {
+  const { raiz, baseCommit, rootDir } = await montar();
+  const res = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'dirnuevo', rootDir });
+
+  // git status colapsa por defecto un directorio sin trackear a 'src/': el patrón
+  // 'src/**' no coincide con 'src/' y un trabajo legítimo se rechazaba por alcance.
+  fs.mkdirSync(path.join(res.ruta, 'src', 'profundo'), { recursive: true });
+  fs.writeFileSync(path.join(res.ruta, 'src', 'a.js'), 'a\n');
+  fs.writeFileSync(path.join(res.ruta, 'src', 'profundo', 'b.js'), 'b\n');
+
+  const { archivos, resumen } = await cambiosDelWorktree({ ruta: res.ruta, baseCommit });
+  assert.deepEqual(archivos, ['src/a.js', 'src/profundo/b.js']);
+  assert.deepEqual(resumen, { agregados: 2, modificados: 0, borrados: 0 });
+});

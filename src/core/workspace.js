@@ -658,7 +658,7 @@ export async function cambiosDelWorktree({ ruta, baseCommit, ignorar = [] } = {}
   }
 
   // Sin trackear (solo `??`; los ignorados por .gitignore no aparecen aquí).
-  const status = await git(['status', '--porcelain=v1', '-z'], { cwd: ruta });
+  const status = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: ruta });
   if (status.codigo !== 0) {
     throw new ErrorDeWorkspace(`No se pudo calcular el estado: ${status.stderr.trim()}`);
   }
@@ -704,10 +704,13 @@ export async function cambiosDelWorktree({ ruta, baseCommit, ignorar = [] } = {}
  * @param {string} opciones.mensaje mensaje de commit
  * @param {string} [opciones.autor] autor en formato `Nombre <email>`
  * @param {string[]} [opciones.excluir] rutas relativas que NO se deben commitear
+ * @param {string[]} [opciones.soloArchivos] si se indica, SOLO se agregan estas rutas
+ *   (ya verificadas contra el alcance): lo que genere un comando posterior, como los
+ *   artefactos de la aceptación, no entra al commit
  * @returns {Promise<string|null>} sha del commit, o `null` si no había cambios
  * @throws {ErrorDeWorkspace}
  */
-export async function commitearTrabajo({ ruta, mensaje, autor, excluir = [] } = {}) {
+export async function commitearTrabajo({ ruta, mensaje, autor, excluir = [], soloArchivos } = {}) {
   if (typeof ruta !== 'string' || ruta.trim() === '') {
     throw new ErrorDeWorkspace('commitearTrabajo espera una ruta de worktree');
   }
@@ -723,12 +726,27 @@ export async function commitearTrabajo({ ruta, mensaje, autor, excluir = [] } = 
   }
   if (!Array.isArray(excluir)) throw new ErrorDeWorkspace('excluir debe ser un array de rutas relativas');
 
-  const argsAdd = ['add', '-A', '--', '.'];
-  for (let indice = 0; indice < excluir.length; indice += 1) {
-    const relativa = validarRutaRelativa(excluir[indice], indice, 'excluir');
-    argsAdd.push(pathspecExclusion(relativa));
+  if (soloArchivos !== undefined) {
+    if (!Array.isArray(soloArchivos)) {
+      throw new ErrorDeWorkspace('soloArchivos debe ser un array de rutas relativas');
+    }
+    // Pathspecs literales: un nombre con '*' o '[' no debe expandirse. Sin archivos
+    // verificados no se agrega nada (jamás se cae a `.`).
+    if (soloArchivos.length > 0) {
+      const argsSolo = ['add', '-A', '--'];
+      for (let indice = 0; indice < soloArchivos.length; indice += 1) {
+        argsSolo.push(`:(literal)${validarRutaRelativa(soloArchivos[indice], indice, 'soloArchivos')}`);
+      }
+      await gitOLanza(argsSolo, { cwd: ruta });
+    }
+  } else {
+    const argsAdd = ['add', '-A', '--', '.'];
+    for (let indice = 0; indice < excluir.length; indice += 1) {
+      const relativa = validarRutaRelativa(excluir[indice], indice, 'excluir');
+      argsAdd.push(pathspecExclusion(relativa));
+    }
+    await gitOLanza(argsAdd, { cwd: ruta });
   }
-  await gitOLanza(argsAdd, { cwd: ruta });
   // `--quiet` con exit 0 = no hay nada staged; exit 1 = hay cambios.
   const sinCambios = await git(['diff', '--cached', '--quiet'], { cwd: ruta });
   if (sinCambios.codigo === 0) return null;
@@ -885,7 +903,7 @@ export async function integrar({ repoRaiz, rama, integrationBranch, base, rootDi
  * @throws {ErrorDeWorkspace} si git no puede leer el estado
  */
 async function arbolSucio(ruta) {
-  const resultado = await git(['status', '--porcelain=v1', '-z'], { cwd: ruta });
+  const resultado = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: ruta });
   if (resultado.codigo !== 0) {
     throw new ErrorDeWorkspace(
       `No se pudo leer el estado del worktree de integración: ${resultado.stderr.trim()}`,
