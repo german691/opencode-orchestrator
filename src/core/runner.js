@@ -131,6 +131,12 @@ export async function matarGrupo(pgid, graceMs = 5000) {
  * @param {number} [opciones.idleTimeoutMs] tope sin bytes en stdout/stderr
  * @param {number} [opciones.graceMs=5000] margen SIGTERM -> SIGKILL
  * @param {(evento: { canal: 'stdout'|'stderr', texto: string }) => void} [opciones.onSalida]
+ * @param {(datos: { pid: number, pgid: number }) => void} [opciones.onLanzado] callback
+ *   SÍNCRONO que se dispara justo tras un spawn exitoso (con el pid/pgid reales),
+ *   antes de cualquier otra cosa. POR QUÉ: el gestor necesita persistir el pgid en
+ *   cuanto nace el grupo; si esperara a `onSalida` o a la resolución, un fallo
+ *   temprano dejaría una ventana en la que el proceso existiría sin constancia.
+ *   No se invoca si el binario no existe (spawn sin pid).
  * @param {AbortSignal} [opciones.signal] señal de cancelación
  * @returns {Promise<{ code: number|null, signal: string|null, motivo: string, duracionMs: number, pid: number|null, pgid: number|null, mensaje: string|null }>}
  */
@@ -146,6 +152,7 @@ export function ejecutar(opciones = {}) {
     idleTimeoutMs,
     graceMs = 5000,
     onSalida,
+    onLanzado,
     signal,
   } = opciones || {};
 
@@ -406,6 +413,18 @@ export function ejecutar(opciones = {}) {
 
   estado.pid = Number.isInteger(child.pid) ? child.pid : null;
   estado.pgid = estado.pid; // con detached, el pid del líder ES el id del grupo
+
+  // Aviso síncrono del lanzamiento: con el grupo ya identificable y antes de
+  // suscribirnos a la salida, para que quien persista el pgid no pierda la
+  // carrera contra el primer dato del proceso. Un callback que lanza no debe
+  // tumbar la corrida, por eso se aísla.
+  if (estado.pid !== null && typeof onLanzado === 'function') {
+    try {
+      onLanzado({ pid: estado.pid, pgid: estado.pgid });
+    } catch {
+      /* el observador no debe tumbar la corrida */
+    }
+  }
 
   if (child.stdout) {
     child.stdout.on('data', (fragmento) => {

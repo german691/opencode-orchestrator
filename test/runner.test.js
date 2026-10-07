@@ -475,3 +475,53 @@ test('runner: matarGrupo y existeGrupo son reutilizables', async () => {
     }
   }
 });
+
+test('runner: onLanzado se invoca una vez, con el pid correcto, antes del primer onSalida', async () => {
+  const dir = dirTemporal();
+  const orden = [];
+  /** @type {Array<{ pid: number, pgid: number }>} */
+  const lanzamientos = [];
+
+  const resultado = await correr({
+    cmd: NODE,
+    args: [fixture('eco.js'), '0'],
+    cwd: dir,
+    stdoutPath: path.join(dir, 'out.log'),
+    timeoutMs: 5000,
+    graceMs: 200,
+    onLanzado: (datos) => {
+      lanzamientos.push(datos);
+      orden.push('lanzado');
+    },
+    onSalida: () => orden.push('salida'),
+  });
+
+  try {
+    assert.equal(lanzamientos.length, 1, 'onLanzado debe invocarse exactamente una vez');
+    assert.equal(lanzamientos[0].pid, resultado.pid);
+    assert.equal(lanzamientos[0].pgid, resultado.pgid);
+    assert.equal(orden[0], 'lanzado', 'debe ser lo primero que se observa');
+    assert.ok(orden.includes('salida'));
+  } finally {
+    await asegurarLimpio(resultado.pgid, [resultado.pid]);
+  }
+});
+
+test('runner: onLanzado no se invoca si el cmd no existe', async () => {
+  const dir = dirTemporal();
+  let llamado = 0;
+  const resultado = await correr({
+    cmd: path.join(dir, 'no-existe-bin'),
+    cwd: dir,
+    stdoutPath: path.join(dir, 'out.log'),
+    timeoutMs: 2000,
+    graceMs: 100,
+    onLanzado: () => {
+      llamado += 1;
+    },
+  });
+
+  assert.equal(resultado.motivo, 'error_al_lanzar');
+  assert.equal(llamado, 0);
+  assert.equal(resultado.pid, null);
+});
