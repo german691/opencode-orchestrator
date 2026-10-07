@@ -256,3 +256,17 @@ test('resolverRaizWorktrees maneja ~ solo y raíces sin tilde', () => {
 test('resolverRaizWorktrees usa defaults si falta la raíz', () => {
   assert.equal(resolverRaizWorktrees({ name: 'x' }, '/home/u'), '/home/u/work/x');
 });
+
+test('validarPerfil: el template del recurso postgres-db es OPCIONAL pero si se indica no puede estar vacío', () => {
+  const base = { version: 1, name: 'x' };
+  const recurso = { kind: 'postgres-db', adminUrlEnv: 'ADMIN', name: 'x_{job}_test', exportAs: 'TEST_DATABASE_URL' };
+  assert.doesNotThrow(() => validarPerfil({ ...base, resources: { db: recurso } }), 'sin template es válido');
+  assert.doesNotThrow(() => validarPerfil({ ...base, resources: { db: { ...recurso, template: 'plantilla_test' } } }));
+  for (const malo of ['', '   ', 5, null]) {
+    assert.throws(
+      () => validarPerfil({ ...base, resources: { db: { ...recurso, template: malo } } }),
+      (error) => error.errores.some((e) => e.includes('resources.db.template')),
+      `template ${JSON.stringify(malo)} debe rechazarse`,
+    );
+  }
+});

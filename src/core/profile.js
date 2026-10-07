@@ -227,8 +227,9 @@ export function validarPerfil(objeto) {
         if (!esNombreVariableEnv(recurso.adminUrlEnv)) {
           errores.push(`${base}.adminUrlEnv: nombre de variable de entorno inválido`);
         }
-        if (typeof recurso.template !== 'string' || recurso.template.trim() === '') {
-          errores.push(`${base}.template: debe ser un texto no vacío`);
+        // `template` es OPCIONAL (sin él se crea una base vacía que la app migra por su cuenta).
+        if (recurso.template !== undefined && (typeof recurso.template !== 'string' || recurso.template.trim() === '')) {
+          errores.push(`${base}.template: debe ser un texto no vacío si se indica`);
         }
         if (typeof recurso.name !== 'string' || !recurso.name.includes('{job}')) {
           errores.push(`${base}.name: debe contener '{job}'`);
