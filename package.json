@@ -1,0 +1,14 @@
+{
+  "name": "opencode-orchestrator",
+  "version": "3.0.0-dev",
+  "description": "Servidor MCP que orquesta varias instancias de opencode en paralelo con aislamiento y alcance verificado",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "bin": { "opencode-orchestrator": "src/server.js" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/",
+    "check": "node --check src/server.js"
+  }
+}
