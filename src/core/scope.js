@@ -59,22 +59,6 @@ function esUniversal(patron) {
 }
 
 /**
- * ¿Un prefijo literal comparte ubicación con el otro respetando límites de
- * directorio? La raíz '' NO es prefijo de 'docs': son ubicaciones distintas
- * (archivos de la raíz vs. contenido de docs). Por eso '*.md' y 'docs/**' no
- * se superponen.
- * @param {string} a
- * @param {string} b
- * @returns {boolean}
- */
-function prefijoComparte(a, b) {
-  if (a === b) return true;
-  if (a !== '' && b.startsWith(`${a}/`)) return true;
-  if (b !== '' && a.startsWith(`${b}/`)) return true;
-  return false;
-}
-
-/**
  * ¿El patrón está confinado a la raíz (no contiene '/')? Un patrón de la raíz solo
  * puede alcanzar archivos de la raíz, nunca contenido dentro de un directorio.
  * @param {string} patron
@@ -225,14 +209,11 @@ function comunSecuencia(a, b) {
  *     la raíz, así que choca con cualquier otro patrón de la raíz (literal o con
  *     comodín). No alcanza a patrones con '/' (p. ej. 'docs/**'), que viven en
  *     directorios distintos.
- *  3. Prefijos literales que comparten directorio: conserva el comportamiento
- *     histórico ('backend/**' con 'backend/src/**', límites de directorio, etc.).
- *  4. Comodín no confinado a un segmento ('a**b'): sin modelo fiable, ante la duda
+ *  3. Comodín no confinado a un segmento ('a**b'): sin modelo fiable, ante la duda
  *     superponemos.
- *  5. Intersección real por segmentos: cubre '?', '*' dentro de un segmento y '**'
- *     en cualquier posición, incluidos los casos que la heurística de prefijos
- *     resolvía como falso negativo (literal raíz contra comodín raíz, comodín en
- *     el primer segmento, '?' en un directorio, etc.).
+ *  4. Intersección real por segmentos: cubre literales, '?', '*' dentro de un
+ *     segmento y '**' en cualquier posición (prefijos de directorio incluidos). Dos
+ *     literales solo se superponen si son la misma ruta.
  *
  * @param {string} a patrón
  * @param {string} b patrón
@@ -246,13 +227,14 @@ export function seSuperponen(a, b) {
   const ambasDeRaiz = esDeRaiz(a) && esDeRaiz(b);
   if (ambasDeRaiz && (tieneComodin(a) || tieneComodin(b))) return true;
 
-  // 3) Prefijos literales que comparten directorio.
-  if (prefijoComparte(prefijoLiteral(a), prefijoLiteral(b))) return true;
-
-  // 4) Comodín que cruza segmentos: conservador.
+  // 3) Comodín que cruza segmentos: conservador.
   if (tieneComodinCruzado(a) || tieneComodinCruzado(b)) return true;
 
-  // 5) Intersección por segmentos (sound: nunca false de menos).
+  // 4) Intersección por segmentos (sound: nunca false de menos). Esta regla ya cubre
+  //    los prefijos de directorio ('backend/**' con 'backend/src/**'); la antigua
+  //    regla de "prefijos literales que comparten directorio" se quitó porque daba
+  //    superposición entre dos archivos literales DISTINTOS de la misma carpeta
+  //    (p. ej. 'src/lib/a.ts' con 'src/lib/b.ts') y serializaba trabajos disjuntos.
   return comunSecuencia(segmentos(a), segmentos(b));
 }
 

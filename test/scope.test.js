@@ -34,6 +34,23 @@ test('seSuperponen NO confunde prefijos parecidos por límite de directorio', ()
   assert.equal(seSuperponen('backend/prisma/migrations/**', 'backend/prisma/migrations-x/a.sql'), false);
 });
 
+test('seSuperponen: dos literales distintos de la misma carpeta NO se superponen; el mismo sí', () => {
+  // Regresión (observada en vivo): se serializaban trabajos con archivos disjuntos de un mismo directorio.
+  assert.equal(seSuperponen('backend/src/lib/archivos.ts', 'backend/src/lib/mailer.ts'), false);
+  assert.equal(seSuperponen('backend/src/lib/mailer.ts', 'backend/src/lib/archivos.ts'), false);
+  assert.equal(seSuperponen('backend/src/lib/mailer.ts', 'backend/src/lib/mailer.ts'), true);
+  assert.equal(seSuperponen('package.json', 'README.md'), false);
+});
+
+test('seSuperponen: comodín en un nombre contra literales de la misma carpeta', () => {
+  assert.equal(seSuperponen('t/auth-*.test.ts', 't/archivos-contenido.test.ts'), false);
+  assert.equal(seSuperponen('t/auth-*.test.ts', 't/auth-claves.test.ts'), true);
+  assert.equal(seSuperponen('t/*.test.ts', 't/auth-claves.test.ts'), true);
+  assert.equal(seSuperponen('t/auth-*', 't/soporte/x.ts'), false);
+  assert.equal(seSuperponen('t/soporte/**', 't/soporte/correo.ts'), true);
+  assert.equal(seSuperponen('t/soporte/**', 't/auth-claves.test.ts'), false);
+});
+
 test('** se superpone con todo', () => {
   assert.equal(seSuperponen('**', 'docs/**'), true);
   assert.equal(seSuperponen('docs/**', '**'), true);
@@ -77,7 +94,10 @@ test('seSuperponen: comodín dentro de un segmento de directorio', () => {
 });
 
 test('seSuperponen: "**" en el medio del patrón', () => {
-  assert.equal(seSuperponen('a/**/b', 'a/x/b/c'), true);
+  // 'a/**/b' solo casa archivos que TERMINAN en 'b'; 'a/x/b/c' no es uno de ellos (antes la
+  // regla de prefijos lo daba por superpuesto de más). El universo de soundness lo respalda.
+  assert.equal(seSuperponen('a/**/b', 'a/x/b/c'), false);
+  assert.equal(seSuperponen('a/**/b', 'a/x/b/**'), true);
   assert.equal(seSuperponen('a/**/b', 'a/x/b'), true);
   assert.equal(seSuperponen('a/**/b', 'a/b'), true);
 });
