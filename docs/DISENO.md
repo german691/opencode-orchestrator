@@ -115,7 +115,7 @@ Archivo `.opencode-orchestrator.json` en la raíz del repo objetivo (versionado)
   "accept": {
     "default": "cd backend && npm run lint",
     "unit": "cd backend && npm test",
-    "integracion": "cd backend && npx vitest run --config vitest.integracion.config.ts {files}"
+    "integracion": "cd backend && npx vitest run --config vitest.integracion.config.ts"
   }
 }
 ```
@@ -145,7 +145,7 @@ perfiles inválidos con un mensaje claro. Sin perfil, se usan valores seguros po
   `jobs/<id>/job.json`, `stdout.log`, `stderr.log`, `events.jsonl`. Al arrancar, los trabajos
   `running` cuyo pid ya no existe pasan a `lost`; si el pid existe y es del servidor anterior,
   se mata su grupo (no se dejan huérfanos).
-- Concurrencia por defecto 3 (`concurrency` del perfil o `ORQ_CONCURRENCY`).
+- Concurrencia por defecto 3, configurable con `ORQ_CONCURRENCY` (1 a 16) y aplicada al servidor completo. El campo `concurrency` del perfil se valida pero todavía no limita por repositorio (reservado).
 - Registro de auditoría en `events.jsonl` por trabajo y `audit.log` global.
 
 ## 9. Integración
@@ -163,7 +163,7 @@ perfiles inválidos con un mensaje claro. Sin perfil, se usan valores seguros po
 | `opencode_coding` | Encola un trabajo; espera hasta ~45 s; devuelve resultado o `STILL RUNNING` + `job_id` |
 | `opencode_wait` | Espera hasta ~45 s a un trabajo |
 | `opencode_list` | Lista trabajos (estado, edad, título, alcance, cola y recursos ocupados) |
-| `opencode_logs` | Cola de stdout/stderr/eventos de un trabajo (`tail`, `stream`) |
+| `opencode_logs` | Final de stdout, stderr, events o aceptacion de un trabajo (`bytes`), también mientras corre |
 | `opencode_cancel` | Cancela un trabajo (mata el grupo de procesos) |
 | `opencode_merge` | Integra un trabajo `succeeded` en la rama de integración |
 | `opencode_cleanup` | Elimina worktrees, ramas y recursos de trabajos terminados |
@@ -211,3 +211,21 @@ perfiles inválidos con un mensaje claro. Sin perfil, se usan valores seguros po
 | En las reglas de permiso **gana la ÚLTIMA que coincide**: `{"*":"deny","a/**":"allow","a/secreto/**":"deny"}` bloquea `a/secreto`, pero con el `deny` antes del `allow` no | Orden obligatorio del agente generado: `"*": deny`, luego `writes: allow`, y **al final `protected: deny`** |
 | La edición por herramienta se puede acotar, pero un comando de shell (`echo > ruta`) podría escribir fuera de `writes` | Confirma que la **verificación posterior del `git diff`** (§4) es la garantía real y las reglas del agente solo reducen el riesgo |
 | `--auto` aprueba lo no denegado explícitamente; lo denegado sigue denegado | Se usa `--auto` y toda restricción se expresa como `deny` explícito |
+
+## 15. Estado de implementación (v3.0.0-dev)
+
+Implementado y probado: planificador con bloqueos de alcance, runner con grupo de procesos, worktrees git con
+cerrojo por repo, almacén persistente con identidad de proceso y bloqueo de instancia, adaptador de opencode con
+configuración de agente por trabajo (`OPENCODE_CONFIG`), recursos `postgres-db`, gestor con el ciclo de vida
+completo (verificación de alcance, aceptación, commit de lo verificado, integración, limpieza, cierre) y servidor
+MCP con las 8 herramientas.
+
+Decisiones de implementación que se apartan del texto original:
+
+- El comando de aceptación es estático (sin `{files}`): el perfil lo declara completo.
+- El commit del trabajo incluye **solo los archivos verificados** contra el alcance; los artefactos que genere la
+  aceptación quedan sin commitear.
+- Un trabajo `isolation: none` no produce rama ni commit; los archivos ya modificados antes de empezar no cuentan
+  como violación si no cambian durante el trabajo.
+- `opencode_cleanup` y `opencode_merge` operan sobre trabajos terminados; `limpiar` no borra el registro.
+- Pendiente (Fase 3): `opencode_mutate`, plantillas de tarea, métricas de consumo y `concurrency` por perfil.
