@@ -71,10 +71,12 @@ function quitarBarrasFinales(texto) {
  * Compila un patrón glob a una RegExp anclada (^...$).
  *
  * @param {string} patron patrón relativo, p. ej. 'src/**' o un '.env' a cualquier nivel
+ * @param {{ ignorarMayusculas?: boolean }} [opciones] sin distinguir mayúsculas (se usa para los
+ *   patrones PROTEGIDOS: el repo real puede estar en un sistema de archivos que no las distingue)
  * @returns {RegExp} expresión anclada lista para `test`
  * @throws {Error} si el patrón es vacío, no es string, es absoluto o contiene '..'
  */
-export function compilar(patron) {
+export function compilar(patron, opciones = {}) {
   if (typeof patron !== 'string' || patron.length === 0) {
     throw new Error('El patrón glob debe ser un texto no vacío');
   }
@@ -125,7 +127,7 @@ export function compilar(patron) {
     i += 1;
   }
   expresion += '$';
-  return new RegExp(expresion);
+  return new RegExp(expresion, opciones.ignorarMayusculas ? 'i' : '');
 }
 
 /**
@@ -136,11 +138,12 @@ export function compilar(patron) {
  *
  * @param {string} patron patrón relativo
  * @param {string} ruta ruta relativa al repositorio
+ * @param {{ ignorarMayusculas?: boolean }} [opciones]
  * @returns {boolean}
  * @throws {Error} si `patron` es inválido
  */
-export function coincide(patron, ruta) {
-  const regex = compilar(patron);
+export function coincide(patron, ruta, opciones = {}) {
+  const regex = compilar(patron, opciones);
   if (typeof ruta !== 'string' || ruta.length === 0) return false;
 
   const normalizada = normalizarSeparadores(ruta);

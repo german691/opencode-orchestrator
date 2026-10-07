@@ -331,7 +331,10 @@ export function verificarCambios(entrada = {}) {
     vistos.add(ruta);
 
     let motivo = null;
-    if (protegidos.some((patron) => coincide(patron, ruta))) {
+    // Los protegidos NO distinguen mayúsculas: el repo real puede vivir en un sistema de
+    // archivos que no las distingue (drvfs de Windows) mientras el worktree está en ext4, y
+    // 'Backend/prisma/MIGRATIONS/x' caería sobre el directorio protegido al integrarse.
+    if (protegidos.some((patron) => coincide(patron, ruta, { ignorarMayusculas: true }))) {
       motivo = 'protegido';
     } else if (modo === 'readonly') {
       motivo = 'solo_lectura';

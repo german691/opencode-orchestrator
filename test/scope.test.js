@@ -308,3 +308,16 @@ test('seSuperponen: soundness sobre un universo (ruta común ⇒ true) y simetr�
     `se esperaban al menos 3600 pares, se verificaron ${paresVerificados}`,
   );
 });
+
+test('verificarCambios: los protegidos NO distinguen mayúsculas (sistemas de archivos de Windows) pero writes sí', () => {
+  const r = verificarCambios({
+    archivosCambiados: ['Backend/prisma/MIGRATIONS/0001.sql', 'BACKEND/src/a.js', 'backend/src/b.js'],
+    writes: ['backend/src/**', 'Backend/**'],
+    protegidos: ['backend/prisma/migrations/**'],
+    modo: 'safe',
+  });
+  assert.deepEqual(r.violaciones, [
+    { ruta: 'Backend/prisma/MIGRATIONS/0001.sql', motivo: 'protegido' },
+    { ruta: 'BACKEND/src/a.js', motivo: 'fuera_de_alcance' },
+  ]);
+});

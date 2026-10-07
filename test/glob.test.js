@@ -109,3 +109,13 @@ test('un comodín ** embebido sin barra también cruza directorios', () => {
   assert.equal(coincide('a/**b', 'a/b'), true);
   assert.equal(coincide('a/**b', 'ab'), false);
 });
+
+test('coincide: por defecto distingue mayúsculas y con ignorarMayusculas no', () => {
+  assert.equal(coincide('backend/prisma/migrations/**', 'Backend/prisma/MIGRATIONS/x.sql'), false);
+  assert.equal(coincide('backend/prisma/migrations/**', 'Backend/prisma/MIGRATIONS/x.sql', { ignorarMayusculas: true }), true);
+  assert.equal(coincide('**/.env', 'a/.ENV', { ignorarMayusculas: true }), true);
+  // Ignorar mayúsculas no relaja nada más: sigue respetando límites de directorio.
+  assert.equal(coincide('src/**', 'SRCX/a.js', { ignorarMayusculas: true }), false);
+  assert.equal(compilar('A/**', { ignorarMayusculas: true }).flags, 'i');
+  assert.equal(compilar('A/**').flags, '');
+});
