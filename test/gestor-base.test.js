@@ -77,3 +77,19 @@ test('si HEAD del árbol real se mueve durante un trabajo aislado también se ad
   assert.match(fin.resultado.advertencias[0], /\(HEAD movido\)/);
   await gestor.cerrar();
 });
+
+test('los esperar() que vencen por tiempo no dejan esperadores registrados (sin fuga en sondeos repetidos)', async (t) => {
+  const m = await montar(t);
+  const gestor = crearGestor(m.almacen, {
+    entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'src/a.js', ORQ_FAKE_DORMIR: '1500' }),
+    home: m.home,
+  });
+  const trabajo = await gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['src/**'] });
+  for (let i = 0; i < 5; i += 1) assert.equal(await gestor.esperar(trabajo.id, 20), null, 'sigue activo');
+  assert.equal(gestor.esperadores.get(trabajo.id)?.size ?? 0, 0, 'ningún esperador vencido queda registrado');
+
+  const fin = await gestor.esperar(trabajo.id, 15000);
+  assert.equal(fin.estado, 'succeeded');
+  assert.equal(gestor.esperadores.size, 0);
+  await gestor.cerrar();
+});

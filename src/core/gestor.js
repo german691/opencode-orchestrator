@@ -726,6 +726,13 @@ export class Gestor {
         if (hecho) return;
         hecho = true;
         clearTimeout(temporizador);
+        // Si venció por tiempo el cierre sigue registrado: se quita para que los sondeos
+        // repetidos (opencode_wait cada ~45 s) no acumulen esperadores sin límite.
+        const grupo = this.esperadores.get(id);
+        if (grupo) {
+          grupo.delete(fin);
+          if (grupo.size === 0) this.esperadores.delete(id);
+        }
         resolve(esTerminal(this.trabajos.get(id)?.estado) ? this.trabajos.get(id) : null);
       };
       const temporizador = setTimeout(fin, Math.max(0, ms));
