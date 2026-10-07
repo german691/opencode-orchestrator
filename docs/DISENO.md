@@ -200,3 +200,14 @@ perfiles inválidos con un mensaje claro. Sin perfil, se usan valores seguros po
   `after`, `opencode_merge`, `opencode_cleanup`.
 - **Fase 3 (productividad)**: plantillas de tarea, `opencode_mutate` (mutación automática con
   restauración garantizada), revisores de solo lectura en paralelo, métricas de consumo.
+
+## 14. Hallazgos adicionales de la Fase 0 (medidos con opencode 2.0.24 en WSL)
+
+| Hecho | Consecuencia en el diseño |
+| --- | --- |
+| Un archivo de configuración apuntado por **`OPENCODE_CONFIG`** se fusiona con la configuración global y admite agentes definidos en línea (`agent.<nombre>.permission`) | El agente de cada trabajo se genera como un JSON en el directorio de estado del trabajo y se pasa por `OPENCODE_CONFIG`: **no se escribe ningún archivo en el worktree** |
+| **`OPENCODE_CONFIG_DIR` reemplaza** la configuración global (se perdió el modelo y cayó a otro proveedor) | No se usa jamás `OPENCODE_CONFIG_DIR` |
+| Los permisos `edit` aceptan **patrones de ruta** (`"allowed/**": "allow"`) y opencode los respeta (rechaza lo demás) | `writes` se traduce a reglas `edit` del agente (mejor esfuerzo) |
+| En las reglas de permiso **gana la ÚLTIMA que coincide**: `{"*":"deny","a/**":"allow","a/secreto/**":"deny"}` bloquea `a/secreto`, pero con el `deny` antes del `allow` no | Orden obligatorio del agente generado: `"*": deny`, luego `writes: allow`, y **al final `protected: deny`** |
+| La edición por herramienta se puede acotar, pero un comando de shell (`echo > ruta`) podría escribir fuera de `writes` | Confirma que la **verificación posterior del `git diff`** (§4) es la garantía real y las reglas del agente solo reducen el riesgo |
+| `--auto` aprueba lo no denegado explícitamente; lo denegado sigue denegado | Se usa `--auto` y toda restricción se expresa como `deny` explícito |
