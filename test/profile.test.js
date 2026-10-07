@@ -1,0 +1,258 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  cargarPerfil,
+  validarPerfil,
+  perfilPorDefecto,
+  resolverRaizWorktrees,
+  ErrorDePerfil,
+} from '../src/core/profile.js';
+
+const PERFIL_VALIDO = {
+  version: 1,
+  name: 'sistema',
+  baseBranch: 'dev',
+  integrationBranch: 'staging',
+  concurrency: 3,
+  protected: ['backend/prisma/migrations/**', '**/.env', '.opencode-orchestrator.json'],
+  worktrees: { root: '~/work/{name}', link: ['backend/node_modules'], setup: ['npm ci'] },
+  env: { NODE_ENV: 'test' },
+  resources: {
+    db: {
+      kind: 'postgres-db',
+      adminUrlEnv: 'ORQ_PG_ADMIN_URL',
+      template: 'compras_test',
+      name: 'compras_{job}_test',
+      exportAs: 'TEST_DATABASE_URL',
+    },
+  },
+  accept: { default: 'cd backend && npm run lint' },
+};
+
+test('perfilPorDefecto devuelve valores seguros', () => {
+  const perfil = perfilPorDefecto('mi-repo');
+  assert.equal(perfil.version, 1);
+  assert.equal(perfil.name, 'mi-repo');
+  assert.equal(perfil.baseBranch, 'main');
+  assert.equal(perfil.integrationBranch, 'staging');
+  assert.equal(perfil.concurrency, 3);
+  assert.deepEqual(perfil.protected, ['**/.env', '.opencode-orchestrator.json']);
+  assert.equal(perfil.worktrees.root, '~/work/{name}');
+  assert.deepEqual(perfil.resources, {});
+});
+
+test('perfilPorDefecto sin nombre usa un fallback', () => {
+  assert.equal(perfilPorDefecto().name, 'repo');
+  assert.equal(perfilPorDefecto('   ').name, 'repo');
+});
+
+test('validarPerfil acepta un perfil completo y aplica defaults a los ausentes', () => {
+  const perfil = validarPerfil(PERFIL_VALIDO);
+  assert.equal(perfil.name, 'sistema');
+  assert.equal(perfil.baseBranch, 'dev');
+  assert.equal(perfil.resources.db.name, 'compras_{job}_test');
+
+  const minimo = validarPerfil({ version: 1, name: 'x' });
+  assert.equal(minimo.baseBranch, 'main');
+  assert.equal(minimo.integrationBranch, 'staging');
+  assert.equal(minimo.concurrency, 3);
+  assert.deepEqual(minimo.protected, []);
+  assert.equal(minimo.worktrees.root, '~/work/{name}');
+});
+
+test('validarPerfil exige version 1 y name no vacío', () => {
+  assert.throws(() => validarPerfil({ name: 'x' }), /version: debe ser 1/);
+  assert.throws(() => validarPerfil({ version: 2, name: 'x' }), /version: debe ser 1/);
+  assert.throws(() => validarPerfil({ version: 1, name: '' }), /name: debe ser un texto no vacío/);
+  assert.throws(() => validarPerfil({ version: 1 }), /name: debe ser un texto no vacío/);
+});
+
+test('validarPerfil rechaza la raíz que no es objeto', () => {
+  assert.throws(() => validarPerfil(null), ErrorDePerfil);
+  assert.throws(() => validarPerfil([]), ErrorDePerfil);
+  assert.throws(() => validarPerfil('x'), ErrorDePerfil);
+});
+
+test('validarPerfil rechaza campos desconocidos pero permite $schema', () => {
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', protectd: [] }),
+    /protectd: campo desconocido/,
+  );
+  const conSchema = validarPerfil({ $schema: 'https://x/schema.json', version: 1, name: 'x' });
+  assert.equal(conSchema.name, 'x');
+});
+
+test('validarPerfil valida ramas git', () => {
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', baseBranch: 'a b' }), /espacios/);
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', baseBranch: 'a..b' }), /'\.\.'/);
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', baseBranch: 'rama/' }), /terminar en '\//);
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', baseBranch: 'x.lock' }), /'\.lock'/);
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', integrationBranch: '-x' }), /empezar con '-'/);
+});
+
+test('validarPerfil valida concurrency entero 1..8', () => {
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', concurrency: 0 }), /entre 1 y 8/);
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', concurrency: 9 }), /entre 1 y 8/);
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', concurrency: 1.5 }), /entre 1 y 8/);
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', concurrency: '3' }), /entre 1 y 8/);
+  assert.equal(validarPerfil({ version: 1, name: 'x', concurrency: 8 }).concurrency, 8);
+});
+
+test('validarPerfil valida protected como array de patrones glob', () => {
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', protected: '**' }), /array de patrones/);
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', protected: ['/abs'] }), /patrón inválido/);
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', protected: ['a/../b'] }), /patrón inválido/);
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', protected: [''] }), /texto no vacío/);
+});
+
+test('validarPerfil valida worktrees', () => {
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', worktrees: [] }), /worktrees: debe ser un objeto/);
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', worktrees: { ruta: 'a' } }),
+    /worktrees.ruta: campo desconocido/,
+  );
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', worktrees: { root: '' } }),
+    /worktrees.root/,
+  );
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', worktrees: { link: ['../fuera'] } }),
+    /no puede contener '\.\.'/,
+  );
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', worktrees: { link: ['/abs'] } }),
+    /ruta relativa/,
+  );
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', worktrees: { setup: [123] } }),
+    /worktrees.setup\[0\]/,
+  );
+});
+
+test('validarPerfil valida env como string->string con claves válidas', () => {
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', env: [] }), /env: debe ser un objeto/);
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', env: { 'A=B': 'v' } }),
+    /env\.A=B: nombre de variable de entorno inválido/,
+  );
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', env: { '': 'v' } }),
+    /nombre de variable de entorno inválido/,
+  );
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', env: { OK: 1 } }),
+    /env\.OK: el valor debe ser un texto/,
+  );
+});
+
+test('validarPerfil valida recursos postgres-db', () => {
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', resources: { db: { kind: 'mysql' } } }),
+    /resources\.db\.kind: kind inválido/,
+  );
+  assert.throws(
+    () =>
+      validarPerfil({
+        version: 1,
+        name: 'x',
+        resources: {
+          db: { kind: 'postgres-db', adminUrlEnv: 'A', template: 't', name: 'db_{job}_prod', exportAs: 'E' },
+        },
+      }),
+    /resources\.db\.name: debe terminar en _test/,
+  );
+  assert.throws(
+    () =>
+      validarPerfil({
+        version: 1,
+        name: 'x',
+        resources: {
+          db: { kind: 'postgres-db', adminUrlEnv: 'A', template: 't', name: 'db_test', exportAs: 'E' },
+        },
+      }),
+    /resources\.db\.name: debe contener '\{job\}'/,
+  );
+  assert.throws(
+    () =>
+      validarPerfil({
+        version: 1,
+        name: 'x',
+        resources: {
+          db: { kind: 'postgres-db', adminUrlEnv: 'A', template: 't', name: 'x_{job}_test', exportAs: '1bad' },
+        },
+      }),
+    /resources\.db\.exportAs: nombre de variable de entorno inválido/,
+  );
+  assert.throws(
+    () =>
+      validarPerfil({
+        version: 1,
+        name: 'x',
+        resources: {
+          db: { kind: 'postgres-db', adminUrlEnv: 'A', template: 't', name: 'x_{job}_test', exportAs: 'E', extra: 1 },
+        },
+      }),
+    /resources\.db\.extra: campo desconocido/,
+  );
+});
+
+test('validarPerfil valida accept string->string', () => {
+  assert.throws(() => validarPerfil({ version: 1, name: 'x', accept: [] }), /accept: debe ser un objeto/);
+  assert.throws(
+    () => validarPerfil({ version: 1, name: 'x', accept: { default: 1 } }),
+    /accept\.default: debe ser un texto/,
+  );
+});
+
+test('validarPerfil acumula todos los errores con la ruta del campo', () => {
+  try {
+    validarPerfil({ version: 2, name: '', concurrency: 99, typo: true });
+    assert.fail('debía lanzar');
+  } catch (error) {
+    assert.ok(error instanceof ErrorDePerfil);
+    assert.ok(error.errores.length >= 4);
+    assert.ok(error.errores.some((e) => e === 'version: debe ser 1'));
+    assert.ok(error.errores.some((e) => e === 'name: debe ser un texto no vacío'));
+    assert.ok(error.errores.some((e) => e === 'concurrency: debe ser un entero entre 1 y 8'));
+    assert.ok(error.errores.some((e) => e === 'typo: campo desconocido'));
+  }
+});
+
+test('cargarPerfil parsea y valida JSON', () => {
+  const perfil = cargarPerfil(JSON.stringify(PERFIL_VALIDO));
+  assert.equal(perfil.name, 'sistema');
+  assert.equal(perfil.concurrency, 3);
+});
+
+test('cargarPerfil falla con JSON inválido', () => {
+  try {
+    cargarPerfil('{ no json');
+    assert.fail('debía lanzar');
+  } catch (error) {
+    assert.ok(error instanceof ErrorDePerfil);
+    assert.match(error.errores[0], /JSON inválido/);
+  }
+});
+
+test('cargarPerfil completa name desde opciones.nombreRepo', () => {
+  const perfil = cargarPerfil('{"version":1}', { nombreRepo: 'auto' });
+  assert.equal(perfil.name, 'auto');
+});
+
+test('resolverRaizWorktrees expande ~ y {name}', () => {
+  const perfil = { name: 'sistema', worktrees: { root: '~/work/{name}' } };
+  assert.equal(resolverRaizWorktrees(perfil, '/home/u'), '/home/u/work/sistema');
+});
+
+test('resolverRaizWorktrees maneja ~ solo y raíces sin tilde', () => {
+  assert.equal(resolverRaizWorktrees({ name: 'x', worktrees: { root: '~' } }, '/home/u'), '/home/u');
+  assert.equal(
+    resolverRaizWorktrees({ name: 'x', worktrees: { root: '/tmp/wt/{name}' } }, '/home/u'),
+    '/tmp/wt/x',
+  );
+});
+
+test('resolverRaizWorktrees usa defaults si falta la raíz', () => {
+  assert.equal(resolverRaizWorktrees({ name: 'x' }, '/home/u'), '/home/u/work/x');
+});
