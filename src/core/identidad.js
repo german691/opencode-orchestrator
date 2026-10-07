@@ -60,10 +60,6 @@ export function bootIdActual() {
  * @returns {number|null}
  */
 function inicioDeStat(texto) {
-  // MUTACION TEMPORAL: parseo ingenuo con split(' ') sobre toda la línea.
-  const todos = texto.trim().split(/\s+/);
-  const valor = Number(todos[21]);
-  return Number.isFinite(valor) ? valor : null;
   const cierre = texto.lastIndexOf(')');
   if (cierre < 0) return null;
   const resto = texto.slice(cierre + 1).trim();
