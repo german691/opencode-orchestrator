@@ -374,3 +374,9 @@ test('generarConfigDeTrabajo: un protegido idéntico a un write queda AL FINAL y
     ['a/**', 'deny'],
   ]);
 });
+
+test('generarConfigDeTrabajo: external_directory se deniega en readonly y safe y se permite solo en auto', () => {
+  assert.equal(generarConfigDeTrabajo({ modo: 'readonly' }).agent.orq.permission.external_directory, 'deny');
+  assert.equal(generarConfigDeTrabajo({ modo: 'safe', writes: ['a/**'] }).agent.orq.permission.external_directory, 'deny');
+  assert.equal(generarConfigDeTrabajo({ modo: 'auto' }).agent.orq.permission.external_directory, 'allow');
+});

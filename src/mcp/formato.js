@@ -81,6 +81,9 @@ export function describirTerminado(trabajo, colas = {}) {
         r.violaciones.slice(0, MAX_ARCHIVOS).map((v) => `  - ${v.ruta}: ${v.motivo}`).join('\n'),
     );
   }
+  if (Array.isArray(r.advertencias) && r.advertencias.length > 0) {
+    partes.push(`ADVERTENCIAS:\n${r.advertencias.map((a) => `  - ${a}`).join('\n')}`);
+  }
   if (r.aceptacion?.ejecutada) {
     const ok = r.aceptacion.exit === 0 && r.aceptacion.motivo === 'exit';
     partes.push(`aceptacion: ${ok ? 'OK' : 'FALLO'} (exit=${r.aceptacion.exit}) $ ${r.aceptacion.cmd}`);

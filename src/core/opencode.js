@@ -319,6 +319,9 @@ export function generarConfigDeTrabajo({
     edit: reglasEdit(modo, writes, protegidos),
     bash: reglasBash(modo),
     webfetch: modo === 'auto' ? 'allow' : 'deny',
+    // Fuera del proyecto no se lee ni se edita con las herramientas (medido: no rompe leer a
+    // través de enlaces simbólicos como node_modules ni los comandos de shell relativos).
+    external_directory: modo === 'auto' ? 'allow' : 'deny',
   };
 
   /** @type {{ $schema: string, model?: string, agent: Record<string, object> }} */

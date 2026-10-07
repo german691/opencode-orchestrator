@@ -23,6 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { esTerminal } from './estados.js';
+import { compilar } from './glob.js';
 import { identidadDeProceso } from './identidad.js';
 import {
   construirArgs,
@@ -292,6 +293,17 @@ export class Gestor {
       throw new ErrorDeGestor('En modo safe `writes` es obligatorio: declará qué patrones puede modificar');
     }
     const reads = lista(spec.reads, 'reads', ['**']);
+    // Fallar al ENVIAR y no más tarde: un patrón inválido (absoluto, con "..") jamás debe
+    // llegar a la cola ni a la configuración del agente.
+    for (const [campo, patrones] of [['writes', writes], ['reads', reads]]) {
+      for (const patron of patrones) {
+        try {
+          compilar(patron);
+        } catch (error) {
+          throw new ErrorDeGestor(`\`${campo}\` contiene un patrón inválido (${patron}): ${error.message}`);
+        }
+      }
+    }
     const resources = lista(spec.resources, 'resources', []);
     for (const nombre of resources) {
       if (!perfil.resources || !Object.hasOwn(perfil.resources, nombre)) {
@@ -435,6 +447,11 @@ export class Gestor {
       if (ctl.signal.aborted) return this.#terminar(id, 'cancelled', { motivoFin: 'cancelado' });
       const cwdTrabajo = path.join(raizTrabajo, job.cwdRelativo);
 
+      // Con aislamiento, el árbol REAL no debería cambiar mientras el trabajo corre: si
+      // cambia, el agente pudo salir del worktree (p. ej. con una ruta absoluta por shell).
+      // Es una ADVERTENCIA, no un rechazo: una edición manual del usuario produce lo mismo.
+      const arbolRealAntes = job.isolation === 'worktree' ? await this.#instantaneaDelArbolReal(job.repo) : null;
+
       // 2) Recursos exclusivos por trabajo
       const envRecursos = {};
       for (const nombre of job.resources) {
@@ -540,12 +557,24 @@ export class Gestor {
         protegidos,
         modo: job.mode,
       });
+      const advertencias = [];
+      if (arbolRealAntes) {
+        const tocados = await this.#cambiosEnElArbolReal(job.repo, arbolRealAntes);
+        if (tocados.length > 0) {
+          advertencias.push(
+            `El árbol principal cambió mientras corría el trabajo (${tocados.slice(0, 10).join(', ')}` +
+              `${tocados.length > 10 ? `, +${tocados.length - 10} más` : ''}): el agente pudo salir del worktree; ` +
+              'también puede deberse a una edición manual o a otro trabajo sin aislamiento. Revisalo.',
+          );
+        }
+      }
       if (!alcance.ok) {
         return this.#terminar(id, 'rejected', {
           proceso,
           archivos: archivosTrabajo,
           resumen,
           violaciones: alcance.violaciones,
+          advertencias,
           motivoFin: 'alcance',
         });
       }
@@ -578,6 +607,7 @@ export class Gestor {
             archivos: archivosTrabajo,
             resumen,
             aceptacion: aceptado,
+            advertencias,
             motivoFin: 'aceptacion',
           });
         }
@@ -598,6 +628,7 @@ export class Gestor {
         archivos: archivosTrabajo,
         resumen,
         aceptacion: aceptado,
+        advertencias,
         commit,
       });
     } catch (error) {
@@ -622,6 +653,30 @@ export class Gestor {
         }
       }
     }
+  }
+
+  /** Foto del árbol REAL (archivos modificados y su hash) para detectar escapes del worktree. */
+  async #instantaneaDelArbolReal(repo) {
+    try {
+      const head = await git(['rev-parse', 'HEAD'], repo);
+      const { archivos } = await cambiosDelWorktree({ ruta: repo, baseCommit: head });
+      return { head, hashes: new Map(archivos.map((a) => [a, hashDeArchivo(path.join(repo, a))])) };
+    } catch {
+      return null; // sin foto no hay comparación: no se advierte nada
+    }
+  }
+
+  /** Archivos del árbol real que cambiaron respecto de una foto anterior. */
+  async #cambiosEnElArbolReal(repo, antes) {
+    const ahora = await this.#instantaneaDelArbolReal(repo);
+    if (!ahora) return [];
+    const cambios = [];
+    if (ahora.head !== antes.head) cambios.push('(HEAD movido)');
+    for (const [archivo, hash] of ahora.hashes) {
+      if (!antes.hashes.has(archivo) || antes.hashes.get(archivo) !== hash) cambios.push(archivo);
+    }
+    for (const archivo of antes.hashes.keys()) if (!ahora.hashes.has(archivo)) cambios.push(archivo);
+    return cambios;
   }
 
   /** Cierra el trabajo en un estado terminal persistiendo el resultado. */
