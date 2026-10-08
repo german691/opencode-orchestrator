@@ -137,12 +137,29 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_merge',
-      description: 'Integra un trabajo succeeded en la rama de integración del perfil (git merge --no-ff dentro de un worktree propio). Ante conflicto aborta y lista los archivos; la rama de integración queda intacta. NUNCA toca la rama base ni hace push: revisá el diff base..integración y avanzá la base vos.',
-      inputSchema: { type: 'object', properties: { job_id: ESQUEMA_JOB }, required: ['job_id'], additionalProperties: false },
+      description: 'Integra un trabajo succeeded en la rama de integración del perfil (git merge --no-ff dentro de un worktree propio). Ante conflicto aborta y lista los archivos; la rama de integración queda intacta. Antes de integrar sincroniza la base DENTRO de la integración (nunca al revés). Por defecto NO toca la rama base ni hace push: revisá el diff base..integración y avanzá la base vos, o pedí `avanzar_base` (opt-in, solo fast-forward).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          job_id: ESQUEMA_JOB,
+          avanzar_base: { type: 'boolean', description: 'Opt-in: además avanza la rama base hasta la integración con fast-forward (solo si el árbol real está en la base y sin cambios sin commitear). Si no se puede, la integración igual queda hecha y se explica el motivo.' },
+        },
+        required: ['job_id'],
+        additionalProperties: false,
+      },
       manejar: async (args) => {
-        const resultado = await gestor.integrar(exigirId(args));
-        if (resultado.ok) return { text: `Integrado en ${resultado.rama} (sha ${resultado.sha}). Revisá: git diff <base>..${resultado.rama}`, isError: false };
-        return { text: `CONFLICTOS al integrar (la rama de integración quedó intacta):\n${resultado.conflictos.map((c) => `  - ${c}`).join('\n')}`, isError: true };
+        const resultado = await gestor.integrar(exigirId(args), { avanzarBase: args?.avanzar_base === true });
+        if (resultado.ok) {
+          let texto = `Integrado en ${resultado.rama} (sha ${resultado.sha}). Revisá: git diff <base>..${resultado.rama}`;
+          if (resultado.baseAvanzada) {
+            texto += resultado.baseAvanzada.ok
+              ? `\nBase '${resultado.base}' avanzada a ${resultado.baseAvanzada.sha}${resultado.baseAvanzada.cambio ? '' : ' (ya estaba al día)'}.`
+              : `\nLa base '${resultado.base}' NO se avanzó: ${resultado.baseAvanzada.motivo}.`;
+          }
+          return { text: texto, isError: false };
+        }
+        const porBase = resultado.motivo === 'base_no_sincronizable' ? ' (al sincronizar la base dentro de la integración)' : '';
+        return { text: `CONFLICTOS al integrar${porBase} (la rama de integración quedó intacta):\n${resultado.conflictos.map((c) => `  - ${c}`).join('\n')}`, isError: true };
       },
     },
     {

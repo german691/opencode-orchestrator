@@ -11,6 +11,8 @@ import {
   cambiosDelWorktree,
   commitearTrabajo,
   integrar,
+  sincronizarIntegracion,
+  avanzarBase,
   eliminarWorktree,
   listarWorktrees,
   conCerrojo,
@@ -752,4 +754,67 @@ test('cambiosDelWorktree lista los ARCHIVOS de un directorio nuevo, no el direct
   const { archivos, resumen } = await cambiosDelWorktree({ ruta: res.ruta, baseCommit });
   assert.deepEqual(archivos, ['src/a.js', 'src/profundo/b.js']);
   assert.deepEqual(resumen, { agregados: 2, modificados: 0, borrados: 0 });
+});
+
+test('integrar sincroniza antes lo commiteado en la base: la integración la incluye y la base se puede avanzar', async () => {
+  const { raiz, rootDir, rootDirIntegracion } = await montar();
+  const w = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'sy1', rootDir });
+  fs.writeFileSync(path.join(w.ruta, 'trabajo.txt'), 'x\n');
+  await commitearTrabajo({ ruta: w.ruta, mensaje: 'trabajo', autor: 'T <t@t>' });
+
+  // El usuario commitea directo en la base DESPUÉS de lanzar el trabajo.
+  fs.writeFileSync(path.join(raiz, 'doc-usuario.txt'), 'docs\n');
+  await gitOK(['add', 'doc-usuario.txt'], raiz);
+  await gitOK(['commit', '-m', 'docs del usuario'], raiz);
+
+  const r = await integrar({ repoRaiz: raiz, rama: 'job/sy1', integrationBranch: 'staging', base: 'main', rootDirIntegracion });
+  assert.equal(r.ok, true);
+  const integ = path.join(rootDirIntegracion, 'staging');
+  assert.equal(fs.readFileSync(path.join(integ, 'doc-usuario.txt'), 'utf8'), 'docs\n', 'la integración incluye la base');
+  assert.equal((await git(['merge-base', '--is-ancestor', 'main', 'staging'], raiz)).code, 0);
+
+  const av = await avanzarBase({ repoRaiz: raiz, base: 'main', integrationBranch: 'staging' });
+  assert.equal(av.ok, true);
+  assert.equal(av.sha, await sha(raiz, 'staging'));
+  assert.equal(fs.readFileSync(path.join(raiz, 'trabajo.txt'), 'utf8'), 'x\n', 'el árbol real recibió el trabajo');
+});
+
+test('sincronizarIntegracion es idempotente y reporta conflictos sin dejar un merge a medias', async () => {
+  const { raiz, rootDir, rootDirIntegracion } = await montar();
+  const w = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'sy2', rootDir });
+  fs.writeFileSync(path.join(w.ruta, 'base.txt'), 'version del trabajo\n');
+  await commitearTrabajo({ ruta: w.ruta, mensaje: 'toca base.txt', autor: 'T <t@t>' });
+  assert.equal((await integrar({ repoRaiz: raiz, rama: 'job/sy2', integrationBranch: 'staging', base: 'main', rootDirIntegracion })).ok, true);
+
+  const sinCambios = await sincronizarIntegracion({ repoRaiz: raiz, integrationBranch: 'staging', base: 'main', rootDirIntegracion });
+  assert.deepEqual({ ok: sinCambios.ok, cambio: sinCambios.cambio }, { ok: true, cambio: false });
+
+  // La base cambia el MISMO archivo de otra forma: conflicto al sincronizar.
+  fs.writeFileSync(path.join(raiz, 'base.txt'), 'version del usuario\n');
+  await gitOK(['commit', '-am', 'usuario toca base.txt'], raiz);
+  const antes = await sha(raiz, 'staging');
+  const conf = await sincronizarIntegracion({ repoRaiz: raiz, integrationBranch: 'staging', base: 'main', rootDirIntegracion });
+  assert.equal(conf.ok, false);
+  assert.deepEqual(conf.conflictos, ['base.txt']);
+  assert.equal(await sha(raiz, 'staging'), antes, 'la integración quedó intacta');
+  assert.equal((await git(['status', '--porcelain'], path.join(rootDirIntegracion, 'staging'))).stdout.trim(), '', 'sin merge a medias');
+});
+
+test('avanzarBase se niega si el árbol real tiene cambios sin commitear o no es fast-forward', async () => {
+  const { raiz, rootDir, rootDirIntegracion } = await montar();
+  const w = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'sy3', rootDir });
+  fs.writeFileSync(path.join(w.ruta, 'n.txt'), 'n\n');
+  await commitearTrabajo({ ruta: w.ruta, mensaje: 'n', autor: 'T <t@t>' });
+  await integrar({ repoRaiz: raiz, rama: 'job/sy3', integrationBranch: 'staging', base: 'main', rootDirIntegracion });
+
+  fs.appendFileSync(path.join(raiz, 'base.txt'), 'sin commitear\n');
+  const sucio = await avanzarBase({ repoRaiz: raiz, base: 'main', integrationBranch: 'staging' });
+  assert.equal(sucio.ok, false);
+  assert.match(sucio.motivo, /sin commitear/);
+
+  await gitOK(['checkout', 'base.txt'], raiz);
+  await gitOK(['commit', '--allow-empty', '-m', 'la base avanza sola'], raiz);
+  const noFf = await avanzarBase({ repoRaiz: raiz, base: 'main', integrationBranch: 'staging' });
+  assert.equal(noFf.ok, false);
+  assert.match(noFf.motivo, /fast-forward/);
 });

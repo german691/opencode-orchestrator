@@ -380,3 +380,19 @@ test('generarConfigDeTrabajo: external_directory se deniega en readonly y safe y
   assert.equal(generarConfigDeTrabajo({ modo: 'safe', writes: ['a/**'] }).agent.orq.permission.external_directory, 'deny');
   assert.equal(generarConfigDeTrabajo({ modo: 'auto' }).agent.orq.permission.external_directory, 'allow');
 });
+
+test('construirPrompt: antepone el prefijo del perfil a la tarea y manda parar ante archivos fuera de alcance', () => {
+  const texto = construirPrompt({
+    prompt: 'la tarea `con` $backticks',
+    modo: 'safe',
+    writes: ['src/**'],
+    prefijo: '  Convenciones del proyecto: español.  ',
+  });
+  assert.ok(texto.indexOf('Convenciones del proyecto: español.') < texto.indexOf('la tarea `con` $backticks'));
+  assert.match(texto, /detenete y reportalo/);
+  assert.ok(texto.endsWith('la tarea `con` $backticks'), 'la tarea original va intacta al final');
+  // En readonly no aplica la regla de "fuera de alcance".
+  assert.doesNotMatch(construirPrompt({ prompt: 'x', modo: 'readonly' }), /detenete y reportalo/);
+  // Sin prefijo no agrega nada entre el separador y la tarea.
+  assert.equal(construirPrompt({ prompt: 'x', modo: 'safe', writes: ['a'] }).endsWith('x'), true);
+});

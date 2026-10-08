@@ -308,3 +308,14 @@ test('validarPerfil: las ramas rechazan los mismos caracteres que el resto del c
   }
   assert.doesNotThrow(() => validarPerfil({ version: 1, name: 'x', baseBranch: 'feature/ok-1', integrationBranch: 'staging' }));
 });
+
+test('validarPerfil: jobBase, promptPrefix y timeoutMs (valida y aplica defaults)', () => {
+  const base = { version: 1, name: 'sistema' };
+  const porDefecto = validarPerfil(base);
+  assert.deepEqual([porDefecto.jobBase, porDefecto.promptPrefix, porDefecto.timeoutMs], ['base', '', null]);
+  const ok = validarPerfil({ ...base, jobBase: 'integracion', promptPrefix: 'Convenciones', timeoutMs: 3_600_000 });
+  assert.deepEqual([ok.jobBase, ok.promptPrefix, ok.timeoutMs], ['integracion', 'Convenciones', 3_600_000]);
+  assert.throws(() => validarPerfil({ ...base, jobBase: 'otra' }), /jobBase/);
+  assert.throws(() => validarPerfil({ ...base, promptPrefix: 5 }), /promptPrefix/);
+  assert.throws(() => validarPerfil({ ...base, timeoutMs: 10 }), /timeoutMs/);
+});

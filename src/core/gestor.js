@@ -44,9 +44,11 @@ import {
   cambiosDelWorktree,
   commitearTrabajo,
   crearWorktree,
+  avanzarBase,
   eliminarWorktree,
   integrar,
   raizGit,
+  sincronizarIntegracion,
 } from './workspace.js';
 
 /** Nombre del archivo de perfil en la raíz del repositorio objetivo. */
@@ -384,7 +386,8 @@ export class Gestor {
       aceptacion,
       modelo: spec.model ?? this.modelo,
       prioridad: Number.isFinite(spec.prioridad) ? spec.prioridad : 0,
-      timeoutMs: num(spec.timeout_ms, 'timeout_ms', DEFECTOS.timeoutMs),
+      // Sin `timeout_ms` en el envío rige el del perfil (p. ej. 1 h para backend con suites largas).
+      timeoutMs: num(spec.timeout_ms, 'timeout_ms', perfil.timeoutMs ?? DEFECTOS.timeoutMs),
       idleTimeoutMs: num(spec.idle_timeout_ms, 'idle_timeout_ms', DEFECTOS.idleTimeoutMs),
       encoladoEn: Date.now(),
     });
@@ -446,6 +449,30 @@ export class Gestor {
   }
 
   /**
+   * Rama desde la que parte el worktree de un trabajo. Con `jobBase: 'integracion'` parte de
+   * la rama de integración (ya sincronizada con la base), así los trabajos encadenados ven lo
+   * que se integró antes aunque el usuario todavía no haya avanzado la base. Si no se puede
+   * sincronizar (conflicto, árbol sucio) cae a la base y deja constancia en los eventos.
+   */
+  async #baseDelTrabajo(id, job, perfil) {
+    if (perfil.jobBase !== 'integracion') return perfil.baseBranch;
+    try {
+      const { rootDirIntegracion } = this.#raices(perfil);
+      const sync = await sincronizarIntegracion({
+        repoRaiz: job.repo,
+        integrationBranch: perfil.integrationBranch,
+        base: perfil.baseBranch,
+        rootDirIntegracion,
+      });
+      if (sync.ok) return perfil.integrationBranch;
+      this.#evento(id, { tipo: 'base_integracion_no_sincronizable', conflictos: sync.conflictos });
+    } catch (error) {
+      this.#evento(id, { tipo: 'base_integracion_no_sincronizable', error: String(error?.message ?? error) });
+    }
+    return perfil.baseBranch;
+  }
+
+  /**
    * Pipeline completo de un trabajo. NUNCA lanza: cualquier error termina el trabajo
    * en `failed` con el mensaje, y los recursos se liberan siempre.
    */
@@ -468,9 +495,10 @@ export class Gestor {
       /** Archivos ya modificados en el árbol real ANTES de empezar (solo sin aislamiento). */
       const previos = new Map();
       if (job.isolation === 'worktree') {
+        const baseDelTrabajo = await this.#baseDelTrabajo(id, job, perfil);
         const wt = await crearWorktree({
           repoRaiz: job.repo,
-          base: perfil.baseBranch,
+          base: baseDelTrabajo,
           jobId: id,
           rootDir,
           link: perfil.worktrees.link,
@@ -540,6 +568,7 @@ export class Gestor {
         reads: job.reads,
         protegidos,
         rutaTrabajo: cwdTrabajo,
+        prefijo: perfil.promptPrefix,
       });
       const args = construirArgs({
         prompt,
@@ -836,7 +865,7 @@ export class Gestor {
    * @param {string} id
    * @returns {Promise<{ ok: boolean, sha?: string, conflictos?: string[], motivo?: string }>}
    */
-  async integrar(id) {
+  async integrar(id, { avanzarBase: avanzar = false } = {}) {
     const trabajo = this.obtener(id);
     if (trabajo.estado !== 'succeeded') {
       throw new ErrorDeGestor(`Solo se integran trabajos succeeded (este está ${trabajo.estado})`);
@@ -863,10 +892,21 @@ export class Gestor {
       this.#guardar(id, { estado: 'merged', integradoSha: resultado.sha, integradoEn: perfil.integrationBranch });
       this.#evento(id, { tipo: 'integrado', sha: resultado.sha, rama: perfil.integrationBranch });
       this.almacen.auditar({ accion: 'integrar', id, sha: resultado.sha, rama: perfil.integrationBranch });
-      return { ok: true, sha: resultado.sha, rama: perfil.integrationBranch };
+      // Opt-in: avanzar la base con fast-forward. Un fallo acá NO deshace la integración (ya está
+      // hecha en la rama de integración): se informa el motivo y el usuario avanza a mano.
+      let base = null;
+      if (avanzar) {
+        base = await avanzarBase({
+          repoRaiz: trabajo.repo,
+          base: perfil.baseBranch,
+          integrationBranch: perfil.integrationBranch,
+        }).catch((error) => ({ ok: false, motivo: String(error?.message ?? error) }));
+        this.almacen.auditar({ accion: 'avanzar_base', id, ok: base.ok, sha: base.sha, motivo: base.motivo });
+      }
+      return { ok: true, sha: resultado.sha, rama: perfil.integrationBranch, baseAvanzada: base, base: perfil.baseBranch };
     }
     this.#evento(id, { tipo: 'integracion_con_conflictos', conflictos: resultado.conflictos });
-    return { ok: false, conflictos: resultado.conflictos };
+    return { ok: false, conflictos: resultado.conflictos, motivo: resultado.motivo };
   }
 
   /**

@@ -367,6 +367,7 @@ export function construirPrompt({
   reads = [],
   protegidos = [],
   rutaTrabajo,
+  prefijo = '',
 } = {}) {
   if (typeof prompt !== 'string') throw new Error("El prompt debe ser un texto (puede estar vacío)");
   resolverModo(modo);
@@ -391,12 +392,21 @@ export function construirPrompt({
   }
 
   lineas.push(`- NUNCA modifiques estos (estan protegidos): ${listar(protegidos, '(ninguno)')}`);
+  if (modo !== 'readonly') {
+    // Observado en vivo: ante un archivo bloqueado el agente rediseñó el contrato para
+    // esquivarlo en vez de avisar, y el trabajo salió torcido. Tiene que parar y reportar.
+    lineas.push(
+      '- Si para cumplir la tarea necesitas modificar un archivo FUERA de esos patrones (o uno protegido) o un test existente que no puedas tocar, NO esquives el problema ni cambies el diseño: detenete y reportalo en tu respuesta final indicando el archivo exacto y por que.',
+    );
+  }
   lineas.push('- No hagas git commit, ni push, ni reset, ni clean.');
   lineas.push('- No corras la suite completa ni comandos que usen recursos compartidos salvo que la tarea lo pida.');
   lineas.push('- Termina apenas pasen tus verificaciones.');
   lineas.push('- Responde corto, con los archivos tocados y los resultados.');
 
-  return `${lineas.join('\n')}${SEPARADOR_TAREA}${prompt}`;
+  // El prefijo del perfil (contexto fijo del proyecto) va antes de la tarea, también sin interpretar.
+  const contexto = typeof prefijo === 'string' && prefijo.trim() !== '' ? `${prefijo.trim()}\n\n` : '';
+  return `${lineas.join('\n')}${SEPARADOR_TAREA}${contexto}${prompt}`;
 }
 
 /**

@@ -36,6 +36,9 @@ const CLAVES_PERFIL = new Set([
   'baseBranch',
   'integrationBranch',
   'concurrency',
+  'jobBase',
+  'promptPrefix',
+  'timeoutMs',
   'protected',
   'worktrees',
   'env',
@@ -54,6 +57,9 @@ const KINDS_RECURSO = new Set(['postgres-db']);
 
 /** `name` del perfil: segmento de ruta seguro (se usa para armar directorios). */
 const NOMBRE_SEGURO = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
+
+/** Largo máximo del texto fijo que el perfil antepone a cada tarea. */
+const MAX_PROMPT_PREFIX = 20000;
 
 /** Nombre de variable de entorno válido (y por tanto de `exportAs`/`adminUrlEnv`). */
 const NOMBRE_VARIABLE_ENV = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -134,6 +140,21 @@ export function validarPerfil(objeto) {
 
   validarRama('baseBranch', objeto.baseBranch, errores);
   validarRama('integrationBranch', objeto.integrationBranch, errores);
+
+  if (objeto.jobBase !== undefined && objeto.jobBase !== 'base' && objeto.jobBase !== 'integracion') {
+    errores.push("jobBase: debe ser 'base' o 'integracion'");
+  }
+  if (objeto.promptPrefix !== undefined) {
+    if (typeof objeto.promptPrefix !== 'string') errores.push('promptPrefix: debe ser un texto');
+    else if (objeto.promptPrefix.length > MAX_PROMPT_PREFIX) {
+      errores.push(`promptPrefix: máximo ${MAX_PROMPT_PREFIX} caracteres`);
+    }
+  }
+  if (objeto.timeoutMs !== undefined) {
+    if (!Number.isFinite(objeto.timeoutMs) || objeto.timeoutMs < 60_000 || objeto.timeoutMs > 6 * 3600_000) {
+      errores.push('timeoutMs: debe ser un número de milisegundos entre 1 minuto y 6 horas');
+    }
+  }
 
   if (objeto.concurrency !== undefined) {
     if (!Number.isInteger(objeto.concurrency) || objeto.concurrency < 1 || objeto.concurrency > 8) {
@@ -283,6 +304,13 @@ export function validarPerfil(objeto) {
     baseBranch: objeto.baseBranch ?? 'main',
     integrationBranch: objeto.integrationBranch ?? 'staging',
     concurrency: objeto.concurrency ?? 3,
+    // 'integracion': los trabajos parten de la rama de integración (ya con lo integrado antes),
+    // no de la base, que solo avanza cuando el usuario decide.
+    jobBase: objeto.jobBase ?? 'base',
+    // Texto fijo del proyecto que se antepone a la tarea de cada trabajo (convenciones, etc.).
+    promptPrefix: objeto.promptPrefix ?? '',
+    // Tope total por defecto de un trabajo (si el envío no pide otro); null = el del servidor.
+    timeoutMs: objeto.timeoutMs ?? null,
     protected: objeto.protected ? [...objeto.protected] : [],
     worktrees: {
       root: objeto.worktrees?.root ?? '~/work/{name}',
@@ -343,6 +371,9 @@ export function perfilPorDefecto(nombreRepo) {
     baseBranch: 'main',
     integrationBranch: 'staging',
     concurrency: 3,
+    jobBase: 'base',
+    promptPrefix: '',
+    timeoutMs: null,
     protected: ['**/.env', '.opencode-orchestrator.json'],
     worktrees: { root: '~/work/{name}', link: [], setup: [] },
     env: {},

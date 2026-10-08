@@ -868,6 +868,13 @@ export async function integrar({ repoRaiz, rama, integrationBranch, base, rootDi
       );
     }
 
+    // La integración debe incluir lo que el usuario haya commiteado en la base: así el trabajo
+    // se integra sobre código al día y después la base se puede avanzar con fast-forward.
+    const sincronizada = await sincronizarIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion });
+    if (!sincronizada.ok) {
+      return { ok: false, conflictos: sincronizada.conflictos, motivo: 'base_no_sincronizable' };
+    }
+
     const shaAntes = (await gitOLanza(['rev-parse', `refs/heads/${integrationBranch}`], { cwd: ruta })).trim();
 
     const merge = await git(
@@ -1060,4 +1067,91 @@ export async function listarWorktrees(repoRaiz) {
   }
   if (actual) worktrees.push(actual);
   return worktrees;
+}
+
+/**
+ * Hace que la rama de integración INCLUYA a la base (merge de la base dentro de la
+ * integración, nunca al revés). Sin esto, lo que el usuario commitea directo en la base
+ * (docs, cambios chicos) deja a la integración "atrás": los trabajos nuevos parten de código
+ * viejo y la base ya no se puede avanzar con fast-forward.
+ *
+ * Idempotente: si la base ya es ancestro de la integración no hace nada. Ante conflicto
+ * aborta el merge y deja la integración intacta.
+ *
+ * @param {object} opciones
+ * @param {string} opciones.repoRaiz
+ * @param {string} opciones.integrationBranch
+ * @param {string} opciones.base
+ * @param {string} opciones.rootDirIntegracion
+ * @returns {Promise<{ ok: true, sha: string, cambio: boolean } | { ok: false, conflictos: string[] }>}
+ */
+export async function sincronizarIntegracion({ repoRaiz, integrationBranch, base, rootDirIntegracion } = {}) {
+  validarRama(integrationBranch, 'integrationBranch');
+  validarRama(base, 'base');
+  if (integrationBranch === base) throw new ErrorDeWorkspace(`Nunca se integra sobre la rama base ('${base}')`);
+  return conCerrojo(repoRaiz, () =>
+    sincronizarIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion }),
+  );
+}
+
+/** Igual que `sincronizarIntegracion` pero sin tomar el cerrojo (lo usa `integrar`, que ya lo tiene). */
+async function sincronizarIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion }) {
+  const ruta = await prepararIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion });
+  await abortarMerge(ruta);
+  const sucio = await arbolSucio(ruta);
+  if (sucio.length > 0) {
+    throw new ErrorDeWorkspace(
+      `El worktree de integración está sucio (${sucio.length} cambio(s)); no se sincroniza con la base: ${sucio.slice(0, 5).join(', ')}`,
+    );
+  }
+  const shaAntes = (await gitOLanza(['rev-parse', `refs/heads/${integrationBranch}`], { cwd: ruta })).trim();
+  const yaIncluida = await git(['merge-base', '--is-ancestor', `refs/heads/${base}`, `refs/heads/${integrationBranch}`], {
+    cwd: ruta,
+  });
+  if (yaIncluida.codigo === 0) return { ok: true, sha: shaAntes, cambio: false };
+
+  const merge = await git(['merge', '--no-edit', '-m', `Sincroniza ${base} en ${integrationBranch}`, `refs/heads/${base}`], {
+    cwd: ruta,
+  });
+  if (merge.codigo !== 0) {
+    const conflictos = await rutasEnConflicto(ruta);
+    await abortarMerge(ruta);
+    return { ok: false, conflictos };
+  }
+  const sha = (await gitOLanza(['rev-parse', `refs/heads/${integrationBranch}`], { cwd: ruta })).trim();
+  return { ok: true, sha, cambio: sha !== shaAntes };
+}
+
+/**
+ * Avanza la base hasta la rama de integración con `--ff-only` en el árbol real del
+ * repositorio. Es OPT-IN (la base la decide el usuario) y se niega ante cualquier duda:
+ * la base no está checkouteada, el árbol tiene cambios sin commitear, o no es fast-forward.
+ *
+ * @param {object} opciones
+ * @param {string} opciones.repoRaiz
+ * @param {string} opciones.base
+ * @param {string} opciones.integrationBranch
+ * @returns {Promise<{ ok: true, sha: string, cambio: boolean } | { ok: false, motivo: string }>}
+ */
+export async function avanzarBase({ repoRaiz, base, integrationBranch } = {}) {
+  validarRama(base, 'base');
+  validarRama(integrationBranch, 'integrationBranch');
+  if (integrationBranch === base) throw new ErrorDeWorkspace(`La integración no puede ser la base ('${base}')`);
+  return conCerrojo(repoRaiz, async () => {
+    const actual = (await gitOLanza(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoRaiz })).trim();
+    if (actual !== base) {
+      return { ok: false, motivo: `el árbol real está en '${actual}', no en la base '${base}': no se avanza` };
+    }
+    const sucio = await git(['status', '--porcelain', '--untracked-files=no'], { cwd: repoRaiz });
+    if (sucio.codigo !== 0 || sucio.stdout.trim() !== '') {
+      return { ok: false, motivo: 'el árbol real tiene cambios sin commitear: no se avanza la base' };
+    }
+    const antes = (await gitOLanza(['rev-parse', `refs/heads/${base}`], { cwd: repoRaiz })).trim();
+    const avance = await git(['merge', '--ff-only', `refs/heads/${integrationBranch}`], { cwd: repoRaiz });
+    if (avance.codigo !== 0) {
+      return { ok: false, motivo: `no es fast-forward (la base tiene commits que la integración no incluye): ${avance.stderr.trim().slice(0, 200)}` };
+    }
+    const despues = (await gitOLanza(['rev-parse', `refs/heads/${base}`], { cwd: repoRaiz })).trim();
+    return { ok: true, sha: despues, cambio: despues !== antes };
+  });
 }
