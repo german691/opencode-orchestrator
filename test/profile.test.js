@@ -319,3 +319,17 @@ test('validarPerfil: jobBase, promptPrefix y timeoutMs (valida y aplica defaults
   assert.throws(() => validarPerfil({ ...base, promptPrefix: 5 }), /promptPrefix/);
   assert.throws(() => validarPerfil({ ...base, timeoutMs: 10 }), /timeoutMs/);
 });
+
+test('validarPerfil: worktrees.linkConCopia se valida (formato, rutas relativas, sin repetir en link)', () => {
+  const base = { version: 1, name: 'sistema' };
+  const ok = validarPerfil({ ...base, worktrees: { linkConCopia: [{ dir: 'backend/node_modules', copiar: ['.prisma', '@prisma/client'] }] } });
+  assert.deepEqual(ok.worktrees.linkConCopia, [{ dir: 'backend/node_modules', copiar: ['.prisma', '@prisma/client'] }]);
+  assert.deepEqual(validarPerfil(base).worktrees.linkConCopia, []);
+  assert.throws(() => validarPerfil({ ...base, worktrees: { linkConCopia: 'x' } }), /linkConCopia/);
+  assert.throws(() => validarPerfil({ ...base, worktrees: { linkConCopia: [{ dir: 'a', copiar: [] }] } }), /copiar/);
+  assert.throws(() => validarPerfil({ ...base, worktrees: { linkConCopia: [{ dir: '../a', copiar: ['x'] }] } }), /relativas/);
+  assert.throws(
+    () => validarPerfil({ ...base, worktrees: { link: ['a/node_modules'], linkConCopia: [{ dir: 'a/node_modules', copiar: ['x'] }] } }),
+    /también en worktrees\.link/,
+  );
+});

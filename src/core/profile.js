@@ -47,7 +47,7 @@ const CLAVES_PERFIL = new Set([
 ]);
 
 /** Campos permitidos dentro de `worktrees`. */
-const CLAVES_WORKTREES = new Set(['root', 'link', 'setup']);
+const CLAVES_WORKTREES = new Set(['root', 'link', 'linkConCopia', 'setup']);
 
 /** Campos permitidos dentro de cada recurso. */
 const CLAVES_RECURSO = new Set(['kind', 'adminUrlEnv', 'template', 'name', 'exportAs']);
@@ -219,6 +219,31 @@ export function validarPerfil(objeto) {
           });
         }
       }
+      if (wt.linkConCopia !== undefined) {
+        if (!Array.isArray(wt.linkConCopia)) {
+          errores.push('worktrees.linkConCopia: debe ser un array de { dir, copiar }');
+        } else {
+          wt.linkConCopia.forEach((item, indice) => {
+            const base = `worktrees.linkConCopia[${indice}]`;
+            if (!esObjetoPlano(item) || typeof item.dir !== 'string' || item.dir.trim() === '') {
+              errores.push(`${base}: debe ser { dir: texto, copiar: [textos] }`);
+              return;
+            }
+            if (!Array.isArray(item.copiar) || item.copiar.length === 0 || item.copiar.some((c) => typeof c !== 'string' || c.trim() === '')) {
+              errores.push(`${base}.copiar: debe ser un array no vacío de rutas`);
+            }
+            const rutas = [item.dir, ...(Array.isArray(item.copiar) ? item.copiar : [])]
+              .filter((r) => typeof r === 'string')
+              .map((r) => r.replace(/\\/g, '/'));
+            if (rutas.some((r) => r.startsWith('/') || /^[A-Za-z]:\//.test(r) || r.split('/').includes('..'))) {
+              errores.push(`${base}: las rutas deben ser relativas y sin '..'`);
+            }
+            if (Array.isArray(wt.link) && wt.link.includes(item.dir)) {
+              errores.push(`${base}.dir: no puede estar también en worktrees.link`);
+            }
+          });
+        }
+      }
       if (wt.setup !== undefined) {
         if (!Array.isArray(wt.setup)) {
           errores.push('worktrees.setup: debe ser un array de comandos');
@@ -315,6 +340,7 @@ export function validarPerfil(objeto) {
     worktrees: {
       root: objeto.worktrees?.root ?? '~/work/{name}',
       link: objeto.worktrees?.link ? [...objeto.worktrees.link] : [],
+      linkConCopia: objeto.worktrees?.linkConCopia ? objeto.worktrees.linkConCopia.map((x) => ({ dir: x.dir, copiar: [...x.copiar] })) : [],
       setup: objeto.worktrees?.setup ? [...objeto.worktrees.setup] : [],
     },
     env: objeto.env ? { ...objeto.env } : {},
@@ -375,7 +401,7 @@ export function perfilPorDefecto(nombreRepo) {
     promptPrefix: '',
     timeoutMs: null,
     protected: ['**/.env', '.opencode-orchestrator.json'],
-    worktrees: { root: '~/work/{name}', link: [], setup: [] },
+    worktrees: { root: '~/work/{name}', link: [], linkConCopia: [], setup: [] },
     env: {},
     resources: {},
     accept: {},

@@ -818,3 +818,42 @@ test('avanzarBase se niega si el árbol real tiene cambios sin commitear o no es
   assert.equal(noFf.ok, false);
   assert.match(noFf.motivo, /fast-forward/);
 });
+
+test('linkConCopia: el node_modules del worktree enlaza todo salvo lo copiado, y regenerar lo copiado NO toca el original', async () => {
+  const { raiz, rootDir } = await montar();
+  // node_modules de mentira (sin versionar, como el real): un paquete común, .prisma y @prisma/{client,otro}.
+  const nm = path.join(raiz, 'app', 'node_modules');
+  fs.mkdirSync(path.join(nm, 'comun'), { recursive: true });
+  fs.writeFileSync(path.join(nm, 'comun', 'index.js'), 'comun\n');
+  fs.mkdirSync(path.join(nm, '.prisma', 'client'), { recursive: true });
+  fs.writeFileSync(path.join(nm, '.prisma', 'client', 'index.js'), 'cliente original\n');
+  fs.mkdirSync(path.join(nm, '@prisma', 'client'), { recursive: true });
+  fs.writeFileSync(path.join(nm, '@prisma', 'client', 'index.js'), 'pc original\n');
+  fs.mkdirSync(path.join(nm, '@prisma', 'otro'), { recursive: true });
+  fs.writeFileSync(path.join(nm, '@prisma', 'otro', 'x.js'), 'otro\n');
+
+  const w = await crearWorktree({
+    repoRaiz: raiz,
+    base: 'main',
+    jobId: 'lc1',
+    rootDir,
+    linkConCopia: [{ dir: 'app/node_modules', copiar: ['.prisma', '@prisma/client'] }],
+  });
+  const d = path.join(w.ruta, 'app', 'node_modules');
+  assert.deepEqual(w.enlacesCreados, ['app/node_modules']);
+  assert.equal(fs.lstatSync(d).isSymbolicLink(), false, 'el directorio es real');
+  assert.equal(fs.lstatSync(path.join(d, 'comun')).isSymbolicLink(), true, 'lo común se enlaza');
+  assert.equal(fs.lstatSync(path.join(d, '.prisma')).isSymbolicLink(), false, '.prisma se copia');
+  assert.equal(fs.lstatSync(path.join(d, '@prisma')).isSymbolicLink(), false, '@prisma es real');
+  assert.equal(fs.lstatSync(path.join(d, '@prisma', 'client')).isSymbolicLink(), false, '@prisma/client se copia');
+  assert.equal(fs.lstatSync(path.join(d, '@prisma', 'otro')).isSymbolicLink(), true, 'el resto de @prisma se enlaza');
+  assert.equal(fs.readFileSync(path.join(d, 'comun', 'index.js'), 'utf8'), 'comun\n');
+
+  // "prisma generate" en el worktree: reescribe SU copia; el original queda intacto.
+  fs.writeFileSync(path.join(d, '.prisma', 'client', 'index.js'), 'cliente regenerado\n');
+  assert.equal(fs.readFileSync(path.join(nm, '.prisma', 'client', 'index.js'), 'utf8'), 'cliente original\n');
+
+  // Y los enlaces/copias no aparecen como cambios del trabajo.
+  const { archivos } = await cambiosDelWorktree({ ruta: w.ruta, baseCommit: w.baseCommit, ignorar: w.enlacesCreados });
+  assert.deepEqual(archivos, []);
+});

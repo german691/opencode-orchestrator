@@ -301,3 +301,13 @@ Surgieron de ejecutar ~20 trabajos dependientes sobre el mismo repo:
 - **Vigilancia de alcance en vivo**: cada 30 s (`vigilanciaAlcanceMs`) se revisa el diff del worktree; si el agente persiste fuera de `writes`/protegidos en dos revisiones seguidas, se lo detiene y el trabajo queda `rejected` (`motivoFin: alcance`, proceso `detenido_por_alcance`) en vez de rechazarse recién al final.
 
 Pendientes: avisos activos de fin de trabajo (hoy hay que preguntar), y limpieza automática de worktrees tras integrar.
+
+### Cliente de Prisma por trabajo (`worktrees.linkConCopia`)
+
+Con `node_modules` enlazado una sola vez, un `prisma generate` dentro de un worktree reescribía
+`node_modules/.prisma/client` del repo real: pisaba el cliente de todos los trabajos en curso y el
+de los servicios en vivo (se vio al correr lotes que cambian el esquema en paralelo). El perfil
+puede declarar `worktrees.linkConCopia: [{ "dir": "backend/node_modules", "copiar": [".prisma", "@prisma/client"] }]`:
+el `node_modules` del worktree es un directorio real con un enlace por cada entrada del original,
+salvo lo listado en `copiar`, que se copia y queda propio del trabajo. Un dir no puede estar a la
+vez en `link` y en `linkConCopia`.

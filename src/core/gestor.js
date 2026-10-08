@@ -555,6 +555,7 @@ export class Gestor {
           jobId: id,
           rootDir,
           link: perfil.worktrees.link,
+          linkConCopia: perfil.worktrees.linkConCopia,
           setup: perfil.worktrees.setup,
           env: { ...perfil.env },
           signal: ctl.signal,

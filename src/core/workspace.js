@@ -441,6 +441,7 @@ export async function crearWorktree({
   jobId,
   rootDir,
   link = [],
+  linkConCopia = [],
   setup = [],
   env = {},
   setupTimeoutMs = SETUP_TIMEOUT_MS,
@@ -453,6 +454,12 @@ export async function crearWorktree({
     throw new ErrorDeWorkspace('rootDir debe ser un texto no vacío');
   }
   if (!Array.isArray(link)) throw new ErrorDeWorkspace('link debe ser un array de rutas relativas');
+  if (
+    !Array.isArray(linkConCopia) ||
+    linkConCopia.some((x) => !x || typeof x.dir !== 'string' || !Array.isArray(x.copiar) || x.copiar.some((c) => typeof c !== 'string'))
+  ) {
+    throw new ErrorDeWorkspace('linkConCopia debe ser un array de { dir, copiar: string[] }');
+  }
   if (!Array.isArray(setup)) throw new ErrorDeWorkspace('setup debe ser un array de comandos');
   if (setupTimeoutMs !== undefined && (!Number.isFinite(setupTimeoutMs) || setupTimeoutMs < 0)) {
     throw new ErrorDeWorkspace('setupTimeoutMs debe ser un número no negativo');
@@ -542,6 +549,26 @@ export async function crearWorktree({
       fs.symlinkSync(origen, destino, origenStat.isDirectory() ? 'dir' : 'file');
       // NO se escribe en el `info/exclude` COMPARTIDO del repo real (W3): los
       // enlaces se filtran por ruta en `cambiosDelWorktree` y `commitearTrabajo`.
+      enlacesCreados.push(relativa);
+    }
+
+    // 3b) Directorios "espejados": enlaces a casi todo, copia propia de lo que el trabajo puede
+    // REGENERAR (p. ej. el cliente de Prisma en node_modules/.prisma). Con un enlace único al
+    // node_modules real, un `prisma generate` en un worktree pisaba el cliente de TODOS los
+    // trabajos y de los servicios en vivo.
+    for (const { dir, copiar } of linkConCopia) {
+      const relativa = validarRutaRelativa(dir, 0, 'linkConCopia');
+      const origen = path.join(repoRaiz, relativa);
+      const origenStat = fs.lstatSync(origen, { throwIfNoEntry: false });
+      const destino = path.join(creado.ruta, relativa);
+      if (!origenStat || !origenStat.isDirectory() || fs.lstatSync(destino, { throwIfNoEntry: false })) {
+        enlacesOmitidos.push(relativa);
+        continue;
+      }
+      if (!estaDentro(creado.ruta, destino)) {
+        throw new ErrorDeWorkspace(`linkConCopia '${relativa}' escaparía del worktree`);
+      }
+      espejarDirectorio(origen, destino, copiar.map((c) => c.split('\\').join('/')));
       enlacesCreados.push(relativa);
     }
 
@@ -1206,4 +1233,31 @@ export async function trasladarCambios({ desde, hacia, baseCommit, ignorar = [] 
     }
   }
   return { copiados, borrados, omitidos };
+}
+
+/**
+ * Crea `destino` como directorio REAL con un enlace simbólico por cada entrada de `origen`,
+ * salvo las rutas de `copiar` (relativas a `origen`), que se COPIAN. Una ruta como
+ * `@prisma/client` convierte `@prisma` en directorio real (con enlaces a sus otros hijos) y copia
+ * solo `client`. Rutas inexistentes en el origen se ignoran.
+ *
+ * @param {string} origen
+ * @param {string} destino
+ * @param {string[]} copiar rutas relativas a copiar (separador '/')
+ * @param {string} [prefijo] uso interno (ruta relativa actual)
+ */
+function espejarDirectorio(origen, destino, copiar, prefijo = '') {
+  fs.mkdirSync(destino, { recursive: true });
+  for (const entrada of fs.readdirSync(origen, { withFileTypes: true })) {
+    const relativa = prefijo === '' ? entrada.name : `${prefijo}/${entrada.name}`;
+    const deOrigen = path.join(origen, entrada.name);
+    const deDestino = path.join(destino, entrada.name);
+    if (copiar.includes(relativa)) {
+      fs.cpSync(deOrigen, deDestino, { recursive: true, dereference: false });
+    } else if (copiar.some((c) => c.startsWith(`${relativa}/`)) && entrada.isDirectory()) {
+      espejarDirectorio(deOrigen, deDestino, copiar, relativa);
+    } else {
+      fs.symlinkSync(fs.realpathSync(deOrigen), deDestino, entrada.isDirectory() ? 'dir' : 'file');
+    }
+  }
 }
