@@ -295,9 +295,9 @@ Surgieron de ejecutar ~20 trabajos dependientes sobre el mismo repo:
 
 ### Segunda tanda (misma sesión)
 
-- **Compuerta sobre la integración**:  con  no corre al agente, solo la  sobre un worktree (con  mide la rama de integración). Así cada trabajo corre una aceptación liviana y la suite completa corre UNA vez por tanda.
-- **Retomar un trabajo**:  crea un worktree desde el mismo commit base, copia los archivos que dejó el trabajo rechazado/fallido/caído (si conserva su worktree) y hereda writes, resources y accept; con  repite solo la aceptación, sin  el agente continúa con el nuevo prompt.
-- ****: espera ~45 s a que termine alguno y devuelve terminados + activos, en vez de sondear de a uno.
-- **Vigilancia de alcance en vivo**: cada 30 s () se revisa el diff del worktree; si el agente persiste fuera de /protegidos en dos revisiones seguidas, se lo detiene y el trabajo queda  (, proceso ) en vez de rechazarse recién al final.
+- **Compuerta sobre la integración**: `opencode_coding` con `solo_aceptacion: true` no corre al agente, solo la `accept` sobre un worktree (con `base: "integracion"` mide la rama de integración). Así cada trabajo corre una aceptación liviana y la suite completa corre UNA vez por tanda.
+- **Retomar un trabajo**: `desde_job: <id>` crea un worktree desde el mismo commit base, copia los archivos que dejó el trabajo rechazado/fallido/caído (si conserva su worktree) y hereda `writes`, `resources` y `accept`; con `solo_aceptacion` repite solo la aceptación, sin ella el agente continúa con el nuevo prompt.
+- **`opencode_wait_any([ids])`**: espera ~45 s a que termine alguno y devuelve terminados + activos, en vez de sondear de a uno.
+- **Vigilancia de alcance en vivo**: cada 30 s (`vigilanciaAlcanceMs`) se revisa el diff del worktree; si el agente persiste fuera de `writes`/protegidos en dos revisiones seguidas, se lo detiene y el trabajo queda `rejected` (`motivoFin: alcance`, proceso `detenido_por_alcance`) en vez de rechazarse recién al final.
 
 Pendientes: avisos activos de fin de trabajo (hoy hay que preguntar), y limpieza automática de worktrees tras integrar.
