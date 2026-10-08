@@ -78,6 +78,20 @@ test('detalle: transcript sin ANSI, respuesta y fallos de la aceptación', () =>
   assert.equal(d.aceptacion.exit, 1);
 });
 
+test('detalle: sin fallos mientras la aceptación no terminó o salió bien', () => {
+  const { jobs } = crearEstado();
+  const err = ' FAIL  test/a.test.ts > suma\nAssertionError: x\n';
+  crearJob(jobs, 'enCurso', { estado: 'verifying', creadoEn: AHORA - 1000 }, { stderr: 'x', aceptacionErr: err, hace: 1 });
+  crearJob(
+    jobs,
+    'verde',
+    { estado: 'succeeded', creadoEn: AHORA - 1000, resultado: { aceptacion: { ejecutada: true, exit: 0 } } },
+    { stderr: 'x', aceptacionErr: err, hace: 1 },
+  );
+  assert.equal(detalleDeTrabajo(jobs, 'enCurso', AHORA).fallos, null);
+  assert.equal(detalleDeTrabajo(jobs, 'verde', AHORA).fallos, null);
+});
+
 test('detalle: ids con ../ o inexistentes devuelven null (no salen del directorio)', () => {
   const { jobs } = crearEstado();
   assert.equal(idValido('../x'), false);

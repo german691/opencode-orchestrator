@@ -165,8 +165,12 @@ export function detalleDeTrabajo(baseDir, id, ahora = Date.now()) {
   const aceptacionOut = leerCola(path.join(dir, 'aceptacion.log'));
   const aceptacionErr = leerCola(path.join(dir, 'aceptacion.err.log'));
   const aceptacion = job.resultado?.aceptacion ?? null;
-  const fallos =
-    resumirFallos({ stdout: sinAnsi(aceptacionOut), stderr: sinAnsi(aceptacionErr) }) ?? null;
+  // Solo hay "fallos" si la aceptación terminó y falló: un log parcial en curso
+  // (o uno verde con tests que mencionan "fail") no debe alarmar.
+  const fallo = aceptacion !== null && aceptacion.ejecutada === true && aceptacion.exit !== 0;
+  const fallos = fallo
+    ? (resumirFallos({ stdout: sinAnsi(aceptacionOut), stderr: sinAnsi(aceptacionErr) }) ?? null)
+    : null;
   return {
     ...resumen,
     cwd: job.cwd ?? null,
