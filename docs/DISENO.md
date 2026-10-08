@@ -311,3 +311,14 @@ puede declarar `worktrees.linkConCopia: [{ "dir": "backend/node_modules", "copia
 el `node_modules` del worktree es un directorio real con un enlace por cada entrada del original,
 salvo lo listado en `copiar`, que se copia y queda propio del trabajo. Un dir no puede estar a la
 vez en `link` y en `linkConCopia`.
+
+### Corte por falta de progreso (`sinProgresoMs`)
+
+Un agente puede pasarse mucho tiempo "explorando" (leer, buscar) sin escribir nada (se vio en vivo:
+21 minutos y cero archivos). El vigilante de alcance (revisa el diff cada 30 s) ahora también corta al
+agente si en `sinProgresoMs` (perfil; por defecto 10 min; `0` = sin límite) todavía no hay NINGÚN cambio
+propio en el worktree. El trabajo termina `failed` con `motivoFin: sin_progreso` y una advertencia que
+explica cómo relanzar (prompt acotado con archivos y líneas exactas; `desde_job` no sirve: no hay nada
+que retomar). No aplica a `readonly` ni a `solo_aceptacion`. Además el encabezado del agente le pide
+acotar la exploración. Recomendación de uso: ante una tarea transversal, buscar primero los lugares
+exactos (grep) y darlos en el prompt.

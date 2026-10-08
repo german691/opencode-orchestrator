@@ -124,3 +124,44 @@ test('solo_aceptacion y avanzar_base se aceptan también como texto "true" (clie
   assert.equal(r.estado, 'succeeded');
   assert.equal(r.resultado.proceso.duracionMs, 0, 'el agente no corrió');
 });
+
+test('sin progreso: un agente que no escribe nada en el plazo se corta y el mensaje dice cómo relanzar', async (t) => {
+  const m = await montar(t);
+  // Se queda "explorando" 60 s sin escribir: sin el vigilante llegaría al tope de tiempo.
+  const gestor = crearGestor(m.almacen, {
+    fake: m.fake,
+    entorno: entornoFalso({ ORQ_FAKE_DORMIR: '60000' }),
+    home: m.home,
+    vigilanciaAlcanceMs: 100,
+    sinProgresoMs: 700,
+  });
+  const inicio = Date.now();
+  const r = await correr(gestor, { prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  assert.equal(r.estado, 'failed');
+  assert.equal(r.motivoFin, 'sin_progreso');
+  assert.ok(Date.now() - inicio < 20000, 'se cortó temprano');
+  assert.match(r.resultado.advertencias.join(' '), /NINGÚN archivo.*Relanzá.*ACOTADO/s);
+});
+
+test('sin progreso: un agente que escribe a tiempo NO se corta aunque siga trabajando; y readonly queda exento', async (t) => {
+  const m = await montar(t);
+  const escribe = crearGestor(m.almacen, {
+    fake: m.fake,
+    entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'subA/ok.txt', ORQ_FAKE_DORMIR: '2500' }),
+    home: m.home,
+    vigilanciaAlcanceMs: 100,
+    sinProgresoMs: 1200,
+  });
+  const ok = await correr(escribe, { prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  assert.equal(ok.estado, 'succeeded', 'escribió antes del plazo: sigue vivo');
+
+  const lector = crearGestor(m.almacen, {
+    fake: m.fake,
+    entorno: entornoFalso({ ORQ_FAKE_DORMIR: '2500' }),
+    home: m.home,
+    vigilanciaAlcanceMs: 100,
+    sinProgresoMs: 700,
+  });
+  const ro = await correr(lector, { prompt: 'solo mira', cwd: m.repo, mode: 'readonly' });
+  assert.notEqual(ro.motivoFin, 'sin_progreso', 'readonly no escribe: no se corta por eso');
+});

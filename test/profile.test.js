@@ -340,3 +340,12 @@ test('validarPerfil: aceptacionTimeoutMs se valida y por defecto es null', () =>
   assert.equal(validarPerfil({ ...base, aceptacionTimeoutMs: 1_800_000 }).aceptacionTimeoutMs, 1_800_000);
   assert.throws(() => validarPerfil({ ...base, aceptacionTimeoutMs: 5 }), /aceptacionTimeoutMs/);
 });
+
+test('validarPerfil: sinProgresoMs acepta 0 (sin límite) o 1 min–6 h y por defecto es null', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.equal(validarPerfil(base).sinProgresoMs, null);
+  assert.equal(validarPerfil({ ...base, sinProgresoMs: 0 }).sinProgresoMs, 0);
+  assert.equal(validarPerfil({ ...base, sinProgresoMs: 600_000 }).sinProgresoMs, 600_000);
+  assert.throws(() => validarPerfil({ ...base, sinProgresoMs: 30_000 }), /sinProgresoMs/);
+  assert.throws(() => validarPerfil({ ...base, sinProgresoMs: 'x' }), /sinProgresoMs/);
+});

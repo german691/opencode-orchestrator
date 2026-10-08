@@ -399,6 +399,12 @@ export function construirPrompt({
       '- Si para cumplir la tarea necesitas modificar un archivo FUERA de esos patrones (o uno protegido) o un test existente que no puedas tocar, NO esquives el problema ni cambies el diseño: detenete y reportalo en tu respuesta final indicando el archivo exacto y por que.',
     );
   }
+  if (modo !== 'readonly') {
+    // Visto en vivo: un agente pasó 21 minutos leyendo y buscando sin escribir nada. Se le pide acotar la exploración.
+    lineas.push(
+      '- No explores el repositorio entero: leé solo lo que necesitás y empezá a escribir los cambios apenas sepas dónde. Si tras unas 20 lecturas no encontrás dónde cambiar, detenete y reportá qué te falta. Un trabajo que no escribe ningún archivo en 10 minutos se corta.',
+    );
+  }
   lineas.push('- No hagas git commit, ni push, ni reset, ni clean.');
   lineas.push('- No corras la suite completa ni comandos que usen recursos compartidos salvo que la tarea lo pida.');
   lineas.push('- Termina apenas pasen tus verificaciones.');

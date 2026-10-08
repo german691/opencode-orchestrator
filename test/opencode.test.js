@@ -396,3 +396,8 @@ test('construirPrompt: antepone el prefijo del perfil a la tarea y manda parar a
   // Sin prefijo no agrega nada entre el separador y la tarea.
   assert.equal(construirPrompt({ prompt: 'x', modo: 'safe', writes: ['a'] }).endsWith('x'), true);
 });
+
+test('construirPrompt pide acotar la exploración (salvo en readonly)', () => {
+  assert.match(construirPrompt({ prompt: 'x', modo: 'safe', writes: ['a'] }), /No explores el repositorio entero/);
+  assert.doesNotMatch(construirPrompt({ prompt: 'x', modo: 'readonly' }), /No explores el repositorio entero/);
+});

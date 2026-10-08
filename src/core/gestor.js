@@ -62,6 +62,8 @@ const DEFECTOS = Object.freeze({
   concurrencia: 3,
   // Cada cuánto se revisa si el agente se salió del alcance mientras trabaja (0 = no vigilar).
   vigilanciaAlcanceMs: 30 * 1000,
+  // Minutos sin escribir NADA tras los cuales se corta al agente (0 = sin límite).
+  sinProgresoMs: 10 * 60 * 1000,
   timeoutMs: 30 * 60 * 1000,
   idleTimeoutMs: 10 * 60 * 1000,
   aceptacionTimeoutMs: 10 * 60 * 1000,
@@ -147,6 +149,7 @@ export class Gestor {
     graceMs = DEFECTOS.graceMs,
     esperaMaximaMs = DEFECTOS.esperaMaximaMs,
     vigilanciaAlcanceMs = DEFECTOS.vigilanciaAlcanceMs,
+    sinProgresoMs,
     ejecutarPsql,
     autor = DEFECTOS.autor,
   } = {}) {
@@ -168,6 +171,8 @@ export class Gestor {
     this.ejecutarPsql = ejecutarPsql;
     this.autor = autor;
     this.vigilanciaAlcanceMs = vigilanciaAlcanceMs;
+    // undefined = rige el del perfil (o el por defecto); los tests lo acortan.
+    this.sinProgresoMs = sinProgresoMs;
 
     /** @type {Map<string, object>} copia en memoria de los trabajos (espejo del almacén) */
     this.trabajos = new Map();
@@ -654,12 +659,19 @@ export class Gestor {
       const reenviarAborto = () => senalAgente.abort();
       ctl.signal.addEventListener('abort', reenviarAborto, { once: true });
       let violacionTemprana = null;
+      let sinProgreso = null;
       let vigilante = null;
+      // Falta de PROGRESO: un agente que solo explora (lee, busca) y no escribe nada durante mucho
+      // tiempo no está avanzando (visto en vivo: 21 minutos sin una sola escritura). Se lo corta para
+      // relanzar la tarea con instrucciones precisas. 0 = sin límite. No aplica a readonly (no escribe).
+      const limiteSinProgreso = this.sinProgresoMs ?? perfil.sinProgresoMs ?? DEFECTOS.sinProgresoMs;
+      const iniciadoEn = Date.now();
+      let huboEscrituras = false;
       if (!job.soloAceptacion && this.vigilanciaAlcanceMs > 0) {
         let firmaPrevia = '';
         let revisando = false;
         vigilante = setInterval(async () => {
-          if (revisando || violacionTemprana) return;
+          if (revisando || violacionTemprana || sinProgreso) return;
           revisando = true;
           try {
             const { archivos } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
@@ -667,6 +679,14 @@ export class Gestor {
               if (!previos.has(archivo)) return true;
               return hashDeArchivo(path.join(raizTrabajo, archivo)) !== previos.get(archivo);
             });
+            if (propios.length > 0) huboEscrituras = true;
+            const transcurrido = Date.now() - iniciadoEn;
+            if (!huboEscrituras && job.mode !== 'readonly' && limiteSinProgreso > 0 && transcurrido > limiteSinProgreso) {
+              sinProgreso = { transcurridoMs: transcurrido, limiteMs: limiteSinProgreso };
+              this.#evento(id, { tipo: 'sin_progreso', ...sinProgreso });
+              senalAgente.abort();
+              return;
+            }
             const v = verificarCambios({ archivosCambiados: propios, writes: job.writes, protegidos, modo: job.mode });
             const firma = v.ok ? '' : JSON.stringify(v.violaciones);
             if (firma !== '' && firma === firmaPrevia) {
@@ -711,6 +731,21 @@ export class Gestor {
       } finally {
         if (vigilante) clearInterval(vigilante);
         ctl.signal.removeEventListener('abort', reenviarAborto);
+      }
+      if (sinProgreso && !ctl.signal.aborted) {
+        const proceso = { motivo: 'detenido_por_falta_de_progreso', exit: null, senal: null, duracionMs: resultadoProceso.duracionMs };
+        this.#evento(id, { tipo: 'proceso_terminado', ...proceso });
+        const minutos = Math.round(sinProgreso.transcurridoMs / 60000);
+        return this.#terminar(id, 'failed', {
+          proceso,
+          archivos: [],
+          advertencias: [
+            `Detenido: el agente no escribió NINGÚN archivo en ${minutos} min (solo exploró). No hay nada que retomar con ` +
+              '`desde_job`. Relanzá la tarea con un prompt ACOTADO: indicá los archivos y las líneas exactas donde cambiar ' +
+              '(buscalos vos antes con grep) y pedile que empiece a escribir enseguida.',
+          ],
+          motivoFin: 'sin_progreso',
+        });
       }
       if (violacionTemprana && !ctl.signal.aborted) {
         const proceso = { motivo: 'detenido_por_alcance', exit: null, senal: null, duracionMs: resultadoProceso.duracionMs };

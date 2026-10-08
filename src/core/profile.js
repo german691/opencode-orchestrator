@@ -40,6 +40,7 @@ const CLAVES_PERFIL = new Set([
   'promptPrefix',
   'timeoutMs',
   'aceptacionTimeoutMs',
+  'sinProgresoMs',
   'protected',
   'worktrees',
   'env',
@@ -157,6 +158,11 @@ export function validarPerfil(objeto) {
     }
   }
 
+  if (objeto.sinProgresoMs !== undefined) {
+    if (!Number.isFinite(objeto.sinProgresoMs) || (objeto.sinProgresoMs !== 0 && (objeto.sinProgresoMs < 60_000 || objeto.sinProgresoMs > 6 * 3600_000))) {
+      errores.push('sinProgresoMs: 0 (sin límite) o milisegundos entre 1 minuto y 6 horas');
+    }
+  }
   if (objeto.aceptacionTimeoutMs !== undefined) {
     if (!Number.isFinite(objeto.aceptacionTimeoutMs) || objeto.aceptacionTimeoutMs < 60_000 || objeto.aceptacionTimeoutMs > 6 * 3600_000) {
       errores.push('aceptacionTimeoutMs: debe ser un número de milisegundos entre 1 minuto y 6 horas');
@@ -344,6 +350,7 @@ export function validarPerfil(objeto) {
     // Tope total por defecto de un trabajo (si el envío no pide otro); null = el del servidor.
     timeoutMs: objeto.timeoutMs ?? null,
     aceptacionTimeoutMs: objeto.aceptacionTimeoutMs ?? null,
+    sinProgresoMs: objeto.sinProgresoMs ?? null,
     protected: objeto.protected ? [...objeto.protected] : [],
     worktrees: {
       root: objeto.worktrees?.root ?? '~/work/{name}',
@@ -409,6 +416,7 @@ export function perfilPorDefecto(nombreRepo) {
     promptPrefix: '',
     timeoutMs: null,
     aceptacionTimeoutMs: null,
+    sinProgresoMs: null,
     protected: ['**/.env', '.opencode-orchestrator.json'],
     worktrees: { root: '~/work/{name}', link: [], linkConCopia: [], setup: [] },
     env: {},
