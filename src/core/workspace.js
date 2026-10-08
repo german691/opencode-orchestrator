@@ -1155,3 +1155,55 @@ export async function avanzarBase({ repoRaiz, base, integrationBranch } = {}) {
     return { ok: true, sha: despues, cambio: despues !== antes };
   });
 }
+
+/**
+ * Copia a otro worktree los archivos que un trabajo dejó (modificados, nuevos o borrados
+ * respecto de su commit base). Sirve para retomar un trabajo rechazado o caído sin repetir al
+ * agente. Copia CONTENIDO archivo a archivo (no aplica parches): no depende del estado de git
+ * del origen, y los enlaces simbólicos y todo lo que escape de las raíces se omiten.
+ *
+ * @param {object} opciones
+ * @param {string} opciones.desde worktree de origen
+ * @param {string} opciones.hacia worktree de destino (parte del MISMO commit base)
+ * @param {string} opciones.baseCommit commit base del origen (para saber qué cambió)
+ * @param {string[]} [opciones.ignorar] enlaces creados en el origen (node_modules, etc.)
+ * @returns {Promise<{ copiados: string[], borrados: string[], omitidos: string[] }>}
+ */
+export async function trasladarCambios({ desde, hacia, baseCommit, ignorar = [] } = {}) {
+  const { archivos } = await cambiosDelWorktree({ ruta: desde, baseCommit, ignorar });
+  const copiados = [];
+  const borrados = [];
+  const omitidos = [];
+  const raizDesde = fs.realpathSync(desde);
+  const raizHacia = fs.realpathSync(hacia);
+  for (const relativo of archivos) {
+    const normal = relativo.split('\\').join('/');
+    if (path.isAbsolute(normal) || normal.split('/').includes('..')) {
+      omitidos.push(relativo);
+      continue;
+    }
+    const origen = path.join(raizDesde, normal);
+    const destino = path.join(raizHacia, normal);
+    if (!estaDentro(raizDesde, origen) || !estaDentro(raizHacia, destino)) {
+      omitidos.push(relativo);
+      continue;
+    }
+    let info = null;
+    try {
+      info = fs.lstatSync(origen);
+    } catch {
+      info = null; // no existe: el trabajo lo borró
+    }
+    if (info === null) {
+      fs.rmSync(destino, { force: true });
+      borrados.push(relativo);
+    } else if (info.isSymbolicLink() || !info.isFile()) {
+      omitidos.push(relativo);
+    } else {
+      fs.mkdirSync(path.dirname(destino), { recursive: true });
+      fs.copyFileSync(origen, destino);
+      copiados.push(relativo);
+    }
+  }
+  return { copiados, borrados, omitidos };
+}

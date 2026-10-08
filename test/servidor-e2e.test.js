@@ -129,7 +129,7 @@ const vivo = (pid) => {
   }
 };
 
-test('el servidor expone las 8 herramientas y su stdout es solo protocolo', async () => {
+test('el servidor expone las 9 herramientas y su stdout es solo protocolo', async () => {
   const e = montarEscenario();
   const s = iniciarServidor(e);
   const init = await s.rpc('initialize', { protocolVersion: '2024-11-05' });
@@ -137,7 +137,7 @@ test('el servidor expone las 8 herramientas y su stdout es solo protocolo', asyn
   const { result } = await s.rpc('tools/list');
   assert.deepEqual(
     result.tools.map((t) => t.name).sort(),
-    ['opencode_cancel', 'opencode_cleanup', 'opencode_coding', 'opencode_list', 'opencode_logs', 'opencode_merge', 'opencode_profile', 'opencode_wait'],
+    ['opencode_cancel', 'opencode_cleanup', 'opencode_coding', 'opencode_list', 'opencode_logs', 'opencode_merge', 'opencode_profile', 'opencode_wait', 'opencode_wait_any'],
   );
   s.proceso.stdin.end();
   const { codigo } = await s.salida;

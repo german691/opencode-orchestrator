@@ -293,7 +293,11 @@ Surgieron de ejecutar ~20 trabajos dependientes sobre el mismo repo:
   tope total por defecto (p. ej. 1 h para backend). El encabezado del agente ahora manda
   detenerse y reportar (no esquivar) ante un archivo fuera de `writes`.
 
-Pendientes (ordenados): aceptación por niveles con compuerta completa una vez sobre la
-integración; `opencode_continue`/`opencode_verify` para retomar un trabajo rechazado o caído
-sin repetir al agente; `opencode_wait_any` y avisos de fin; detección temprana de choque de
-alcance durante la ejecución.
+### Segunda tanda (misma sesión)
+
+- **Compuerta sobre la integración**:  con  no corre al agente, solo la  sobre un worktree (con  mide la rama de integración). Así cada trabajo corre una aceptación liviana y la suite completa corre UNA vez por tanda.
+- **Retomar un trabajo**:  crea un worktree desde el mismo commit base, copia los archivos que dejó el trabajo rechazado/fallido/caído (si conserva su worktree) y hereda writes, resources y accept; con  repite solo la aceptación, sin  el agente continúa con el nuevo prompt.
+- ****: espera ~45 s a que termine alguno y devuelve terminados + activos, en vez de sondear de a uno.
+- **Vigilancia de alcance en vivo**: cada 30 s () se revisa el diff del worktree; si el agente persiste fuera de /protegidos en dos revisiones seguidas, se lo detiene y el trabajo queda  (, proceso ) en vez de rechazarse recién al final.
+
+Pendientes: avisos activos de fin de trabajo (hoy hay que preguntar), y limpieza automática de worktrees tras integrar.

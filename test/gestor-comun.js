@@ -159,7 +159,7 @@ export function leerJob(estadoDir, id) {
  */
 export function crearGestor(
   almacen,
-  { entorno, concurrencia = 2, home, graceMs = 300, esperaMaximaMs = 60000, ejecutarPsql, fake = FIXTURE } = {},
+  { entorno, concurrencia = 2, home, graceMs = 300, esperaMaximaMs = 60000, ejecutarPsql, fake = FIXTURE, vigilanciaAlcanceMs } = {},
 ) {
   return new Gestor({
     almacen,
@@ -170,6 +170,8 @@ export function crearGestor(
     graceMs,
     esperaMaximaMs,
     ejecutarPsql,
+    // undefined = el valor por defecto del gestor; los tests de vigilancia lo acortan
+    ...(vigilanciaAlcanceMs === undefined ? {} : { vigilanciaAlcanceMs }),
   });
 }
 

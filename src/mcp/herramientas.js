@@ -73,8 +73,11 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
           title: { type: 'string', description: 'Etiqueta corta para los listados.' },
           model: { type: 'string', description: 'Modelo proveedor/modelo (por defecto el del servidor).' },
           prioridad: { type: 'number', description: 'Mayor = antes en la cola.' },
+          base: { type: 'string', enum: ['base', 'integracion'], description: 'De qué rama parte el worktree: la base del perfil o la rama de integración (con lo ya integrado). Por defecto el `jobBase` del perfil.' },
+          solo_aceptacion: { type: 'boolean', description: 'No corre al agente: solo ejecuta `accept` sobre un worktree. Úsalo como COMPUERTA sobre la integración (con base: "integracion" y accept: la suite completa) o para re-verificar un trabajo ya arreglado (con desde_job). No requiere `prompt` ni `writes`.' },
+          desde_job: { type: 'string', description: 'Retoma un trabajo terminado (rechazado, fallido o caído) que conserve su worktree: el nuevo parte del mismo commit y recibe los archivos que dejó, y hereda su writes, resources y accept. Con solo_aceptacion solo repite la aceptación; sin ella el agente continúa con el nuevo `prompt`.' },
         },
-        required: ['prompt', 'cwd'],
+        required: ['cwd'],
         additionalProperties: false,
       },
       manejar: async (args) => {
@@ -87,6 +90,33 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
       description: 'Espera hasta ~45 s a un trabajo iniciado con opencode_coding. Devuelve el resultado si terminó o `STILL RUNNING` otra vez: repetí hasta que termine.',
       inputSchema: { type: 'object', properties: { job_id: ESQUEMA_JOB }, required: ['job_id'], additionalProperties: false },
       manejar: async (args) => respuestaDe(exigirId(args), esperaMs),
+    },
+    {
+      name: 'opencode_wait_any',
+      description:
+        'Espera hasta ~45 s a que TERMINE alguno de varios trabajos y devuelve el resumen de los que ya terminaron ' +
+        '(con su detalle) y el estado de los que siguen activos. Evita sondear uno por uno: repetí hasta que no quede ninguno activo.',
+      inputSchema: {
+        type: 'object',
+        properties: { job_ids: { type: 'array', items: ESQUEMA_JOB, minItems: 1, description: 'job_id a esperar.' } },
+        required: ['job_ids'],
+        additionalProperties: false,
+      },
+      manejar: async (args) => {
+        const ids = Array.isArray(args.job_ids) ? args.job_ids.filter((id) => typeof id === 'string' && id !== '') : [];
+        if (ids.length === 0) throw new ErrorDeGestor('`job_ids` debe ser una lista no vacía de job_id');
+        const { terminados, activos } = await gestor.esperarAlguno(ids, esperaMs);
+        const partes = [];
+        let malo = false;
+        for (const id of terminados) {
+          const r = await respuestaDe(id, 0);
+          malo = malo || r.isError;
+          partes.push(r.text);
+        }
+        for (const id of activos) partes.push(describirActivo(gestor.obtener(id), ahora()));
+        const cabecera = `terminados=${terminados.length} | activos=${activos.length}`;
+        return { text: `${cabecera}\n\n${partes.join('\n\n---\n\n')}`, isError: malo };
+      },
     },
     {
       name: 'opencode_list',

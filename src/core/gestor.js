@@ -49,6 +49,7 @@ import {
   integrar,
   raizGit,
   sincronizarIntegracion,
+  trasladarCambios,
 } from './workspace.js';
 
 /** Nombre del archivo de perfil en la raíz del repositorio objetivo. */
@@ -59,6 +60,8 @@ const NOMBRE_AGENTE = 'orq';
 
 const DEFECTOS = Object.freeze({
   concurrencia: 3,
+  // Cada cuánto se revisa si el agente se salió del alcance mientras trabaja (0 = no vigilar).
+  vigilanciaAlcanceMs: 30 * 1000,
   timeoutMs: 30 * 60 * 1000,
   idleTimeoutMs: 10 * 60 * 1000,
   aceptacionTimeoutMs: 10 * 60 * 1000,
@@ -143,6 +146,7 @@ export class Gestor {
     home = os.homedir(),
     graceMs = DEFECTOS.graceMs,
     esperaMaximaMs = DEFECTOS.esperaMaximaMs,
+    vigilanciaAlcanceMs = DEFECTOS.vigilanciaAlcanceMs,
     ejecutarPsql,
     autor = DEFECTOS.autor,
   } = {}) {
@@ -163,6 +167,7 @@ export class Gestor {
     this.esperaMaximaMs = esperaMaximaMs;
     this.ejecutarPsql = ejecutarPsql;
     this.autor = autor;
+    this.vigilanciaAlcanceMs = vigilanciaAlcanceMs;
 
     /** @type {Map<string, object>} copia en memoria de los trabajos (espejo del almacén) */
     this.trabajos = new Map();
@@ -272,8 +277,30 @@ export class Gestor {
    */
   async enviar(spec = {}) {
     if (this.cerrado) throw new ErrorDeGestor('El servidor se está cerrando: no acepta trabajos nuevos');
+    // `solo_aceptacion`: no corre al agente, solo la aceptación sobre un worktree (compuerta sobre la
+    // integración, o re-verificación de un trabajo rechazado ya arreglado). No necesita prompt.
+    const soloAceptacion = spec.solo_aceptacion === true;
+    if (soloAceptacion && (typeof spec.prompt !== 'string' || spec.prompt.trim() === '')) {
+      spec = { ...spec, prompt: 'Solo aceptación (no se ejecuta el agente).' };
+    }
     if (typeof spec.prompt !== 'string' || spec.prompt.trim() === '') {
       throw new ErrorDeGestor('`prompt` es obligatorio');
+    }
+    if (spec.base !== undefined && spec.base !== 'base' && spec.base !== 'integracion') {
+      throw new ErrorDeGestor("`base` debe ser 'base' o 'integracion'");
+    }
+    // `desde_job`: retoma el trabajo de otro (rechazado o caído) sin repetir al agente: el worktree
+    // nuevo parte del mismo commit base y recibe los archivos que dejó el anterior.
+    let origen = null;
+    if (spec.desde_job !== undefined && spec.desde_job !== null) {
+      origen = this.trabajos.get(String(spec.desde_job)) ?? null;
+      if (!origen) throw new ErrorDeGestor(`desde_job: no existe el trabajo '${spec.desde_job}'`);
+      if (!esTerminal(origen.estado)) {
+        throw new ErrorDeGestor(`desde_job: el trabajo '${origen.id}' sigue ${origen.estado}; esperá a que termine`);
+      }
+      if (origen.isolation !== 'worktree' || !origen.worktree || origen.limpiado || !fs.existsSync(origen.worktree)) {
+        throw new ErrorDeGestor(`desde_job: el trabajo '${origen.id}' no conserva su worktree (¿ya se limpió?)`);
+      }
     }
     let modo;
     try {
@@ -301,9 +328,14 @@ export class Gestor {
     }
     const perfil = await this.#perfilDe(repo);
 
-    const isolation = spec.isolation === undefined ? (modo === 'readonly' ? 'none' : 'worktree') : spec.isolation;
+    // Solo-aceptación y retomar un trabajo necesitan SIEMPRE un worktree propio.
+    const exigeWorktree = soloAceptacion || origen !== null;
+    const isolation = spec.isolation === undefined ? (modo === 'readonly' && !exigeWorktree ? 'none' : 'worktree') : spec.isolation;
     if (isolation !== 'worktree' && isolation !== 'none') {
       throw new ErrorDeGestor("`isolation` debe ser 'worktree' o 'none'");
+    }
+    if (exigeWorktree && isolation !== 'worktree') {
+      throw new ErrorDeGestor('`solo_aceptacion` y `desde_job` requieren isolation: worktree');
     }
 
     const lista = (valor, campo, porDefecto) => {
@@ -313,8 +345,9 @@ export class Gestor {
       }
       return valor;
     };
-    const writes = modo === 'readonly' ? [] : lista(spec.writes, 'writes', []);
-    if (modo === 'safe' && writes.length === 0) {
+    // Retomar un trabajo hereda su alcance si el envío no declara otro.
+    const writes = modo === 'readonly' ? [] : lista(spec.writes, 'writes', origen?.writes ?? []);
+    if (modo === 'safe' && writes.length === 0 && !(soloAceptacion && origen === null)) {
       throw new ErrorDeGestor('En modo safe `writes` es obligatorio: declará qué patrones puede modificar');
     }
     const reads = lista(spec.reads, 'reads', ['**']);
@@ -339,7 +372,7 @@ export class Gestor {
           'ajustá `writes` o el perfil.',
       );
     }
-    const resources = lista(spec.resources, 'resources', []);
+    const resources = lista(spec.resources, 'resources', origen?.resources ?? []);
     for (const nombre of resources) {
       if (!perfil.resources || !Object.hasOwn(perfil.resources, nombre)) {
         throw new ErrorDeGestor(`Recurso desconocido '${nombre}' (el perfil declara: ${Object.keys(perfil.resources ?? {}).join(', ') || 'ninguno'})`);
@@ -358,8 +391,13 @@ export class Gestor {
     if (spec.accept !== undefined && spec.accept !== null && spec.accept !== '') {
       if (typeof spec.accept !== 'string') throw new ErrorDeGestor('`accept` debe ser un texto');
       aceptacion = Object.hasOwn(perfil.accept ?? {}, spec.accept) ? perfil.accept[spec.accept] : spec.accept;
+    } else if (origen?.aceptacion) {
+      aceptacion = origen.aceptacion; // retomar: la misma aceptación que el trabajo original
     } else if (modo !== 'readonly' && perfil.accept && typeof perfil.accept.default === 'string') {
       aceptacion = perfil.accept.default;
+    }
+    if (soloAceptacion && !aceptacion) {
+      throw new ErrorDeGestor('`solo_aceptacion` necesita una `accept` (comando o clave del perfil): sin ella no hay nada que correr');
     }
 
     const num = (valor, nombre, porDefecto) => {
@@ -370,8 +408,18 @@ export class Gestor {
 
     const trabajo = this.almacen.crear({
       estado: 'queued',
-      titulo: typeof spec.title === 'string' ? spec.title.slice(0, 120) : spec.prompt.trim().split('\n')[0].slice(0, 80),
+      titulo:
+        typeof spec.title === 'string'
+          ? spec.title.slice(0, 120)
+          : soloAceptacion
+            ? origen
+              ? `Verificación de ${origen.id}`
+              : 'Compuerta sobre la integración'
+            : spec.prompt.trim().split('\n')[0].slice(0, 80),
       prompt: spec.prompt,
+      soloAceptacion,
+      desdeJob: origen ? origen.id : null,
+      baseElegida: spec.base ?? null,
       cwd: cwdReal,
       cwdRelativo: relativo,
       repo,
@@ -455,7 +503,10 @@ export class Gestor {
    * sincronizar (conflicto, árbol sucio) cae a la base y deja constancia en los eventos.
    */
   async #baseDelTrabajo(id, job, perfil) {
-    if (perfil.jobBase !== 'integracion') return perfil.baseBranch;
+    // Retomar un trabajo: mismo commit de partida que el original (así sus archivos aplican limpio).
+    const origen = job.desdeJob ? this.trabajos.get(job.desdeJob) : null;
+    if (origen?.baseCommit) return origen.baseCommit;
+    if ((job.baseElegida ?? perfil.jobBase) !== 'integracion') return perfil.baseBranch;
     try {
       const { rootDirIntegracion } = this.#raices(perfil);
       const sync = await sincronizarIntegracion({
@@ -510,6 +561,16 @@ export class Gestor {
         baseCommit = wt.baseCommit;
         enlaces = wt.enlacesCreados ?? [];
         this.#guardar(id, { worktree: wt.ruta, rama: wt.rama, baseCommit, enlacesCreados: enlaces });
+        if (job.desdeJob) {
+          const origen = this.trabajos.get(job.desdeJob);
+          const traslado = await trasladarCambios({
+            desde: origen.worktree,
+            hacia: wt.ruta,
+            baseCommit: origen.baseCommit,
+            ignorar: origen.enlacesCreados ?? [],
+          });
+          this.#evento(id, { tipo: 'cambios_trasladados', desde: origen.id, ...traslado });
+        }
       } else {
         baseCommit = await git(['rev-parse', 'HEAD'], job.repo);
         const antes = await cambiosDelWorktree({ ruta: job.repo, baseCommit });
@@ -581,7 +642,50 @@ export class Gestor {
       // 4) Ejecución de opencode
       this.#guardar(id, { estado: 'running' });
       this.#evento(id, { tipo: 'ejecutando' });
-      const resultadoProceso = await ejecutar({
+
+      // Vigilancia de alcance DURANTE la ejecución: si el agente toca algo fuera de `writes` (o
+      // protegido) y sigue ahí en dos revisiones seguidas, se lo detiene en vez de dejarlo
+      // trabajar una hora para rechazarlo al final. Dos revisiones evitan cortar a un agente que
+      // creó un archivo de paso y lo borra enseguida.
+      const senalAgente = new AbortController();
+      const reenviarAborto = () => senalAgente.abort();
+      ctl.signal.addEventListener('abort', reenviarAborto, { once: true });
+      let violacionTemprana = null;
+      let vigilante = null;
+      if (!job.soloAceptacion && this.vigilanciaAlcanceMs > 0) {
+        let firmaPrevia = '';
+        let revisando = false;
+        vigilante = setInterval(async () => {
+          if (revisando || violacionTemprana) return;
+          revisando = true;
+          try {
+            const { archivos } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
+            const propios = archivos.filter((archivo) => {
+              if (!previos.has(archivo)) return true;
+              return hashDeArchivo(path.join(raizTrabajo, archivo)) !== previos.get(archivo);
+            });
+            const v = verificarCambios({ archivosCambiados: propios, writes: job.writes, protegidos, modo: job.mode });
+            const firma = v.ok ? '' : JSON.stringify(v.violaciones);
+            if (firma !== '' && firma === firmaPrevia) {
+              violacionTemprana = v.violaciones;
+              this.#evento(id, { tipo: 'alcance_temprano', violaciones: v.violaciones });
+              senalAgente.abort();
+            }
+            firmaPrevia = firma;
+          } catch {
+            /* una revisión fallida no tumba el trabajo: la verificación final sigue siendo la garantía */
+          } finally {
+            revisando = false;
+          }
+        }, this.vigilanciaAlcanceMs);
+        vigilante.unref?.();
+      }
+
+      let resultadoProceso;
+      try {
+        resultadoProceso = job.soloAceptacion
+          ? { motivo: 'exit', code: 0, signal: null, duracionMs: 0 }
+          : await ejecutar({
         cmd: this.opencode.cmd,
         args: [...this.opencode.argsPrefijo, ...args],
         cwd: cwdTrabajo,
@@ -591,7 +695,7 @@ export class Gestor {
         timeoutMs: job.timeoutMs,
         idleTimeoutMs: job.idleTimeoutMs,
         graceMs: this.graceMs,
-        signal: ctl.signal,
+        signal: senalAgente.signal,
         // Persistir el grupo y su identidad SIN ventana de pérdida (S1).
         onLanzado: ({ pid, pgid }) => {
           try {
@@ -601,6 +705,29 @@ export class Gestor {
           }
         },
       });
+      } finally {
+        if (vigilante) clearInterval(vigilante);
+        ctl.signal.removeEventListener('abort', reenviarAborto);
+      }
+      if (violacionTemprana && !ctl.signal.aborted) {
+        const proceso = { motivo: 'detenido_por_alcance', exit: null, senal: null, duracionMs: resultadoProceso.duracionMs };
+        this.#evento(id, { tipo: 'proceso_terminado', ...proceso });
+        // La máquina de estados exige pasar por `verifying` antes de rechazar.
+        this.#guardar(id, { estado: 'verifying' });
+        this.#evento(id, { tipo: 'verificando' });
+        const { archivos, resumen } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
+        return this.#terminar(id, 'rejected', {
+          proceso,
+          archivos,
+          resumen,
+          violaciones: violacionTemprana,
+          advertencias: [
+            'Detenido TEMPRANO: el agente tocó archivos fuera de `writes` (o protegidos) y persistió en ello. ' +
+              'Ajustá `writes` o la tarea; con `desde_job` podés retomar lo que dejó sin repetir todo.',
+          ],
+          motivoFin: 'alcance',
+        });
+      }
       const proceso = {
         motivo: resultadoProceso.motivo,
         exit: resultadoProceso.code,
@@ -802,6 +929,27 @@ export class Gestor {
       if (!this.esperadores.has(id)) this.esperadores.set(id, new Set());
       this.esperadores.get(id).add(fin);
     });
+  }
+
+  /**
+   * Espera a que termine ALGUNO de varios trabajos (o venza el tiempo). Si alguno ya terminó,
+   * responde de inmediato. Devuelve los ids terminados y los que siguen activos, para que el
+   * cliente no tenga que sondear de a uno (cada sondeo cuesta una vuelta entera).
+   *
+   * @param {string[]} ids
+   * @param {number} ms
+   * @returns {Promise<{ terminados: string[], activos: string[] }>}
+   */
+  async esperarAlguno(ids, ms) {
+    const unicos = [...new Set(ids)];
+    for (const id of unicos) this.obtener(id); // valida que existan, con mensaje claro
+    const particion = () => ({
+      terminados: unicos.filter((id) => esTerminal(this.trabajos.get(id).estado)),
+      activos: unicos.filter((id) => !esTerminal(this.trabajos.get(id).estado)),
+    });
+    if (particion().terminados.length > 0 || particion().activos.length === 0) return particion();
+    await Promise.race(unicos.map((id) => this.esperar(id, ms)));
+    return particion();
   }
 
   /** @param {string} id @returns {object} */
