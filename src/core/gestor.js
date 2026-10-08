@@ -796,7 +796,8 @@ export class Gestor {
           env: entorno,
           stdoutPath: path.join(rutas.dir, 'aceptacion.log'),
           stderrPath: path.join(rutas.dir, 'aceptacion.err.log'),
-          timeoutMs: DEFECTOS.aceptacionTimeoutMs,
+          // Tope de la aceptación: el del perfil (la compuerta completa pasa de 10 min) o el por defecto.
+          timeoutMs: perfil.aceptacionTimeoutMs ?? DEFECTOS.aceptacionTimeoutMs,
           graceMs: this.graceMs,
           signal: ctl.signal,
         });

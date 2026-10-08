@@ -333,3 +333,10 @@ test('validarPerfil: worktrees.linkConCopia se valida (formato, rutas relativas,
     /también en worktrees\.link/,
   );
 });
+
+test('validarPerfil: aceptacionTimeoutMs se valida y por defecto es null', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.equal(validarPerfil(base).aceptacionTimeoutMs, null);
+  assert.equal(validarPerfil({ ...base, aceptacionTimeoutMs: 1_800_000 }).aceptacionTimeoutMs, 1_800_000);
+  assert.throws(() => validarPerfil({ ...base, aceptacionTimeoutMs: 5 }), /aceptacionTimeoutMs/);
+});
