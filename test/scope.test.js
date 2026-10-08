@@ -341,3 +341,24 @@ test('verificarCambios: los protegidos NO distinguen mayúsculas (sistemas de ar
     { ruta: 'BACKEND/src/a.js', motivo: 'fuera_de_alcance' },
   ]);
 });
+
+test('escriturasEnRutaProtegida: marca los writes que caen dentro de una ruta protegida', async () => {
+  const { escriturasEnRutaProtegida } = await import('../src/core/scope.js');
+  const protegidos = ['backend/prisma/migrations/**', '**/.env'];
+  assert.deepEqual(
+    escriturasEnRutaProtegida(['backend/prisma/migrations/2026*/**', 'backend/src/**', 'backend/.env'], protegidos),
+    [
+      { write: 'backend/prisma/migrations/2026*/**', protegido: 'backend/prisma/migrations/**' },
+      { write: 'backend/.env', protegido: '**/.env' },
+    ],
+  );
+  // Un writes amplio que solo PODRÍA rozar un protegido no se marca (lo cubre la verificación final).
+  assert.deepEqual(escriturasEnRutaProtegida(['backend/**'], protegidos), []);
+});
+
+test('escriturasEnRutaProtegida: proteger migraciones por nombre deja agregar una nueva', async () => {
+  const { escriturasEnRutaProtegida } = await import('../src/core/scope.js');
+  const protegidos = ['backend/prisma/migrations/0001_init/**', 'backend/prisma/migrations/migration_lock.toml'];
+  assert.deepEqual(escriturasEnRutaProtegida(['backend/prisma/migrations/20261008*/**'], protegidos), []);
+  assert.equal(escriturasEnRutaProtegida(['backend/prisma/migrations/0001_init/**'], protegidos).length, 1);
+});

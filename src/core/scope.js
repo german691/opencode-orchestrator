@@ -258,6 +258,28 @@ export function gruposSeSuperponen(listaA = [], listaB = []) {
   return false;
 }
 
+/**
+ * Patrones de `writes` que caen DENTRO de una ruta protegida: ese trabajo jamás podría
+ * integrarse (la protección gana sobre `writes`), así que conviene fallar al ENVIAR y no
+ * después de una hora de trabajo y una corrida completa de tests.
+ *
+ * Solo se marca el caso inequívoco (el patrón de `writes`, leído como ruta, es una ruta
+ * protegida). Un `writes` amplio que PODRÍA rozar un protegido (p. ej. `backend/**`) no se
+ * marca: puede ser legítimo y, si el agente lo toca, la verificación final lo rechaza.
+ *
+ * @param {string[]} writes patrones de escritura declarados
+ * @param {string[]} protegidos patrones protegidos del perfil
+ * @returns {Array<{ write: string, protegido: string }>}
+ */
+export function escriturasEnRutaProtegida(writes, protegidos) {
+  const choques = [];
+  for (const write of writes ?? []) {
+    const protegido = (protegidos ?? []).find((patron) => coincide(patron, write, { ignorarMayusculas: true }));
+    if (protegido) choques.push({ write, protegido });
+  }
+  return choques;
+}
+
 /** Modos válidos de un trabajo (§3). */
 const MODOS_VALIDOS = new Set(['readonly', 'safe', 'auto']);
 

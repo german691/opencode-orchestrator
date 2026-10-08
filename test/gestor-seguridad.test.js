@@ -51,3 +51,15 @@ test('un trabajo con recurso db recibe SU base pero jamás la URL de administrac
   assert.equal(v.env.VARIABLE_COMUN, 'se-hereda', 'el resto del entorno se hereda');
   await gestor.cerrar();
 });
+
+test('enviar rechaza al instante un writes que cae dentro de una ruta protegida del perfil', async (t) => {
+  const m = await montar(t);
+  const gestor = crearGestor(m.almacen, { entorno: entornoFalso({}) });
+  await assert.rejects(
+    () => gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['secretos/nuevo/**'] }),
+    /rutas protegidas.*secretos\/nuevo\/\*\*.*secretos\/\*\*/s,
+  );
+  // Un writes fuera de lo protegido sigue aceptándose.
+  const ok = await gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['src/**'] });
+  assert.ok(ok.id);
+});

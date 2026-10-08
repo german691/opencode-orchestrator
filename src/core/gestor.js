@@ -39,7 +39,7 @@ import { elegibles } from './planificador.js';
 import { cargarPerfil, perfilPorDefecto, resolverRaizWorktrees } from './profile.js';
 import { crearProveedor } from './recursos.js';
 import { ejecutar } from './runner.js';
-import { verificarCambios } from './scope.js';
+import { verificarCambios, escriturasEnRutaProtegida } from './scope.js';
 import {
   cambiosDelWorktree,
   commitearTrabajo,
@@ -326,6 +326,16 @@ export class Gestor {
           throw new ErrorDeGestor(`\`${campo}\` contiene un patrón inválido (${patron}): ${error.message}`);
         }
       }
+    }
+    // Un `writes` que cae dentro de una ruta protegida nunca se podría integrar: se rechaza
+    // acá, antes de gastar una corrida entera del agente y de la aceptación.
+    const choques = escriturasEnRutaProtegida(writes, perfil.protected ?? []);
+    if (choques.length > 0) {
+      const detalle = choques.map((c) => `\`${c.write}\` (protegido por \`${c.protegido}\`)`).join(', ');
+      throw new ErrorDeGestor(
+        `\`writes\` apunta a rutas protegidas del perfil: ${detalle}. El trabajo sería rechazado al terminar; ` +
+          'ajustá `writes` o el perfil.',
+      );
     }
     const resources = lista(spec.resources, 'resources', []);
     for (const nombre of resources) {
