@@ -762,9 +762,15 @@ export async function commitearTrabajo({ ruta, mensaje, autor, excluir = [], sol
     if (soloArchivos.length > 0) {
       const argsSolo = ['add', '-A', '--'];
       for (let indice = 0; indice < soloArchivos.length; indice += 1) {
-        argsSolo.push(`:(literal)${validarRutaRelativa(soloArchivos[indice], indice, 'soloArchivos')}`);
+        const relativa = validarRutaRelativa(soloArchivos[indice], indice, 'soloArchivos');
+        // Un archivo que el agente borró con `git rm` ya no está ni en el disco ni en el índice:
+        // `git add -A -- <ruta>` falla con "did not match any files" y tumbaba el commit de un
+        // trabajo terminado. Su borrado ya está en el índice, así que se omite del `add`.
+        const enDisco = fs.existsSync(path.join(ruta, relativa));
+        const enIndice = enDisco ? true : (await git(['ls-files', '--', relativa], { cwd: ruta })).stdout.trim() !== '';
+        if (enDisco || enIndice) argsSolo.push(`:(literal)${relativa}`);
       }
-      await gitOLanza(argsSolo, { cwd: ruta });
+      if (argsSolo.length > 3) await gitOLanza(argsSolo, { cwd: ruta });
     }
   } else {
     const argsAdd = ['add', '-A', '--', '.'];

@@ -857,3 +857,20 @@ test('linkConCopia: el node_modules del worktree enlaza todo salvo lo copiado, y
   const { archivos } = await cambiosDelWorktree({ ruta: w.ruta, baseCommit: w.baseCommit, ignorar: w.enlacesCreados });
   assert.deepEqual(archivos, []);
 });
+
+test('commitearTrabajo: un archivo borrado con git rm (ya fuera del disco y del índice) no tumba el commit', async () => {
+  const { raiz, rootDir } = await montar();
+  const w = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'rm1', rootDir });
+  fs.writeFileSync(path.join(w.ruta, 'nuevo.txt'), 'nuevo\n');
+  await gitOK(['rm', '-q', 'renombrar.txt'], w.ruta); // borrado ya staged: no existe en disco ni en el índice
+  fs.rmSync(path.join(w.ruta, 'docs', 'leeme.md')); // borrado sin stagear: existe en el índice
+  const commit = await commitearTrabajo({
+    ruta: w.ruta,
+    mensaje: 'borra y agrega',
+    autor: 'T <t@t>',
+    soloArchivos: ['nuevo.txt', 'renombrar.txt', 'docs/leeme.md'],
+  });
+  assert.match(commit, /^[0-9a-f]{40}$/);
+  const tocados = (await gitOK(['show', '--name-status', '--format=', 'HEAD'], w.ruta)).trim().split('\n').sort();
+  assert.deepEqual(tocados, ['A\tnuevo.txt', 'D\tdocs/leeme.md', 'D\trenombrar.txt']);
+});
