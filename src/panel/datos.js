@@ -136,6 +136,8 @@ export function resumenDeTrabajo(baseDir, id, ahora = Date.now()) {
     semaforo: semaforo(segundosSinSalida),
     motivoFin: job.motivoFin ?? null,
     error: job.error ?? null,
+    // Por qué sigue en cola (motivo + ids que lo frenan), lo calcula el planificador.
+    espera: job.estado === 'queued' ? (job.espera ?? null) : null,
   };
 }
 

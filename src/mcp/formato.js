@@ -30,6 +30,26 @@ function cola(texto, max) {
   return `[... ${t.length - max} caracteres omitidos ...]\n${t.slice(-max)}`;
 }
 
+const TEXTO_ESPERA = {
+  dependencia: 'espera a que terminen sus dependencias (after)',
+  concurrencia: 'tope de concurrencia alcanzado',
+  recurso: 'espera un recurso compartido (p. ej. la base de datos)',
+  solapa_alcance: 'sus `writes` se solapan con el trabajo en curso',
+  veterano_adelante: 'otro trabajo más antiguo con el que choca va primero',
+};
+
+/**
+ * Por qué un trabajo en cola todavía no arrancó ("" si no hay dato).
+ * @param {{ espera?: { motivo: string, por?: string[] } | null }} trabajo
+ * @returns {string}
+ */
+export function describirEspera(trabajo) {
+  const espera = trabajo?.espera;
+  if (!espera) return '';
+  const por = espera.por?.length ? ` [${espera.por.join(', ')}]` : '';
+  return `${TEXTO_ESPERA[espera.motivo] ?? espera.motivo}${por}`;
+}
+
 /**
  * Mensaje para un trabajo que sigue activo tras la espera de la llamada.
  * @param {object} trabajo
@@ -38,8 +58,10 @@ function cola(texto, max) {
  */
 export function describirActivo(trabajo, ahora = Date.now()) {
   const edad = duracion(ahora - (trabajo.creadoEn ?? ahora));
+  const espera = describirEspera(trabajo);
   return (
     `STILL RUNNING | job_id=${trabajo.id} | estado=${trabajo.estado} | edad=${edad} | tarea="${trabajo.titulo ?? ''}"\n` +
+    (espera ? `En cola porque: ${espera}\n` : '') +
     'No es un error: opencode sigue trabajando en segundo plano. Llamá a opencode_wait con este job_id ' +
     '(repetí hasta que diga finished), opencode_logs para ver el avance u opencode_cancel para detenerlo.'
   );
@@ -110,7 +132,8 @@ export function describirListado(trabajos, resumen, ahora = Date.now()) {
     const activo = !esTerminal(t.estado);
     const edad = duracion((activo ? ahora : t.finEn ?? ahora) - (t.creadoEn ?? ahora));
     const alcance = t.writes?.length ? ` writes=[${t.writes.join(',')}]` : '';
-    return `job_id=${t.id} | ${t.estado}${t.motivoFin ? `(${t.motivoFin})` : ''} | ${activo ? 'edad' : 'duracion'}=${edad} | ${t.mode}/${t.isolation}${alcance} | "${t.titulo ?? ''}"`;
+    const espera = describirEspera(t);
+    return `job_id=${t.id} | ${t.estado}${t.motivoFin ? `(${t.motivoFin})` : ''} | ${activo ? 'edad' : 'duracion'}=${edad} | ${t.mode}/${t.isolation}${alcance}${espera ? ` | espera: ${espera}` : ''} | "${t.titulo ?? ''}"`;
   });
   return `${cabecera}\n${filas.join('\n')}`;
 }

@@ -36,3 +36,20 @@ test('una aceptación que pasó no imprime ni fallos ni salida', () => {
   assert.match(texto, /aceptacion: OK/);
   assert.doesNotMatch(texto, /fallos de la aceptacion|salida de la aceptacion/);
 });
+
+test('describirEspera y el listado dicen por qué un trabajo sigue en cola', async () => {
+  const { describirEspera, describirListado, describirActivo } = await import('../src/mcp/formato.js');
+  const t = {
+    id: 'q1',
+    estado: 'queued',
+    mode: 'safe',
+    isolation: 'worktree',
+    creadoEn: 0,
+    titulo: 'T',
+    espera: { motivo: 'solapa_alcance', por: ['aaa', 'bbb'] },
+  };
+  assert.match(describirEspera(t), /se solapan.*\[aaa, bbb\]/);
+  assert.equal(describirEspera({ ...t, espera: null }), '');
+  assert.match(describirListado([t], { concurrencia: 1, corriendo: [], enCola: ['q1'] }), /espera: .*\[aaa, bbb\]/);
+  assert.match(describirActivo(t, 1000), /En cola porque: .*\[aaa, bbb\]/);
+});

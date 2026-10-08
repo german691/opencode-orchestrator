@@ -540,9 +540,44 @@ const ESCENARIOS = [
 
 for (const escenario of ESCENARIOS) {
   test(`planificador: ${escenario.nombre}`, () => {
-    assert.deepEqual(elegibles(escenario.entrada), escenario.esperado);
+    // `esperas` (el porqué de cada espera) se prueba aparte: acá solo la decisión.
+    const { arrancar, bloqueados } = elegibles(escenario.entrada);
+    assert.deepEqual({ arrancar, bloqueados }, escenario.esperado);
   });
 }
+
+test('planificador: esperas explica quién frena a cada trabajo en cola', () => {
+  const r = elegibles({
+    cola: ['dep', 'solapa', 'recurso', 'libre'],
+    corriendo: ['en-curso'],
+    concurrencia: 4,
+    recursos: { db: 1 },
+    trabajos: {
+      'en-curso': job({ writes: ['src/a.js'], resources: ['db'] }),
+      previo: job({ estado: 'running' }),
+      dep: job({ after: ['previo'] }),
+      solapa: job({ writes: ['src/a.js'] }),
+      recurso: job({ writes: ['docs/x.md'], resources: ['db'] }),
+      libre: job({ writes: ['otro/z.js'] }),
+    },
+  });
+  assert.deepEqual(r.arrancar, ['libre']);
+  assert.deepEqual(r.esperas.get('dep'), { motivo: 'dependencia', por: ['previo'] });
+  assert.deepEqual(r.esperas.get('solapa'), { motivo: 'solapa_alcance', por: ['en-curso'] });
+  assert.deepEqual(r.esperas.get('recurso'), { motivo: 'recurso', por: ['en-curso'] });
+  assert.equal(r.esperas.has('libre'), false, 'el que arranca no tiene espera');
+});
+
+test('planificador: esperas marca el tope de concurrencia', () => {
+  const r = elegibles({
+    cola: ['a', 'b'],
+    corriendo: [],
+    concurrencia: 1,
+    trabajos: { a: job({ writes: ['x/**'] }), b: job({ writes: ['y/**'] }) },
+  });
+  assert.deepEqual(r.arrancar, ['a']);
+  assert.deepEqual(r.esperas.get('b'), { motivo: 'concurrencia', por: ['a'] });
+});
 
 test('planificador: entradas hostiles lanzan TypeError', () => {
   assert.throws(() => elegibles({ cola: 'x', corriendo: [], concurrencia: 1, trabajos: {} }), TypeError);
@@ -551,5 +586,6 @@ test('planificador: entradas hostiles lanzan TypeError', () => {
 
 test('planificador: concurrencia inválida se trata como 0', () => {
   const resultado = elegibles({ cola: ['a'], corriendo: [], concurrencia: -1, trabajos: { a: job() } });
-  assert.deepEqual(resultado, { arrancar: [], bloqueados: [] });
+  assert.deepEqual(resultado.arrancar, []);
+  assert.deepEqual(resultado.bloqueados, []);
 });

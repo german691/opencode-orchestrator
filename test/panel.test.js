@@ -132,3 +132,13 @@ test('servidor: sirve página y API, rechaza escrituras y no modifica el estado'
     await new Promise((r) => servidor.close(r));
   }
 });
+
+test('lista: un trabajo en cola muestra por qué espera; uno corriendo no', () => {
+  const { jobs } = crearEstado();
+  const espera = { motivo: 'recurso', por: ['zzz'] };
+  crearJob(jobs, 'cola1', { estado: 'queued', creadoEn: AHORA - 1000, espera });
+  crearJob(jobs, 'corre', { estado: 'running', creadoEn: AHORA - 1000, espera }, { stderr: 'x', hace: 1 });
+  const lista = listarTrabajos(jobs, AHORA);
+  assert.deepEqual(lista.find((j) => j.id === 'cola1').espera, espera);
+  assert.equal(lista.find((j) => j.id === 'corre').espera, null);
+});

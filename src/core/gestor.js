@@ -393,7 +393,7 @@ export class Gestor {
     for (const id of [...this.cola, ...this.corriendo]) {
       for (const nombre of this.trabajos.get(id)?.resources ?? []) recursos[nombre] = this.concurrencia;
     }
-    const { arrancar, bloqueados } = elegibles({
+    const { arrancar, bloqueados, esperas } = elegibles({
       cola: this.cola,
       corriendo: [...this.corriendo],
       concurrencia: this.concurrencia,
@@ -404,6 +404,14 @@ export class Gestor {
       esperaMaximaMs: this.esperaMaximaMs,
     });
 
+    // Se guarda POR QUÉ espera cada trabajo en cola (solo si cambió, para no reescribir
+    // job.json en cada pasada): el listado y el panel lo muestran en vez de un "queued" mudo.
+    for (const id of this.cola) {
+      const espera = esperas.get(id) ?? null;
+      const actual = this.trabajos.get(id)?.espera ?? null;
+      if (JSON.stringify(espera) !== JSON.stringify(actual)) this.#guardar(id, { espera });
+    }
+
     for (const { id, motivo } of bloqueados) {
       this.cola = this.cola.filter((x) => x !== id);
       this.#guardar(id, { estado: 'cancelled', motivoFin: 'dependencia_fallida', detalleFin: motivo });
@@ -412,6 +420,7 @@ export class Gestor {
     }
     for (const id of arrancar) {
       this.cola = this.cola.filter((x) => x !== id);
+      if (this.trabajos.get(id)?.espera) this.#guardar(id, { espera: null });
       this.corriendo.add(id);
       const ctl = new AbortController();
       this.controles.set(id, ctl);

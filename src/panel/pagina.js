@@ -33,6 +33,8 @@ button{font:inherit;padding:2px 8px}
 const el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e};
 let sel=null,seguir=true;
 const dur=s=>{if(s==null)return '–';const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?h+'h '+m+'m':m?m+'m '+(s%60)+'s':s+'s'};
+const MOTIVOS={dependencia:'espera sus dependencias',concurrencia:'tope de concurrencia',recurso:'espera un recurso compartido (base de datos)',solapa_alcance:'sus writes se solapan con otro trabajo',veterano_adelante:'otro trabajo más antiguo va primero'};
+const textoEspera=e=>(MOTIVOS[e.motivo]||e.motivo)+(e.por&&e.por.length?' ['+e.por.join(', ')+']':'');
 function tarjeta(j){
   const d=el('div','job'+(j.id===sel?' sel':''));d.onclick=()=>{sel=j.id;pintarDetalle()};
   d.append(el('h3','',j.titulo||j.id));
@@ -42,7 +44,9 @@ function tarjeta(j){
   f.append(el('span','',dur(j.duracionS)));
   if(j.semaforo)f.append(el('span','','última salida hace '+dur(j.segundosSinSalida)));
   f.append(el('span','',j.id));
-  d.append(f);return d}
+  d.append(f);
+  if(j.espera){d.append(el('div','fila','En cola: '+textoEspera(j.espera)))}
+  return d}
 async function pintarLista(){
   try{
     const r=await (await fetch('api/trabajos')).json();

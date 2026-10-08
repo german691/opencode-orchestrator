@@ -211,7 +211,9 @@ function dependenciaBloqueada(trabajo, trabajos) {
  * @param {Record<string, number>} [entrada.recursos] capacidades por recurso
  * @param {boolean} [entrada.serializarEscrituras=true] serializar writes solapados entre worktrees
  * @param {number} [entrada.esperaMaximaMs=30000] umbral de anti-inanición
- * @returns {{ arrancar: string[], bloqueados: Array<{id: string, motivo: string}> }}
+ * @returns {{ arrancar: string[], bloqueados: Array<{id: string, motivo: string}>, esperas: Map<string, {motivo: string, por: string[]}> }}
+ *   `esperas` explica POR QUÉ cada trabajo en cola no arrancó (motivo + ids de los que lo frenan):
+ *   sin esto el listado solo dice "queued" y no hay forma de saber a quién se espera.
  * @throws {TypeError} si `cola` o `corriendo` no son arrays
  */
 export function elegibles(entrada = {}) {
@@ -286,15 +288,27 @@ export function elegibles(entrada = {}) {
   const arrancar = [];
   /** @type {object[]} descriptores ya elegidos en esta pasada */
   const elegidos = [];
+  /** @type {Map<string, {motivo: string, por: string[]}>} motivo de espera de cada trabajo en cola */
+  const esperas = new Map();
+  for (const candidato of candidatos) {
+    if (bloqueadosIds.has(candidato.id) || listos.has(candidato.id)) continue;
+    const pendientes = candidato.trabajo.after.filter((dep) => !ESTADOS_SATISFECHOS.has(estadoDependencia(trabajos, dep)));
+    esperas.set(candidato.id, { motivo: 'dependencia', por: pendientes });
+  }
 
   for (const candidato of candidatos) {
-    if (arrancar.length >= libres) break; // no quedan huecos
     if (bloqueadosIds.has(candidato.id)) continue;
     if (!listos.has(candidato.id)) continue; // dependencias aún pendientes
+    if (arrancar.length >= libres) {
+      // No quedan huecos: el tope de concurrencia es lo que frena a este trabajo.
+      esperas.set(candidato.id, { motivo: 'concurrencia', por: [...corriendo, ...arrancar] });
+      continue;
+    }
 
     // Anti-inanición: no adelantar a un veterano con el que chocamos, ya sea por
     // alcance de archivos o porque ambos compiten por el mismo recurso.
     let chocaConVeterano = false;
+    let idFrenaVeterano = null;
     for (const idVeterano of veteranos) {
       if (idVeterano === candidato.id) continue;
       // Un veterano frena siempre a los que NO son veteranos (de eso trata la
@@ -311,20 +325,32 @@ export function elegibles(entrada = {}) {
         comparteRecurso(candidato.trabajo, trabajoVeterano)
       ) {
         chocaConVeterano = true;
+        idFrenaVeterano = idVeterano;
         break;
       }
     }
-    if (chocaConVeterano) continue;
+    if (chocaConVeterano) {
+      esperas.set(candidato.id, { motivo: 'veterano_adelante', por: [idFrenaVeterano] });
+      continue;
+    }
 
-    if (!recursosDisponibles(candidato.trabajo, uso, recursos)) continue;
+    if (!recursosDisponibles(candidato.trabajo, uso, recursos)) {
+      const pedidos = new Set(candidato.trabajo.resources);
+      const por = [...enCurso, ...elegidos].filter((t) => t.resources.some((r) => pedidos.has(r))).map((t) => t.id);
+      esperas.set(candidato.id, { motivo: 'recurso', por });
+      continue;
+    }
 
-    const chocaConCurso = enCurso.some((trabajo) => seChocan(candidato.trabajo, trabajo, serializarEscrituras));
-    const chocaConElegido = elegidos.some((trabajo) => seChocan(candidato.trabajo, trabajo, serializarEscrituras));
-    if (chocaConCurso || chocaConElegido) continue;
+    const frenan = [...enCurso, ...elegidos].filter((trabajo) => seChocan(candidato.trabajo, trabajo, serializarEscrituras));
+    if (frenan.length > 0) {
+      esperas.set(candidato.id, { motivo: 'solapa_alcance', por: frenan.map((t) => t.id) });
+      continue;
+    }
 
     arrancar.push(candidato.id);
     elegidos.push(candidato.trabajo);
     veteranos.delete(candidato.id);
+    esperas.delete(candidato.id);
     for (const nombre of candidato.trabajo.resources) {
       uso.set(nombre, (uso.get(nombre) ?? 0) + 1);
     }
@@ -332,5 +358,5 @@ export function elegibles(entrada = {}) {
 
   // Los bloqueados se reportan en orden de cola para que el listado sea estable.
   bloqueados.sort((a, b) => cola.indexOf(a.id) - cola.indexOf(b.id));
-  return { arrancar, bloqueados };
+  return { arrancar, bloqueados, esperas };
 }
