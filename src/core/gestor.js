@@ -279,7 +279,9 @@ export class Gestor {
     if (this.cerrado) throw new ErrorDeGestor('El servidor se está cerrando: no acepta trabajos nuevos');
     // `solo_aceptacion`: no corre al agente, solo la aceptación sobre un worktree (compuerta sobre la
     // integración, o re-verificación de un trabajo rechazado ya arreglado). No necesita prompt.
-    const soloAceptacion = spec.solo_aceptacion === true;
+    // Algunos clientes con el esquema de la herramienta en caché mandan los booleanos como texto
+    // ("true"): se aceptan, o `solo_aceptacion` se ignoraría y correría al agente sin querer.
+    const soloAceptacion = spec.solo_aceptacion === true || spec.solo_aceptacion === 'true';
     if (soloAceptacion && (typeof spec.prompt !== 'string' || spec.prompt.trim() === '')) {
       spec = { ...spec, prompt: 'Solo aceptación (no se ejecuta el agente).' };
     }

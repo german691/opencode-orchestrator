@@ -115,3 +115,12 @@ test('vigilancia de alcance: un archivo de paso que se borra a tiempo no corta a
   assert.equal(r.estado, 'succeeded', 'dentro de su alcance: nunca se corta');
   await gitOK(['status'], r.worktree);
 });
+
+test('solo_aceptacion y avanzar_base se aceptan también como texto "true" (clientes con el esquema en caché)', async (t) => {
+  const m = await montar(t);
+  const gestor = crearGestor(m.almacen, { fake: m.fake, entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'out.txt' }), home: m.home });
+  const r = await correr(gestor, { cwd: m.repo, solo_aceptacion: 'true', accept: 'true' });
+  assert.equal(r.soloAceptacion, true);
+  assert.equal(r.estado, 'succeeded');
+  assert.equal(r.resultado.proceso.duracionMs, 0, 'el agente no corrió');
+});

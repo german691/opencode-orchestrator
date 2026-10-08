@@ -178,7 +178,7 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
         additionalProperties: false,
       },
       manejar: async (args) => {
-        const resultado = await gestor.integrar(exigirId(args), { avanzarBase: args?.avanzar_base === true });
+        const resultado = await gestor.integrar(exigirId(args), { avanzarBase: args?.avanzar_base === true || args?.avanzar_base === 'true' });
         if (resultado.ok) {
           let texto = `Integrado en ${resultado.rama} (sha ${resultado.sha}). Revisá: git diff <base>..${resultado.rama}`;
           if (resultado.baseAvanzada) {
