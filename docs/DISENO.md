@@ -268,3 +268,32 @@ Limitaciones conocidas (no resueltas):
   scripts de `npm`. No usar el orquestador sobre repositorios no confiables.
 - **`concurrency` del perfil** no limita por repositorio todavía (solo `ORQ_CONCURRENCY` global).
 - Los trabajos en cola no sobreviven a un reinicio (pasan a `lost`).
+
+## 17. Mejoras de la sesión 2026-10-08 (trabajo encadenado)
+
+Surgieron de ejecutar ~20 trabajos dependientes sobre el mismo repo:
+
+- **Motivo de espera visible**: el planificador devuelve `esperas` (dependencia, concurrencia,
+  recurso, solapa_alcance, veterano_adelante + ids que frenan) y el gestor lo guarda en
+  `job.espera`; lo muestran `opencode_list`, `STILL RUNNING` y el panel.
+- **`writes` vs `protected` al enviar**: `escriturasEnRutaProtegida` rechaza al instante un
+  `writes` que cae dentro de una ruta protegida (antes se descubría tras una corrida completa).
+  Para permitir migraciones NUEVAS sin abrir el historial, el perfil protege cada migración
+  existente por nombre y no la carpeta entera.
+- **`jobBase: "integracion"`** (perfil): los worktrees parten de la rama de integración, ya
+  sincronizada con la base, así un trabajo ve lo integrado antes aunque la base no haya
+  avanzado. Si no se puede sincronizar (conflicto, árbol sucio) cae a la base y deja un evento.
+- **Sincronización base → integración**: `integrar` hace primero `merge base` DENTRO de la
+  integración (nunca al revés), de modo que lo commiteado directo en la base no deja la
+  integración atrás y la base se puede avanzar con fast-forward.
+- **`opencode_merge avanzar_base`** (opt-in): avanza la base a la integración con `--ff-only`,
+  solo si el árbol real está en la base y sin cambios sin commitear; si no, la integración
+  queda hecha y se explica el motivo. Sigue sin haber `push`.
+- **`promptPrefix` y `timeoutMs` por perfil**: texto fijo del proyecto antepuesto a cada tarea y
+  tope total por defecto (p. ej. 1 h para backend). El encabezado del agente ahora manda
+  detenerse y reportar (no esquivar) ante un archivo fuera de `writes`.
+
+Pendientes (ordenados): aceptación por niveles con compuerta completa una vez sobre la
+integración; `opencode_continue`/`opencode_verify` para retomar un trabajo rechazado o caído
+sin repetir al agente; `opencode_wait_any` y avisos de fin; detección temprana de choque de
+alcance durante la ejecución.
