@@ -29,6 +29,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { variablesDeGit } from './identidadGit.js';
 import { ejecutar } from './runner.js';
 
 /** Id de trabajo válido: minúsculas/dígitos y guiones, sin barras ni puntos. */
@@ -882,6 +883,9 @@ export async function cambiosDelWorktree({ ruta, baseCommit, ignorar = [] } = {}
  * @param {string} opciones.ruta worktree
  * @param {string} opciones.mensaje mensaje de commit
  * @param {string} [opciones.autor] autor en formato `Nombre <email>`
+ * @param {{ nombre: string, email: string }} [opciones.identidad] identidad para autor Y
+ *   committer del commit (perfil/repo). Si viene, reemplaza a `autor` (se pasan las
+ *   variables `GIT_AUTHOR_*`/`GIT_COMMITTER_*` en vez de `--author`)
  * @param {string[]} [opciones.excluir] rutas relativas que NO se deben commitear
  * @param {string[]} [opciones.soloArchivos] si se indica, SOLO se agregan estas rutas
  *   (ya verificadas contra el alcance): lo que genere un comando posterior, como los
@@ -889,7 +893,7 @@ export async function cambiosDelWorktree({ ruta, baseCommit, ignorar = [] } = {}
  * @returns {Promise<string|null>} sha del commit, o `null` si no había cambios
  * @throws {ErrorDeWorkspace}
  */
-export async function commitearTrabajo({ ruta, mensaje, autor, excluir = [], soloArchivos } = {}) {
+export async function commitearTrabajo({ ruta, mensaje, autor, identidad, excluir = [], soloArchivos } = {}) {
   if (typeof ruta !== 'string' || ruta.trim() === '') {
     throw new ErrorDeWorkspace('commitearTrabajo espera una ruta de worktree');
   }
@@ -942,8 +946,11 @@ export async function commitearTrabajo({ ruta, mensaje, autor, excluir = [], sol
   if (sinCambios.codigo === 0) return null;
 
   const args = ['commit', '-m', mensaje];
-  if (autor) args.push('--author', autor);
-  await gitOLanza(args, { cwd: ruta });
+  // Con identidad explícita se firma autor y committer por variables de entorno: así el
+  // committer deja de ser el usuario del sistema y el commit cuenta para el dueño del repo.
+  const env = identidad ? { ...process.env, ...variablesDeGit(identidad) } : undefined;
+  if (autor && !identidad) args.push('--author', autor);
+  await gitOLanza(args, { cwd: ruta, env });
   return (await gitOLanza(['rev-parse', 'HEAD'], { cwd: ruta })).trim();
 }
 
@@ -1029,10 +1036,12 @@ async function prepararIntegracionSinCerrojo({ repoRaiz, integrationBranch, base
  * @param {string} opciones.integrationBranch rama destino
  * @param {string} opciones.base rama base del repositorio
  * @param {string} opciones.rootDirIntegracion raíz del worktree de integración
+ * @param {{ nombre: string, email: string }} [opciones.identidad] identidad para el commit
+ *   de merge (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`)
  * @returns {Promise<{ ok: true, sha: string } | { ok: false, conflictos: string[] }>}
  * @throws {ErrorDeWorkspace}
  */
-export async function integrar({ repoRaiz, rama, integrationBranch, base, rootDirIntegracion } = {}) {
+export async function integrar({ repoRaiz, rama, integrationBranch, base, rootDirIntegracion, identidad } = {}) {
   validarRamaTrabajo(rama, 'rama');
   validarRama(integrationBranch, 'integrationBranch');
   validarRama(base, 'base');
@@ -1060,7 +1069,7 @@ export async function integrar({ repoRaiz, rama, integrationBranch, base, rootDi
 
     // La integración debe incluir lo que el usuario haya commiteado en la base: así el trabajo
     // se integra sobre código al día y después la base se puede avanzar con fast-forward.
-    const sincronizada = await sincronizarIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion });
+    const sincronizada = await sincronizarIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion, identidad });
     if (!sincronizada.ok) {
       return { ok: false, conflictos: sincronizada.conflictos, motivo: 'base_no_sincronizable' };
     }
@@ -1069,7 +1078,7 @@ export async function integrar({ repoRaiz, rama, integrationBranch, base, rootDi
 
     const merge = await git(
       ['merge', '--no-ff', '-m', `Integra ${rama} en ${integrationBranch}`, `refs/heads/${rama}`],
-      { cwd: ruta },
+      { cwd: ruta, env: identidad ? { ...process.env, ...variablesDeGit(identidad) } : undefined },
     );
 
     if (merge.codigo !== 0) {
@@ -1273,19 +1282,21 @@ export async function listarWorktrees(repoRaiz) {
  * @param {string} opciones.integrationBranch
  * @param {string} opciones.base
  * @param {string} opciones.rootDirIntegracion
+ * @param {{ nombre: string, email: string }} [opciones.identidad] identidad para el commit
+ *   de sincronización (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`)
  * @returns {Promise<{ ok: true, sha: string, cambio: boolean } | { ok: false, conflictos: string[] }>}
  */
-export async function sincronizarIntegracion({ repoRaiz, integrationBranch, base, rootDirIntegracion } = {}) {
+export async function sincronizarIntegracion({ repoRaiz, integrationBranch, base, rootDirIntegracion, identidad } = {}) {
   validarRama(integrationBranch, 'integrationBranch');
   validarRama(base, 'base');
   if (integrationBranch === base) throw new ErrorDeWorkspace(`Nunca se integra sobre la rama base ('${base}')`);
   return conCerrojo(repoRaiz, () =>
-    sincronizarIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion }),
+    sincronizarIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion, identidad }),
   );
 }
 
 /** Igual que `sincronizarIntegracion` pero sin tomar el cerrojo (lo usa `integrar`, que ya lo tiene). */
-async function sincronizarIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion }) {
+async function sincronizarIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion, identidad }) {
   const ruta = await prepararIntegracionSinCerrojo({ repoRaiz, integrationBranch, base, rootDirIntegracion });
   await abortarMerge(ruta);
   const sucio = await arbolSucio(ruta);
@@ -1302,6 +1313,7 @@ async function sincronizarIntegracionSinCerrojo({ repoRaiz, integrationBranch, b
 
   const merge = await git(['merge', '--no-edit', '-m', `Sincroniza ${base} en ${integrationBranch}`, `refs/heads/${base}`], {
     cwd: ruta,
+    env: identidad ? { ...process.env, ...variablesDeGit(identidad) } : undefined,
   });
   if (merge.codigo !== 0) {
     const conflictos = await rutasEnConflicto(ruta);

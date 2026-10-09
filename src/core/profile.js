@@ -59,6 +59,7 @@ const CLAVES_PERFIL = new Set([
   'esperarIntegracion',
   'logs',
   'retencion',
+  'autor',
 ]);
 
 /** Campos permitidos dentro de una receta. */
@@ -104,6 +105,12 @@ const LOG_MAX_BYTES_DEFECTO = 20 * 1024 * 1024;
 
 /** Campos permitidos dentro de `retencion`. */
 const CLAVES_RETENCION = new Set(['dias', 'maxEnMemoria']);
+
+/** Campos permitidos dentro de `autor` (identidad git de los commits del servidor). */
+const CLAVES_AUTOR = new Set(['nombre', 'email']);
+
+/** Forma mínima de un email: `x@y`. git no exige más y así se evita firmar con basura. */
+const EMAIL_IDENTIDAD = /^[^\s@]+@[^\s@]+$/;
 
 /** Valores por defecto de la sección opcional `retencion`. */
 const RETENCION_POR_DEFECTO = Object.freeze({ dias: 30, maxEnMemoria: 500 });
@@ -172,6 +179,43 @@ function validarRama(campo, valor, errores) {
   // Mismos caracteres que rechaza workspace.js: mejor fallar al validar el perfil que al crear el worktree.
   for (const caracter of ['~', '^', ':', '?', '*', '[', '\\']) {
     if (valor.includes(caracter)) errores.push(`${campo}: no puede contener '${caracter}'`);
+  }
+}
+
+/**
+ * Valida la sección opcional `autor` (identidad git con la que el servidor firma
+ * los commits NUEVOS). Ambos campos son obligatorios si la sección está.
+ *
+ * @param {unknown} autor
+ * @param {string[]} errores acumulador
+ * @returns {void}
+ */
+function validarAutor(autor, errores) {
+  if (!esObjetoPlano(autor)) {
+    errores.push('autor: debe ser un objeto { nombre, email }');
+    return;
+  }
+  for (const clave of Object.keys(autor)) {
+    if (!CLAVES_AUTOR.has(clave)) errores.push(`autor.${clave}: campo desconocido`);
+  }
+  for (const campo of ['nombre', 'email']) {
+    const valor = autor[campo];
+    if (typeof valor !== 'string' || valor.trim() === '') {
+      errores.push(`autor.${campo}: debe ser un texto no vacío`);
+      continue;
+    }
+    // El mismo límite que identidadGit.js: `<>` y saltos rompen la cabecera del commit.
+    if (/[\r\n]/.test(valor) || valor.includes('<') || valor.includes('>')) {
+      errores.push(`autor.${campo}: no puede tener saltos de línea ni '<' o '>'`);
+    }
+  }
+  if (
+    typeof autor.email === 'string' &&
+    autor.email.trim() !== '' &&
+    !/[\r\n<>]/.test(autor.email) &&
+    !EMAIL_IDENTIDAD.test(autor.email)
+  ) {
+    errores.push('autor.email: debe tener forma x@y');
   }
 }
 
@@ -493,6 +537,10 @@ export function validarPerfil(objeto) {
   // los valores concretos se comprueban al expandir (ver src/core/recetas.js).
   if (objeto.recetas !== undefined) validarRecetas(objeto.recetas, errores);
 
+  // Sección opcional `autor`: identidad git de los commits NUEVOS del servidor. Sin
+  // ella se usa la del repo (`user.name`/`user.email`) y, si falta, el fallback (§ identidadGit.js).
+  if (objeto.autor !== undefined) validarAutor(objeto.autor, errores);
+
   // Sección opcional `esperarIntegracion`: un trabajo no arranca si otro del mismo repo,
   // ya `succeeded` y sin integrar, escribe los mismos patrones (evita partir de una base
   // que quedará obsoleta y generar conflictos de merge).
@@ -697,6 +745,8 @@ export function validarPerfil(objeto) {
     logs,
     // Retención de logs pesados y de trabajos en memoria (por defecto 30 días / 500).
     retencion,
+    // Identidad git con la que firmar los commits nuevos (null = la del repo o el fallback).
+    autor: objeto.autor ? { nombre: objeto.autor.nombre, email: objeto.autor.email } : null,
   };
 }
 
@@ -786,6 +836,7 @@ export function perfilPorDefecto(nombreRepo) {
     esperarIntegracion: false,
     logs: { maxBytes: LOG_MAX_BYTES_DEFECTO },
     retencion: { ...RETENCION_POR_DEFECTO },
+    autor: null,
   };
 }
 
