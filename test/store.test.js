@@ -369,3 +369,79 @@ test('auditar rota audit.log al superar el tope y conserva un respaldo', () => {
   assert.match(actual, /"n":2/);
   assert.equal(actual.includes('"n":1'), false);
 });
+
+test('rotarAuditoria rota solo al alcanzar el tope y es idempotente', () => {
+  const almacen = new AlmacenDeTrabajos({ dir: dirTemporal(), topeAuditoriaBytes: 50 });
+  const destino = path.join(almacen.dir, 'audit.log');
+  fs.mkdirSync(almacen.dir, { recursive: true });
+
+  // Sin archivo todavía: no hay nada que rotar.
+  assert.equal(almacen.rotarAuditoria(destino), false);
+
+  // Por debajo del tope: tampoco.
+  fs.writeFileSync(destino, 'x'.repeat(10));
+  assert.equal(almacen.rotarAuditoria(destino), false);
+  assert.equal(fs.existsSync(`${destino}.1`), false);
+
+  // Al alcanzar el tope: rota y el activo desaparece (lo recrea el próximo append).
+  fs.writeFileSync(destino, 'x'.repeat(50));
+  assert.equal(almacen.rotarAuditoria(destino), true);
+  assert.equal(fs.existsSync(destino), false);
+  assert.equal(fs.readFileSync(`${destino}.1`, 'utf8').length, 50);
+});
+
+test('agregarEvento rota events.jsonl al superar el tope conservando un respaldo', () => {
+  const almacen = new AlmacenDeTrabajos({ dir: dirTemporal(), topeEventsBytes: 100 });
+  almacen.crear({ id: 'even0001' });
+  // Un evento grande supera el tope de 100 bytes ya en el primero.
+  almacen.agregarEvento('even0001', { tipo: 'uno', relleno: 'a'.repeat(200) });
+  almacen.agregarEvento('even0001', { tipo: 'dos' });
+
+  const rutas = almacen.rutasDeLogs('even0001');
+  assert.ok(fs.existsSync(`${rutas.events}.1`), 'debe existir el respaldo rotado');
+  assert.match(fs.readFileSync(`${rutas.events}.1`, 'utf8'), /"tipo":"uno"/);
+  assert.match(fs.readFileSync(rutas.events, 'utf8'), /"tipo":"dos"/);
+  assert.equal(fs.readFileSync(rutas.events, 'utf8').includes('"tipo":"uno"'), false);
+});
+
+test('listar con maxEnMemoria conserva los más recientes y todos los activos', () => {
+  const almacen = almacenNuevo();
+  // 5 terminados (creadoEn creciente) + 1 activo viejo.
+  for (let i = 1; i <= 5; i += 1) {
+    almacen.crear({ id: `gen${i}0000`, estado: 'succeeded', creadoEn: i });
+  }
+  almacen.crear({ id: 'activo01', estado: 'running', creadoEn: 0 });
+
+  const { trabajos, omitidos } = almacen.listar({ maxEnMemoria: 2 });
+  const ids = trabajos.map((t) => t.id);
+  // Los 2 más recientes (gen50000, gen40000) y el activo SIEMPRE presente.
+  assert.deepEqual(ids.sort(), ['activo01', 'gen40000', 'gen50000'].sort());
+  assert.equal(omitidos, 3);
+
+  // Sin el parámetro rige el tope del constructor (500): entran todos.
+  assert.equal(almacen.listar().omitidos, 0);
+  assert.equal(almacen.listar().trabajos.length, 6);
+});
+
+test('purgarLogsDeTrabajo borra los logs pesados y conserva job.json', () => {
+  const almacen = almacenNuevo();
+  almacen.crear({ id: 'purga001' });
+  const rutas = almacen.rutasDeLogs('purga001');
+  fs.writeFileSync(rutas.stdout, 'x'.repeat(100));
+  fs.writeFileSync(rutas.stderr, 'y'.repeat(50));
+  fs.writeFileSync(rutas.events, '{"tipo":"fin"}\n');
+  fs.writeFileSync(path.join(rutas.dir, 'aceptacion.log'), 'z'.repeat(30));
+  fs.writeFileSync(path.join(rutas.dir, 'opencode.jsonc'), '{}');
+
+  const res = almacen.purgarLogsDeTrabajo('purga001');
+  assert.equal(res.cantidad, 4);
+  assert.equal(res.bytes, 100 + 50 + '{"tipo":"fin"}\n'.length + 30);
+  assert.equal(fs.existsSync(rutas.stdout), false);
+  assert.equal(fs.existsSync(rutas.events), false);
+  // La metadata se conserva: el listado y el detalle siguen funcionando.
+  assert.equal(fs.existsSync(rutas.job), true);
+  assert.equal(fs.existsSync(path.join(rutas.dir, 'opencode.jsonc')), true);
+
+  // Sobre un trabajo ya purgado no hay nada que borrar.
+  assert.deepEqual(almacen.purgarLogsDeTrabajo('purga001'), { cantidad: 0, bytes: 0 });
+});

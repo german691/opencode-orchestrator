@@ -57,6 +57,8 @@ const CLAVES_PERFIL = new Set([
   'recetas',
   'autoIntegrar',
   'esperarIntegracion',
+  'logs',
+  'retencion',
 ]);
 
 /** Campos permitidos dentro de una receta. */
@@ -89,6 +91,28 @@ const MAX_TIMEOUT_MUTACIONES = 60 * 60 * 1000;
 
 /** Valores por defecto de la sección opcional `mutaciones`. */
 const MUTACIONES_POR_DEFECTO = Object.freeze({ habilitado: true, exigirTodas: false, timeoutMs: 300000 });
+
+/** Campos permitidos dentro de `logs` (topes de tamaño de los archivos de log de un trabajo). */
+const CLAVES_LOGS = new Set(['maxBytes']);
+
+/** Topes del tamaño de un log de trabajo (1 MB a 200 MB). */
+const MIN_LOG_BYTES = 1024 * 1024;
+const MAX_LOG_BYTES = 200 * 1024 * 1024;
+
+/** Tope por defecto de cada archivo de log de trabajo (20 MB). */
+const LOG_MAX_BYTES_DEFECTO = 20 * 1024 * 1024;
+
+/** Campos permitidos dentro de `retencion`. */
+const CLAVES_RETENCION = new Set(['dias', 'maxEnMemoria']);
+
+/** Valores por defecto de la sección opcional `retencion`. */
+const RETENCION_POR_DEFECTO = Object.freeze({ dias: 30, maxEnMemoria: 500 });
+
+/** Topes de la retención: días entre 1 y 3650; trabajos en memoria entre 1 y 100000. */
+const MIN_DIAS_RETENCION = 1;
+const MAX_DIAS_RETENCION = 3650;
+const MIN_MAX_EN_MEMORIA = 1;
+const MAX_MAX_EN_MEMORIA = 100000;
 
 /** Campos permitidos dentro de `worktrees`. */
 const CLAVES_WORKTREES = new Set(['root', 'link', 'linkConCopia', 'setup']);
@@ -577,6 +601,55 @@ export function validarPerfil(objeto) {
     }
   }
 
+  // Sección opcional `logs`: tope de tamaño por archivo de log de un trabajo. Un tope
+  // chico en un test con salida enorme permite verificar la compactación.
+  let logs = { maxBytes: LOG_MAX_BYTES_DEFECTO };
+  if (objeto.logs !== undefined) {
+    if (!esObjetoPlano(objeto.logs)) {
+      errores.push('logs: debe ser un objeto');
+    } else {
+      for (const clave of Object.keys(objeto.logs)) {
+        if (!CLAVES_LOGS.has(clave)) errores.push(`logs.${clave}: campo desconocido`);
+      }
+      if (objeto.logs.maxBytes !== undefined) {
+        const n = objeto.logs.maxBytes;
+        if (!Number.isInteger(n) || n < MIN_LOG_BYTES || n > MAX_LOG_BYTES) {
+          errores.push(`logs.maxBytes: debe ser un entero entre ${MIN_LOG_BYTES} y ${MAX_LOG_BYTES}`);
+        }
+      }
+      logs = { maxBytes: objeto.logs.maxBytes ?? LOG_MAX_BYTES_DEFECTO };
+    }
+  }
+
+  // Sección opcional `retencion`: cuántos días se conservan los logs pesados de trabajos
+  // terminados y cuántos trabajos carga el gestor en memoria al arrancar.
+  let retencion = { ...RETENCION_POR_DEFECTO };
+  if (objeto.retencion !== undefined) {
+    if (!esObjetoPlano(objeto.retencion)) {
+      errores.push('retencion: debe ser un objeto');
+    } else {
+      for (const clave of Object.keys(objeto.retencion)) {
+        if (!CLAVES_RETENCION.has(clave)) errores.push(`retencion.${clave}: campo desconocido`);
+      }
+      if (objeto.retencion.dias !== undefined) {
+        const d = objeto.retencion.dias;
+        if (!Number.isInteger(d) || d < MIN_DIAS_RETENCION || d > MAX_DIAS_RETENCION) {
+          errores.push(`retencion.dias: debe ser un entero entre ${MIN_DIAS_RETENCION} y ${MAX_DIAS_RETENCION}`);
+        }
+      }
+      if (objeto.retencion.maxEnMemoria !== undefined) {
+        const m = objeto.retencion.maxEnMemoria;
+        if (!Number.isInteger(m) || m < MIN_MAX_EN_MEMORIA || m > MAX_MAX_EN_MEMORIA) {
+          errores.push(`retencion.maxEnMemoria: debe ser un entero entre ${MIN_MAX_EN_MEMORIA} y ${MAX_MAX_EN_MEMORIA}`);
+        }
+      }
+      retencion = {
+        dias: objeto.retencion.dias ?? RETENCION_POR_DEFECTO.dias,
+        maxEnMemoria: objeto.retencion.maxEnMemoria ?? RETENCION_POR_DEFECTO.maxEnMemoria,
+      };
+    }
+  }
+
   if (errores.length > 0) throw new ErrorDePerfil(errores);
 
   return {
@@ -620,6 +693,10 @@ export function validarPerfil(objeto) {
     autoIntegrar,
     // Si es true, un trabajo espera a que se integren los que solapan sus writes.
     esperarIntegracion: objeto.esperarIntegracion === true,
+    // Tope por archivo de log de un trabajo (compactación cabeza+cola al superarlo).
+    logs,
+    // Retención de logs pesados y de trabajos en memoria (por defecto 30 días / 500).
+    retencion,
   };
 }
 
@@ -707,6 +784,8 @@ export function perfilPorDefecto(nombreRepo) {
     recetas: {},
     autoIntegrar: { ...AUTOINTEGRAR_POR_DEFECTO },
     esperarIntegracion: false,
+    logs: { maxBytes: LOG_MAX_BYTES_DEFECTO },
+    retencion: { ...RETENCION_POR_DEFECTO },
   };
 }
 
