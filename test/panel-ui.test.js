@@ -202,10 +202,11 @@ test('concurrencia: por defecto 8 y acotada a 1..16 como el servidor MCP', () =>
   assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: 'x' }), 8);
 });
 
-test('UI: chips de repositorio, localStorage, ?repo=, aria-busy, Reintentar y Corriendo n/máx', () => {
-  // El contenedor donde el cliente pinta los repositorios va en la columna izquierda.
-  assert.match(PAGINA, /id="chips-repo"/);
+test('UI: repositorio como select, localStorage, ?repo=, aria-busy, Reintentar y Corriendo n/máx', () => {
+  // El repositorio pasó de chips a un <select> para no confundirse con el estado.
+  assert.match(PAGINA, /id="filtro-repo"/);
   assert.match(PAGINA, /aria-label="Filtrar por repositorio"/);
+  assert.doesNotMatch(PAGINA, /id="chips-repo"/);
   // El filtro se recuerda y se refleja en la URL; se usa la lib pura contarPorRepo.
   assert.match(CLIENTE, /contarPorRepo/);
   assert.match(CLIENTE, /localStorage/);
@@ -219,6 +220,76 @@ test('UI: chips de repositorio, localStorage, ?repo=, aria-busy, Reintentar y Co
   assert.match(CLIENTE, /moverSeleccion\(evento\.key === 'j' \? 1 : -1, enBusqueda\)/);
   // La cabecera muestra 'Corriendo n/máx' con la concurrencia del entorno.
   assert.match(CLIENTE, /'Corriendo ' \+ usada \+ '\/' \+ maxima/);
+});
+
+test('UI: toolbar compacta con búsqueda, segmentado, repo, orden y densidad persistidos', () => {
+  assert.match(PAGINA, /id="limpiar-busqueda"/);
+  assert.match(PAGINA, /id="chips" class="segmentado"/);
+  assert.match(PAGINA, /id="orden"/);
+  assert.match(PAGINA, /Actividad reciente/);
+  assert.match(PAGINA, /id="densidad"/);
+  // Todas las preferencias se guardan/restauran con la lib de almacenamiento.
+  assert.match(CLIENTE, /CLAVE_ORDEN/);
+  assert.match(CLIENTE, /CLAVE_DENSIDAD/);
+  assert.match(CLIENTE, /CLAVE_ANCHO/);
+  assert.match(CLIENTE, /guardarAlmacen\(/);
+  assert.match(CLIENTE, /densidad-compacta/);
+  // El control de estado rotula «Problemas» (value 'fallidos') y trae contadores.
+  assert.match(CLIENTE, /\['fallidos', 'Problemas'\]/);
+});
+
+test('UI: layout de aplicación (grid, scroll por columna, divisor ARIA y maestro-detalle)', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    // Cabecera fija y grilla con el alto restante; sin scroll de página.
+    assert.match(css, /body\.panel-app\{[^}]*height:100dvh[^}]*overflow:hidden/);
+    assert.match(css, /\.cuerpo\{[^}]*grid-template-columns:var\(--ancho-lista\) 6px minmax\(0,1fr\)/);
+    assert.match(css, /\.cuerpo\{[^}]*overflow:hidden/);
+    // Cada columna con su propio scroll (min-height:0 + overflow:auto).
+    assert.match(css, /\.lista\{[^}]*overflow:hidden/);
+    assert.match(css, /\.trabajos\{[^}]*overflow:auto[^}]*min-height:0/);
+    assert.match(css, /\[role=tabpanel\]\{[^}]*overflow:auto[^}]*min-height:0/);
+    // Barra de título + pestañas sticky; encabezados de grupo sticky.
+    assert.match(css, /\.detalle-cabecera\{[^}]*position:sticky/);
+    assert.match(css, /\.grupo-encabezado\{[^}]*position:sticky/);
+    // Divisor de 6 px y ensanche a 440 px en pantallas ≥1700 px.
+    assert.match(css, /\.divisor\{/);
+    assert.match(css, /@media \(min-width:1700px\)\{\.cuerpo\{--ancho-lista:440px\}\}/);
+    // Maestro-detalle por debajo de 900 px.
+    assert.match(css, /@media \(max-width:899px\)/);
+    assert.match(css, /body\.detalle-abierto \.lista\{display:none\}/);
+    assert.match(css, /body\.detalle-abierto \.detalle\{display:flex\}/);
+  });
+  // El divisor es una manija accesible con atributos ARIA y foco de teclado.
+  assert.match(PAGINA, /id="divisor" class="divisor" role="separator" aria-orientation="vertical"/);
+  assert.match(PAGINA, /aria-valuenow="380" aria-valuemin="280" aria-valuemax="560" tabindex="0"/);
+  assert.match(PAGINA, /id="volver"[^>]*>← Trabajos</);
+});
+
+test('UI: navegación por history.pushState/popstate y carga del detalle por ?job', () => {
+  // La selección se apila en el historial y el evento popstate la restaura.
+  assert.match(CLIENTE, /history\.pushState\(/);
+  assert.match(CLIENTE, /history\.replaceState\(/);
+  assert.match(CLIENTE, /addEventListener\('popstate'/);
+  assert.match(CLIENTE, /searchParams\.set\('job'/);
+  assert.match(CLIENTE, /parametros\.get\('job'\)/);
+  // El id de la URL se carga cuando llega la lista (aunque no esté en ella).
+  assert.match(CLIENTE, /seleccionadoInicial/);
+  assert.match(CLIENTE, /const objetivo = app\.seleccionado \|\| app\.seleccionadoInicial/);
+  // El detalle arranca con la lista cuando se vuelve.
+  assert.match(CLIENTE, /function cerrarDetalle\(/);
+  assert.match(CLIENTE, /'detalle-abierto'/);
+  // Al navegar/actualizar, la fila seleccionada se hace visible sin saltar.
+  assert.match(CLIENTE, /scrollIntoView\(\{ block: 'nearest' \}\)/);
+  // Agrupación con encabezados y hora relativa en la lista.
+  assert.match(CLIENTE, /agruparTrabajos\(/);
+  assert.match(CLIENTE, /tiempoRelativo\(/);
+  assert.match(CLIENTE, /ordenarPor\(/);
+  // Divisor arrastrable por puntero y teclado, acotado por la lib pura.
+  assert.match(CLIENTE, /setPointerCapture/);
+  assert.match(CLIENTE, /limitarAnchoLista\(/);
+  assert.match(CLIENTE, /ANCHO_LISTA_MIN/);
+  assert.match(CLIENTE, /ANCHO_LISTA_MAX/);
 });
 
 test('cliente del pizarrón: pasa node --check y refresca por polling', () => {

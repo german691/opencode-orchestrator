@@ -64,9 +64,24 @@ h3{font-size:13px;margin:0}
 .boton:hover{background:var(--suave)}
 .boton[aria-pressed=true]{background:var(--activo-suave);border-color:var(--activo)}
 
-/* Cuerpo / columnas ------------------------------------------------------- */
-.cuerpo{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:calc(var(--esp)*3);padding:calc(var(--esp)*3);height:calc(100vh - 56px)}
-@media (max-width:820px){.cuerpo{grid-template-columns:1fr;height:auto}}
+/* Cuerpo / columnas (layout de aplicación) -------------------------------- */
+/* POR QUÉ 100dvh y flex: la cabecera queda fija y la grilla ocupa EXACTAMENTE
+   el alto restante; el scroll vive en cada columna y no en la página, para que
+   la lista y el detalle no se empujen entre sí. */
+body.panel-app{display:flex;flex-direction:column;height:100dvh;overflow:hidden}
+body.panel-app .cabecera{flex:none}
+.cuerpo{
+  --ancho-lista:clamp(320px,28vw,420px);
+  flex:1 1 auto;min-height:0;min-width:0;display:grid;
+  grid-template-columns:var(--ancho-lista) 6px minmax(0,1fr);
+  overflow:hidden;background:var(--bg);
+}
+@media (min-width:1700px){.cuerpo{--ancho-lista:440px}}
+/* Divisor arrastrable ----------------------------------------------------- */
+.divisor{position:relative;background:var(--bd);cursor:col-resize;touch-action:none;outline:none}
+.divisor::after{content:'';position:absolute;inset:0 -3px}
+.divisor:hover{background:var(--foco)}
+.divisor:focus-visible{outline:3px solid var(--foco);outline-offset:-1px;background:var(--foco)}
 
 /* Páginas secundarias (auditoría y pizarrón) ------------------------------ */
 /* Mismo sistema de tokens que la principal: padding 20/24 px y ancho cómodo.
@@ -111,20 +126,33 @@ h3{font-size:13px;margin:0}
 }
 
 /* Lista de trabajos ------------------------------------------------------- */
-.lista{display:flex;flex-direction:column;gap:calc(var(--esp)*2);min-height:0}
+.lista{display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden;background:var(--bg);border-right:1px solid var(--bd)}
+/* La toolbar queda pegada arriba de la lista (la lista scrollea por debajo). */
+.toolbar{flex:none;position:sticky;top:0;z-index:3;display:flex;flex-direction:column;gap:var(--esp);padding:calc(var(--esp)*2) calc(var(--esp)*3);background:var(--card);border-bottom:1px solid var(--bd)}
 .busqueda{margin:0}
+.busqueda-caja{position:relative;display:flex;align-items:center}
 #filtro-texto{
-  width:100%;font:inherit;min-height:34px;padding:4px 10px;color:var(--fg);
-  background:var(--card);border:1px solid var(--bd);border-radius:var(--radio);
+  width:100%;font:inherit;min-height:36px;padding:4px 34px 4px 10px;color:var(--fg);
+  background:var(--bg);border:1px solid var(--bd);border-radius:var(--radio);
 }
-.chips{display:flex;flex-wrap:wrap;gap:var(--esp)}
+#filtro-texto:focus-visible{background:var(--card)}
+.boton-limpiar{position:absolute;right:4px;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;font:inherit;font-size:16px;line-height:1;cursor:pointer;background:transparent;color:var(--mut);border:1px solid transparent;border-radius:var(--radio)}
+.boton-limpiar:hover{background:var(--suave);color:var(--fg)}
+/* Control segmentado de estado: una sola fila, no se confunde con repos. */
+.segmentado{display:flex;gap:2px;padding:2px;background:var(--suave);border:1px solid var(--bd);border-radius:var(--radio);overflow-x:auto;scrollbar-width:none}
+.segmentado::-webkit-scrollbar{display:none}
+.toolbar-fila{display:flex;align-items:center;gap:var(--esp)}
+.toolbar-fila select{flex:1 1 auto;min-width:0;font:inherit;font-size:13px;min-height:32px;padding:2px 6px;color:var(--fg);background:var(--card);border:1px solid var(--bd);border-radius:var(--radio)}
+.toolbar-fila #densidad{flex:none}
 .chip{
-  font:inherit;font-size:12px;min-height:32px;padding:4px 8px;cursor:pointer;
-  background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:999px;
+  font:inherit;font-size:12px;min-height:30px;padding:3px 8px;cursor:pointer;white-space:nowrap;
+  background:transparent;color:var(--fg);border:1px solid transparent;border-radius:var(--radio);
 }
 .chip .cuenta{color:var(--mut);margin-left:4px}
-.chip[aria-pressed=true]{background:var(--activo-suave);border-color:var(--activo);font-weight:600}
-.trabajos{list-style:none;margin:0;padding:0;overflow:auto;display:flex;flex-direction:column;gap:var(--esp);min-height:0}
+.chip[aria-pressed=true]{background:var(--card);border-color:var(--bd);font-weight:600}
+.trabajos{list-style:none;margin:0;padding:var(--esp);overflow:auto;display:flex;flex-direction:column;gap:var(--esp);min-height:0;flex:1 1 auto;overscroll-behavior:contain}
+.grupo-encabezado{position:sticky;top:0;z-index:2;display:flex;align-items:baseline;justify-content:space-between;gap:var(--esp);padding:5px 8px;margin-top:calc(var(--esp)*-1);background:var(--bg);border-bottom:1px solid var(--bd);font-size:12px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--mut)}
+.grupo-cuenta{font-weight:400}
 .trabajo{
   width:100%;text-align:left;font:inherit;cursor:pointer;display:grid;gap:2px;
   padding:8px 10px;min-height:44px;color:var(--fg);background:var(--card);
@@ -134,7 +162,7 @@ h3{font-size:13px;margin:0}
 .trabajo[aria-current=true]{border-color:var(--activo);background:var(--activo-suave)}
 .trabajo-estado{display:inline-flex;align-items:center;gap:var(--esp);font-size:12px;font-weight:600}
 .trabajo-estado .icono{font-size:13px}
-.trabajo-titulo{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.trabajo-titulo{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;font-size:14px}
 .trabajo-meta{display:flex;flex-wrap:wrap;gap:calc(var(--esp)*2);font-size:12px;color:var(--mut)}
 .trabajo-semaforo{border-radius:999px;padding:0 6px;border:1px solid var(--bd)}
 .semaforo-verde{color:var(--ok);border-color:var(--ok)}
@@ -142,7 +170,10 @@ h3{font-size:13px;margin:0}
 .semaforo-rojo{color:var(--mal);border-color:var(--mal)}
 .trabajo-espera{color:var(--cola)}
 .trabajo-aviso{color:var(--cola)}
-.chips-repo{margin-top:calc(var(--esp)*-1)}
+/* Densidad compacta: filas y gaps ~30% más chicos, sin perder el objetivo táctil. */
+.cuerpo.densidad-compacta .trabajos{gap:2px}
+.cuerpo.densidad-compacta .trabajo{padding:5px 8px;min-height:36px}
+.cuerpo.densidad-compacta .trabajo-meta,.cuerpo.densidad-compacta .trabajo-estado{font-size:11px}
 .vacia{color:var(--mut);font-size:13px;padding:8px}
 
 /* Estados: texto + ícono + color ------------------------------------------ */
@@ -153,17 +184,22 @@ h3{font-size:13px;margin:0}
 .estado-neutro{color:var(--mut)}
 
 /* Detalle y pestañas ------------------------------------------------------ */
-.detalle{min-width:0;min-height:0;display:flex;flex-direction:column;gap:calc(var(--esp)*2)}
-.titulo-trabajo{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tabs{display:flex;flex-wrap:wrap;gap:var(--esp);border-bottom:1px solid var(--bd)}
+.detalle{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+.volver{display:none;align-self:flex-start;margin:calc(var(--esp)*2) calc(var(--esp)*3) 0}
+#sin-seleccion{padding:calc(var(--esp)*5) calc(var(--esp)*4)}
+#detalle-trabajo{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
+/* Solo el contenido de la pestaña scrollea: la barra de título + tabs queda fija. */
+.detalle-cabecera{flex:none;position:sticky;top:0;z-index:2;background:var(--bg);padding:calc(var(--esp)*2) calc(var(--esp)*3) 0;border-bottom:1px solid var(--bd)}
+.titulo-trabajo{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:17px;font-weight:600}
+.tabs{display:flex;flex-wrap:nowrap;gap:var(--esp);border-bottom:1px solid var(--bd);overflow-x:auto;margin-bottom:calc(var(--esp)*-1)}
 .tabs [role=tab]{
-  font:inherit;font-size:13px;min-height:34px;padding:6px 12px;cursor:pointer;
+  font:inherit;font-size:13px;min-height:34px;padding:6px 12px;cursor:pointer;white-space:nowrap;
   background:transparent;color:var(--mut);border:1px solid transparent;border-bottom:none;
   border-radius:var(--radio) var(--radio) 0 0;
 }
 .tabs [role=tab]:hover{color:var(--fg);background:var(--suave)}
 .tabs [role=tab][aria-selected=true]{color:var(--fg);background:var(--card);border-color:var(--bd);font-weight:600}
-[role=tabpanel]{overflow:auto;min-height:0;flex:1;padding:calc(var(--esp)*2) 0}
+[role=tabpanel]{overflow:auto;min-height:0;flex:1 1 auto;padding:calc(var(--esp)*2) calc(var(--esp)*3);overscroll-behavior:contain}
 .cargando,.nota{color:var(--mut);font-size:13px}
 .error{color:var(--mal)}
 dl.resumen{display:grid;grid-template-columns:max-content 1fr;gap:calc(var(--esp)*2) calc(var(--esp)*3);margin:0 0 calc(var(--esp)*4)}
@@ -264,8 +300,34 @@ details.plegable>pre{border-radius:0 0 var(--radio) var(--radio)}
 .ayuda-lista li{display:flex;justify-content:space-between;gap:calc(var(--esp)*3)}
 kbd{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(--suave);border:1px solid var(--bd);border-radius:4px;padding:0 6px}
 
+/* Layout adaptable: maestro-detalle (móvil) --------------------------------- */
+/* Por debajo de 900 px se ve la lista O el detalle, nunca los dos apilados: al
+   elegir un trabajo se muestra el detalle a pantalla completa con «← Trabajos». */
+@media (max-width:899px){
+  .cuerpo{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}
+  .divisor{display:none}
+  .lista{display:flex;border-right:none}
+  .detalle{display:none}
+  body.detalle-abierto .lista{display:none}
+  body.detalle-abierto .detalle{display:flex}
+  .volver{display:inline-flex;margin:calc(var(--esp)*3) calc(var(--esp)*3) 0}
+  .volver[hidden]{display:none}
+  /* Objetivos táctiles >= 36 px y sin resaltado azul del toque. */
+  .trabajo{min-height:52px;padding:10px 12px}
+  .chip{min-height:36px}
+  .toolbar-fila select,.boton-limpiar,#densidad{min-height:36px;height:36px}
+  .tabs [role=tab]{min-height:40px}
+  /* Cabecera compacta: contadores y conexión siguen visibles sin comer alto. */
+  .cabecera{gap:var(--esp);padding:6px 10px}
+  .cabecera .marca{display:none}
+  .contadores,.conexion{font-size:11px}
+  .cabecera-nav a{font-size:12px}
+}
+
 /* Accesibilidad ----------------------------------------------------------- */
+*{-webkit-tap-highlight-color:rgba(127,127,127,.18)}
 @media (prefers-reduced-motion:reduce){
+  .trabajos{scroll-behavior:auto}
   *{transition:none !important;animation:none !important}
 }
 @media (forced-colors:active){

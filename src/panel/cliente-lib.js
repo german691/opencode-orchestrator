@@ -401,6 +401,118 @@ export function parsearParche(texto) {
   return archivos;
 }
 
+/** Ancho mínimo y máximo (px) de la columna de la lista en el layout de app. */
+export const ANCHO_LISTA_MIN = 280;
+export const ANCHO_LISTA_MAX = 560;
+
+/**
+ * Acota el ancho de la lista al rango usable. La usan el valor por defecto, el
+ * que se restaura de localStorage y el arrastre del divisor: así un valor viejo
+ * o corrupto nunca deja una columna inusable ni desborda el layout.
+ * @param {number|string} ancho
+ * @returns {number}
+ */
+export function limitarAnchoLista(ancho) {
+  const n = Number(ancho);
+  if (!Number.isFinite(n)) return ANCHO_LISTA_MIN;
+  return Math.min(ANCHO_LISTA_MAX, Math.max(ANCHO_LISTA_MIN, Math.round(n)));
+}
+
+/**
+ * Ancho inicial de la lista según el ancho de la ventana: fluido `clamp(320px,
+ * 28vw, 420px)` y hasta 440 px en pantallas muy anchas (≥1700 px), donde sobra
+ * espacio y la lista puede mostrar más sin ahogar al detalle.
+ * @param {number} viewportAncho
+ * @returns {number}
+ */
+export function anchoListaInicial(viewportAncho) {
+  const vp = Number(viewportAncho);
+  if (!Number.isFinite(vp) || vp <= 0) return 320;
+  if (vp >= 1700) return 440;
+  return limitarAnchoLista(Math.min(420, Math.max(320, Math.round(vp * 0.28))));
+}
+
+/**
+ * Agrupa los trabajos ya ordenados en «En curso» y «Terminados» para la lista,
+ * con encabezados. Se omiten los grupos vacíos. Es pura para poder probar el
+ * criterio (terminal = no avanza) sin depender del DOM.
+ * @param {object[]} lista
+ * @returns {Array<{ clave: string, etiqueta: string, trabajos: object[] }>}
+ */
+export function agruparTrabajos(lista) {
+  const enCurso = [];
+  const terminados = [];
+  for (const trabajo of Array.isArray(lista) ? lista : []) {
+    (esTerminal(trabajo?.estado) ? terminados : enCurso).push(trabajo);
+  }
+  const grupos = [];
+  if (enCurso.length > 0) grupos.push({ clave: 'curso', etiqueta: 'En curso', trabajos: enCurso });
+  if (terminados.length > 0) grupos.push({ clave: 'terminados', etiqueta: 'Terminados', trabajos: terminados });
+  return grupos;
+}
+
+/**
+ * Hora relativa legible (`hace 5 min`) para la meta de cada fila. El valor
+ * absoluto (ISO) va en el `title` desde el cliente; acá solo el texto humano.
+ * @param {number|null|undefined} ts
+ * @param {number} [ahora]
+ * @returns {string}
+ */
+export function tiempoRelativo(ts, ahora) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const ref = Number.isFinite(Number(ahora)) ? Number(ahora) : Date.now();
+  const segundos = Math.max(0, Math.round((ref - n) / 1000));
+  if (segundos < 10) return 'recién';
+  if (segundos < 60) return 'hace ' + segundos + ' s';
+  const minutos = Math.floor(segundos / 60);
+  if (segundos < 3600) return 'hace ' + minutos + ' min';
+  const horas = Math.floor(segundos / 3600);
+  if (segundos < 86400) return 'hace ' + horas + ' h';
+  const dias = Math.floor(segundos / 86400);
+  if (dias < 30) return 'hace ' + dias + ' d';
+  const meses = Math.floor(dias / 30);
+  if (meses < 12) return 'hace ' + meses + ' mes';
+  return 'hace ' + Math.floor(meses / 12) + ' a';
+}
+
+/** Peso por estado para el orden «Estado»: primero lo que reclama atención. */
+const PESO_ESTADO = {
+  running: 0,
+  verifying: 1,
+  provisioning: 2,
+  queued: 3,
+  failed: 4,
+  rejected: 5,
+  lost: 6,
+  cancelled: 7,
+  succeeded: 8,
+  merged: 9,
+};
+
+/**
+ * Ordena una copia de la lista según el criterio elegido en la toolbar:
+ * `actividad` (por defecto), `estado` o `creacion`. No muta la entrada.
+ * @param {object[]} lista
+ * @param {'actividad'|'estado'|'creacion'} [criterio]
+ * @returns {object[]}
+ */
+export function ordenarPor(lista, criterio = 'actividad') {
+  const copia = Array.isArray(lista) ? [...lista] : [];
+  const actividad = (trabajo) => trabajo?.actividadEn ?? trabajo?.creadoEn ?? 0;
+  const creacion = (trabajo) => trabajo?.creadoEn ?? 0;
+  if (criterio === 'creacion') return copia.sort((a, b) => creacion(b) - creacion(a));
+  if (criterio === 'estado') {
+    return copia.sort((a, b) => {
+      const pesoA = PESO_ESTADO[a?.estado] ?? 99;
+      const pesoB = PESO_ESTADO[b?.estado] ?? 99;
+      if (pesoA !== pesoB) return pesoA - pesoB;
+      return actividad(b) - actividad(a);
+    });
+  }
+  return copia.sort((a, b) => actividad(b) - actividad(a));
+}
+
 /**
  * Resumen numérico del alcance de un trabajo para la cabecera de la pestaña.
  * @param {object|null|undefined} alcance

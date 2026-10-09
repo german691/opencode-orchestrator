@@ -8,9 +8,11 @@
  *
  * POR QUÉ sin `innerHTML` ni `style=`: la CSP del panel prohíbe el contenido en
  * línea. Todo nodo se crea con `createElement` y el texto se asigna con
- * `textContent`, así que nada leído de disco puede inyectar HTML.
+ * `textContent`, así que nada leído de disco puede inyectar HTML. El único
+ * estilo que se toca desde JS es la variable `--ancho-lista` (CSSOM), necesaria
+ * para el divisor arrastrable.
  */
-export const CLIENTE = String.raw`import { formatearDuracion, etiquetaEstado, motivoLegible, ordenarTrabajos, filtrarTrabajos, contarEstados, contarPorRepo, parsearParche, resumenAlcance, resumenTarea } from '/static/lib.js';
+export const CLIENTE = String.raw`import { formatearDuracion, etiquetaEstado, motivoLegible, filtrarTrabajos, contarEstados, contarPorRepo, parsearParche, resumenAlcance, resumenTarea, limitarAnchoLista, anchoListaInicial, agruparTrabajos, tiempoRelativo, ordenarPor, ANCHO_LISTA_MIN, ANCHO_LISTA_MAX } from '/static/lib.js';
 
 const porId = function (id) { return document.getElementById(id); };
 const crear = function (etiqueta, clase, texto) {
@@ -31,22 +33,45 @@ const MOTIVO_ESPERA = {
   bloqueado_por_dependencia: 'bloqueado por una dependencia',
 };
 
-// Estado de la aplicación en memoria. La lista se actualiza de forma incremental:
-// cada fila existente se reutiliza y solo se pinta de nuevo su contenido.
+// Claves de preferencias. Se leen/escriben con try/catch: en modo privado o con
+// almacenamiento bloqueado la UI debe seguir funcionando en memoria.
 const CLAVE_REPO = 'orq.panel.repo';
+const CLAVE_ANCHO = 'orq.panel.ancho';
+const CLAVE_ORDEN = 'orq.panel.orden';
+const CLAVE_DENSIDAD = 'orq.panel.densidad';
+const PASO_DIVISOR = 16;
 
+function leerAlmacen(clave) {
+  try { return localStorage.getItem(clave); } catch (error) { return null; }
+}
+function guardarAlmacen(clave, valor) {
+  try {
+    if (valor === null || valor === undefined) localStorage.removeItem(clave);
+    else localStorage.setItem(clave, valor);
+  } catch (error) {
+    // Sin localStorage la elección vive solo en memoria.
+  }
+}
+
+// Estado de la aplicación en memoria. La lista se actualiza de forma incremental:
+// cada fila existente se reutiliza y solo se pinta de nuevo su contenido, para no
+// perder el scroll ni la selección cuando llega una actualización por SSE.
 const app = {
   trabajos: [],
   porId: new Map(),
   seleccionado: null,
+  seleccionadoInicial: null,
   filtroEstado: 'todos',
   filtroTexto: '',
-  // Repositorio elegido en los chips (null = todos); se recuerda en localStorage.
   filtroRepo: null,
+  orden: 'actividad',
+  densidad: 'comoda',
+  anchoLista: 380,
   tab: 'resumen',
   resumenGlobal: null,
   cargado: {},
   filas: new Map(),
+  encabezados: new Map(),
   consola: { id: null, fuente: 'agente', seguir: true, offset: 0, timer: null, lineas: [], total: 0 },
   poll: null,
 };
@@ -87,12 +112,12 @@ function renderCabecera(resumen) {
   app.resumenGlobal = resumen;
   const corriendo = resumen.corriendo || 0;
   const enCola = resumen.enCola || 0;
-  const total = resumen.total || 0;
-  porId('contadores').textContent = 'Corriendo ' + corriendo + ' · En cola ' + enCola + ' · Total ' + total;
+  const usada = corriendo + (resumen.verificando || 0);
+  const maxima = typeof resumen.concurrencia === 'number' && resumen.concurrencia > 0 ? resumen.concurrencia : usada;
+  // Siempre visible: «Corriendo n/máx · En cola n» (y en móvil se compacta por CSS).
+  porId('contadores').textContent = 'Corriendo ' + usada + '/' + maxima + ' · En cola ' + enCola;
   const caja = porId('concurrencia');
   if (typeof resumen.concurrencia === 'number' && resumen.concurrencia > 0) {
-    const usada = corriendo + (resumen.verificando || 0);
-    const maxima = resumen.concurrencia;
     const barra = document.createElement('progress');
     barra.className = 'barra';
     barra.max = maxima;
@@ -107,11 +132,93 @@ function renderCabecera(resumen) {
   actualizarTitulo();
 }
 
+// --- Toolbar de la lista ----------------------------------------------------
+
+// Value 'fallidos' se rotula «Problemas» (mismo criterio que la lib pura), para
+// que la etiqueta humana y el estado agrupado no se confundan.
+const ESTADOS_TOOLBAR = [['todos', 'Todos'], ['activos', 'Activos'], ['fallidos', 'Problemas'], ['terminados', 'Terminados']];
+
+function crearSegmentado() {
+  const contenedor = porId('chips');
+  if (!contenedor) return;
+  contenedor.replaceChildren();
+  ESTADOS_TOOLBAR.forEach(function (def) {
+    const boton = crear('button', 'chip');
+    boton.type = 'button';
+    boton.dataset.estado = def[0];
+    boton.setAttribute('aria-pressed', def[0] === app.filtroEstado ? 'true' : 'false');
+    boton.append(crear('span', '', def[1]), crear('span', 'cuenta', '0'));
+    boton.addEventListener('click', function () {
+      app.filtroEstado = def[0];
+      renderLista();
+    });
+    contenedor.append(boton);
+  });
+}
+
+function actualizarSegmentado() {
+  const conteos = contarEstados(app.trabajos);
+  porId('chips').querySelectorAll('.chip').forEach(function (boton) {
+    const clave = boton.dataset.estado;
+    boton.setAttribute('aria-pressed', clave === app.filtroEstado ? 'true' : 'false');
+    const cuenta = boton.querySelector('.cuenta');
+    if (cuenta) cuenta.textContent = String(conteos[clave] || 0);
+  });
+}
+
+// El repositorio es un <select> (chips aparte se confundían con los de estado).
+// Se reconstruye con los conteos actuales y conserva la elección vigente.
+function actualizarSelectRepo() {
+  const select = porId('filtro-repo');
+  if (!select) return;
+  const entradas = Array.from(contarPorRepo(app.trabajos).entries())
+    .sort(function (a, b) { return b[1] - a[1] || a[0].localeCompare(b[0]); });
+  const valor = app.filtroRepo || '';
+  select.replaceChildren();
+  const todos = crear('option', '', 'Todos los repositorios');
+  todos.value = '';
+  select.append(todos);
+  entradas.forEach(function (entrada) {
+    const opcion = crear('option', '', entrada[0] + ' (' + entrada[1] + ')');
+    opcion.value = entrada[0];
+    select.append(opcion);
+  });
+  // Si el repo de ?repo= ya no aparece en la lista, igual se ofrece para no perderlo.
+  if (valor && !entradas.some(function (entrada) { return entrada[0] === valor; })) {
+    const suelto = crear('option', '', valor);
+    suelto.value = valor;
+    select.append(suelto);
+  }
+  select.value = valor;
+  if (select.value !== valor) select.value = '';
+}
+
+function seleccionarRepo(nombre) {
+  app.filtroRepo = nombre || null;
+  // Se recuerda la elección y se refleja en ?repo= para poder compartir el enlace;
+  // el listado se filtra localmente para no perder los contadores del resto.
+  guardarAlmacen(CLAVE_REPO, app.filtroRepo);
+  try {
+    const url = new URL(location.href);
+    if (app.filtroRepo) url.searchParams.set('repo', app.filtroRepo);
+    else url.searchParams.delete('repo');
+    history.replaceState(history.state, '', url);
+  } catch (error) {
+    // Sin History API no es crítico.
+  }
+  renderLista();
+}
+
 // --- Lista de trabajos ------------------------------------------------------
 
 function trabajosVisibles() {
   const filtrados = filtrarTrabajos(app.trabajos, { estado: app.filtroEstado, texto: app.filtroTexto, repo: app.filtroRepo });
-  return ordenarTrabajos(filtrados);
+  return ordenarPor(filtrados, app.orden);
+}
+
+function horaTitulo(trabajo) {
+  const n = Number(trabajo.actividadEn ?? trabajo.creadoEn);
+  return Number.isFinite(n) && n > 0 ? new Date(n).toISOString() : '';
 }
 
 function pintarFila(boton, trabajo) {
@@ -127,6 +234,13 @@ function pintarFila(boton, trabajo) {
   const duracion = crear('span', 'trabajo-duracion', formatearDuracion(trabajo.duracionS));
   duracion.title = 'Duración total';
   meta.append(duracion);
+  // Hora relativa legible con el ISO exacto en el title.
+  const relativo = tiempoRelativo(trabajo.actividadEn ?? trabajo.creadoEn, Date.now());
+  if (relativo) {
+    const cuando = crear('span', 'trabajo-actividad', relativo);
+    cuando.title = horaTitulo(trabajo);
+    meta.append(cuando);
+  }
   if (trabajo.semaforo) {
     meta.append(crear('span', 'trabajo-semaforo semaforo-' + trabajo.semaforo, 'sin salida hace ' + formatearDuracion(trabajo.segundosSinSalida)));
   }
@@ -137,105 +251,61 @@ function pintarFila(boton, trabajo) {
 
 function renderLista() {
   const contenedor = porId('trabajos');
+  if (!contenedor) return;
+  // Preservar el scroll: una actualización por SSE no debe saltar la lista.
+  const scrollTop = contenedor.scrollTop;
   const visibles = trabajosVisibles();
   const ids = new Set(visibles.map(function (trabajo) { return trabajo.id; }));
   app.filas.forEach(function (li, id) {
     if (!ids.has(id)) { li.remove(); app.filas.delete(id); }
   });
-  let anterior = null;
-  visibles.forEach(function (trabajo) {
-    let li = app.filas.get(trabajo.id);
-    if (!li) {
-      li = crear('li', 'fila-trabajo');
-      const boton = crear('button', 'trabajo');
-      boton.type = 'button';
-      boton.addEventListener('click', function () { seleccionar(trabajo.id); });
-      li.append(boton);
-      app.filas.set(trabajo.id, li);
+  const grupos = agruparTrabajos(visibles);
+  const nodos = [];
+  grupos.forEach(function (grupo) {
+    let enc = app.encabezados.get(grupo.clave);
+    if (!enc) {
+      enc = crear('li', 'grupo-encabezado');
+      enc.dataset.clave = grupo.clave;
+      enc.append(crear('span', 'grupo-titulo', grupo.etiqueta), crear('span', 'grupo-cuenta', '0'));
+      app.encabezados.set(grupo.clave, enc);
     }
-    pintarFila(li.firstChild, trabajo);
-    if (anterior === null) contenedor.prepend(li);
-    else if (anterior.nextSibling !== li) contenedor.insertBefore(li, anterior.nextSibling);
-    anterior = li;
+    enc.querySelector('.grupo-cuenta').textContent = String(grupo.trabajos.length);
+    nodos.push(enc);
+    grupo.trabajos.forEach(function (trabajo) {
+      let li = app.filas.get(trabajo.id);
+      if (!li) {
+        li = crear('li', 'fila-trabajo');
+        const boton = crear('button', 'trabajo');
+        boton.type = 'button';
+        boton.addEventListener('click', function () { seleccionar(trabajo.id); });
+        li.append(boton);
+        app.filas.set(trabajo.id, li);
+      }
+      pintarFila(li.firstChild, trabajo);
+      nodos.push(li);
+    });
+  });
+  // Encabezados de grupos que ya no existen.
+  app.encabezados.forEach(function (enc, clave) {
+    if (!grupos.some(function (grupo) { return grupo.clave === clave; })) { enc.remove(); app.encabezados.delete(clave); }
+  });
+  let anterior = null;
+  nodos.forEach(function (nodo) {
+    if (anterior === null) {
+      if (contenedor.firstChild !== nodo) contenedor.prepend(nodo);
+    } else if (anterior.nextSibling !== nodo) {
+      contenedor.insertBefore(nodo, anterior.nextSibling);
+    }
+    anterior = nodo;
   });
   porId('lista-vacia').hidden = visibles.length !== 0;
-  actualizarChips();
-  crearChipsRepo();
+  actualizarSegmentado();
+  actualizarSelectRepo();
+  contenedor.scrollTop = scrollTop;
   actualizarTitulo();
 }
 
-function crearChipsRepo() {
-  const contenedor = porId('chips-repo');
-  if (!contenedor) return;
-  const entradas = Array.from(contarPorRepo(app.trabajos).entries())
-    .sort(function (a, b) { return b[1] - a[1] || a[0].localeCompare(b[0]); });
-  // Con un solo repositorio (o ninguno) no hay nada que elegir: se oculta el grupo.
-  if (entradas.length < 2) { contenedor.hidden = true; contenedor.replaceChildren(); return; }
-  contenedor.hidden = false;
-  const chips = [{ nombre: null, etiqueta: 'Todos', cuenta: app.trabajos.length }].concat(
-    entradas.map(function (entrada) { return { nombre: entrada[0], etiqueta: entrada[0], cuenta: entrada[1] }; }),
-  );
-  contenedor.replaceChildren();
-  chips.forEach(function (chip) {
-    const boton = crear('button', 'chip');
-    boton.type = 'button';
-    boton.setAttribute('aria-pressed', app.filtroRepo === chip.nombre ? 'true' : 'false');
-    boton.append(crear('span', '', chip.etiqueta), crear('span', 'cuenta', String(chip.cuenta)));
-    boton.addEventListener('click', function () { seleccionarRepo(chip.nombre); });
-    contenedor.append(boton);
-  });
-}
-
-function seleccionarRepo(nombre) {
-  app.filtroRepo = nombre || null;
-  // Se recuerda la elección para la próxima visita y se refleja en ?repo= para
-  // poder compartir el enlace; el listado se filtra localmente para no perder los
-  // contadores del resto de los repositorios.
-  try {
-    if (app.filtroRepo) localStorage.setItem(CLAVE_REPO, app.filtroRepo);
-    else localStorage.removeItem(CLAVE_REPO);
-  } catch (error) {
-    // Sin localStorage (modo privado) el filtro sigue vivo en memoria.
-  }
-  try {
-    const url = new URL(location.href);
-    if (app.filtroRepo) url.searchParams.set('repo', app.filtroRepo);
-    else url.searchParams.delete('repo');
-    history.replaceState(null, '', url);
-  } catch (error) {
-    // Sin History API no es crítico.
-  }
-  renderLista();
-}
-
-function crearChips() {
-  const contenedor = porId('chips');
-  const definiciones = [['todos', 'Todos'], ['activos', 'Activos'], ['fallidos', 'Fallidos/Rechazados'], ['terminados', 'Terminados']];
-  definiciones.forEach(function (def) {
-    const boton = crear('button', 'chip');
-    boton.type = 'button';
-    boton.dataset.estado = def[0];
-    boton.setAttribute('aria-pressed', def[0] === app.filtroEstado ? 'true' : 'false');
-    boton.append(crear('span', '', def[1]), crear('span', 'cuenta', '0'));
-    boton.addEventListener('click', function () {
-      app.filtroEstado = def[0];
-      renderLista();
-    });
-    contenedor.append(boton);
-  });
-}
-
-function actualizarChips() {
-  const conteos = contarEstados(app.trabajos);
-  porId('chips').querySelectorAll('.chip').forEach(function (boton) {
-    const clave = boton.dataset.estado;
-    boton.setAttribute('aria-pressed', clave === app.filtroEstado ? 'true' : 'false');
-    const cuenta = boton.querySelector('.cuenta');
-    if (cuenta) cuenta.textContent = String(conteos[clave] || 0);
-  });
-}
-
-// --- Selección y detalle ----------------------------------------------------
+// --- Selección, detalle y navegación ----------------------------------------
 
 function trabajoSeleccionado() {
   for (let i = 0; i < app.trabajos.length; i += 1) {
@@ -244,32 +314,72 @@ function trabajoSeleccionado() {
   return app.porId.get(app.seleccionado) || null;
 }
 
-function seleccionar(id) {
-  if (app.seleccionado !== id) {
+function actualizarResaltado() {
+  app.filas.forEach(function (li, filaId) {
+    const boton = li.firstChild;
+    if (boton) boton.setAttribute('aria-current', filaId === app.seleccionado ? 'true' : 'false');
+  });
+}
+
+// El estado de navegación vive en la URL (?job=): pushState al elegir y popstate
+// para el botón «Atrás» del navegador.
+function actualizarUrlSeleccion(id, reemplazar) {
+  try {
+    const url = new URL(location.href);
+    if (id) url.searchParams.set('job', id);
+    else url.searchParams.delete('job');
+    const estado = { job: id || null };
+    if (reemplazar) history.replaceState(estado, '', url);
+    else history.pushState(estado, '', url);
+  } catch (error) {
+    // Sin History API la selección sigue en memoria.
+  }
+}
+
+function seleccionar(id, opciones) {
+  if (!id) return;
+  const ajustes = opciones || {};
+  const cambio = app.seleccionado !== id;
+  if (cambio) {
     app.cargado = {};
     detenerConsola();
     app.consola = { id: null, fuente: 'agente', seguir: true, offset: 0, timer: null, lineas: [], total: 0 };
   }
   app.seleccionado = id;
-  try {
-    const url = new URL(location.href);
-    url.searchParams.set('job', id);
-    history.replaceState(null, '', url);
-  } catch (error) {
-    // Sin History API no es crítico: la selección sigue en memoria.
-  }
-  app.filas.forEach(function (li, filaId) {
-    const boton = li.firstChild;
-    if (boton) boton.setAttribute('aria-current', filaId === id ? 'true' : 'false');
-  });
+  document.body.classList.add('detalle-abierto');
+  if (ajustes.historial !== false) actualizarUrlSeleccion(id, false);
+  actualizarResaltado();
   mostrarDetalle();
   cargarTab(app.tab);
+  if (cambio) {
+    const li = app.filas.get(id);
+    if (li && li.scrollIntoView) li.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function limpiarSeleccion() {
+  app.seleccionado = null;
+  document.body.classList.remove('detalle-abierto');
+  actualizarResaltado();
+  mostrarDetalle();
+}
+
+// Cierra el detalle en móvil y refleja el cambio en la URL; el botón «Atrás» del
+// navegador se apoya en popstate (la selección se apila con pushState).
+function cerrarDetalle() {
+  if (!app.seleccionado) return;
+  limpiarSeleccion();
+  actualizarUrlSeleccion(null, false);
+  const busqueda = porId('filtro-texto');
+  if (busqueda) busqueda.focus();
 }
 
 function mostrarDetalle() {
   const id = app.seleccionado;
   porId('sin-seleccion').hidden = Boolean(id);
   porId('detalle-trabajo').hidden = !id;
+  const volver = porId('volver');
+  if (volver) volver.hidden = !id;
   if (!id) return;
   const trabajo = trabajoSeleccionado();
   porId('titulo-trabajo').textContent = trabajo ? (trabajo.titulo || trabajo.id) : id;
@@ -811,10 +921,15 @@ async function cargarTodo() {
     anunciarCambios(previos, app.trabajos);
     renderLista();
     renderCabecera(await (await fetch('/api/estado')).json());
-    if (!app.seleccionado && app.trabajos.length) seleccionar(app.trabajos[0].id);
-    else if (app.seleccionado) {
-      mostrarDetalle();
-      cargarTab(app.tab);
+    // La selección de la URL se carga recién cuando llega la lista; si el trabajo
+    // no está en la lista igual se pide su detalle por /api/trabajos/:id.
+    const objetivo = app.seleccionado || app.seleccionadoInicial;
+    app.seleccionadoInicial = null;
+    if (objetivo && app.seleccionado !== objetivo) seleccionar(objetivo, { historial: false });
+    else if (objetivo) mostrarDetalle();
+    else if (app.trabajos.length) {
+      seleccionar(app.trabajos[0].id, { historial: false });
+      actualizarUrlSeleccion(app.trabajos[0].id, true);
     }
   } catch (error) {
     setConexion(false);
@@ -849,6 +964,65 @@ function conectar() {
   });
 }
 
+// --- Divisor ajustable ------------------------------------------------------
+
+function aplicarAnchoLista(ancho) {
+  const valor = limitarAnchoLista(ancho);
+  app.anchoLista = valor;
+  const cuerpo = porId('cuerpo');
+  if (cuerpo) cuerpo.style.setProperty('--ancho-lista', valor + 'px');
+  const divisor = porId('divisor');
+  if (divisor) divisor.setAttribute('aria-valuenow', String(valor));
+  return valor;
+}
+
+function iniciarDivisor() {
+  const divisor = porId('divisor');
+  const cuerpo = porId('cuerpo');
+  if (!divisor || !cuerpo) return;
+  const recordar = function () { guardarAlmacen(CLAVE_ANCHO, String(app.anchoLista)); };
+  let arrastrando = false;
+  divisor.addEventListener('pointerdown', function (evento) {
+    arrastrando = true;
+    evento.preventDefault();
+    if (divisor.setPointerCapture) divisor.setPointerCapture(evento.pointerId);
+  });
+  divisor.addEventListener('pointermove', function (evento) {
+    if (!arrastrando) return;
+    const borde = cuerpo.getBoundingClientRect().left;
+    aplicarAnchoLista(evento.clientX - borde);
+  });
+  const soltar = function (evento) {
+    if (!arrastrando) return;
+    arrastrando = false;
+    recordar();
+    if (divisor.releasePointerCapture) {
+      try { divisor.releasePointerCapture(evento.pointerId); } catch (error) { /* ya liberado */ }
+    }
+  };
+  divisor.addEventListener('pointerup', soltar);
+  divisor.addEventListener('pointercancel', soltar);
+  divisor.addEventListener('keydown', function (evento) {
+    if (evento.key === 'ArrowLeft') { evento.preventDefault(); aplicarAnchoLista(app.anchoLista - PASO_DIVISOR); recordar(); }
+    else if (evento.key === 'ArrowRight') { evento.preventDefault(); aplicarAnchoLista(app.anchoLista + PASO_DIVISOR); recordar(); }
+    else if (evento.key === 'Home') { evento.preventDefault(); aplicarAnchoLista(ANCHO_LISTA_MIN); recordar(); }
+    else if (evento.key === 'End') { evento.preventDefault(); aplicarAnchoLista(ANCHO_LISTA_MAX); recordar(); }
+  });
+  // Doble clic: vuelve al ancho por defecto para la ventana actual.
+  divisor.addEventListener('dblclick', function () { aplicarAnchoLista(anchoListaInicial(window.innerWidth)); recordar(); });
+}
+
+function aplicarDensidad() {
+  const cuerpo = porId('cuerpo');
+  const compacta = app.densidad === 'compacta';
+  if (cuerpo) cuerpo.classList.toggle('densidad-compacta', compacta);
+  const boton = porId('densidad');
+  if (boton) {
+    boton.textContent = compacta ? 'Compacta' : 'Cómoda';
+    boton.setAttribute('aria-pressed', compacta ? 'true' : 'false');
+  }
+}
+
 // --- Teclado ----------------------------------------------------------------
 
 function moverSeleccion(delta, conservarFoco) {
@@ -879,6 +1053,13 @@ function enCampoDeTexto(elemento) {
 }
 
 function atajos(evento) {
+  // Alt+← vuelve a la lista (maestro-detalle), sin depender del foco.
+  if (evento.altKey && evento.key === 'ArrowLeft') { evento.preventDefault(); cerrarDetalle(); return; }
+  // Escape cierra el detalle solo en móvil y fuera de un campo de texto.
+  if (evento.key === 'Escape' && app.seleccionado && !enCampoDeTexto(evento.target)) {
+    const dialogo = porId('dialogo-ayuda');
+    if (!(dialogo && dialogo.open)) { cerrarDetalle(); return; }
+  }
   if (evento.altKey || evento.ctrlKey || evento.metaKey) return;
   const campo = enCampoDeTexto(evento.target);
   const enBusqueda = evento.target === porId('filtro-texto');
@@ -911,9 +1092,46 @@ function flechasTab(evento) {
 // --- Arranque ---------------------------------------------------------------
 
 function iniciar() {
-  crearChips();
+  crearSegmentado();
+  // Restaurar preferencias persistidas (leerAlmacen ya trae try/catch).
+  const ordenGuardado = leerAlmacen(CLAVE_ORDEN);
+  if (ordenGuardado === 'actividad' || ordenGuardado === 'estado' || ordenGuardado === 'creacion') app.orden = ordenGuardado;
+  app.densidad = leerAlmacen(CLAVE_DENSIDAD) === 'compacta' ? 'compacta' : 'comoda';
+  const anchoGuardado = Number(leerAlmacen(CLAVE_ANCHO));
+  app.anchoLista = Number.isFinite(anchoGuardado) && anchoGuardado > 0 ? limitarAnchoLista(anchoGuardado) : anchoListaInicial(window.innerWidth);
+  aplicarAnchoLista(app.anchoLista);
+  aplicarDensidad();
+  const selectOrden = porId('orden');
+  if (selectOrden) {
+    selectOrden.value = app.orden;
+    selectOrden.addEventListener('change', function () {
+      app.orden = selectOrden.value;
+      guardarAlmacen(CLAVE_ORDEN, app.orden);
+      renderLista();
+    });
+  }
+  const botonDensidad = porId('densidad');
+  if (botonDensidad) botonDensidad.addEventListener('click', function () {
+    app.densidad = app.densidad === 'compacta' ? 'comoda' : 'compacta';
+    guardarAlmacen(CLAVE_DENSIDAD, app.densidad);
+    aplicarDensidad();
+  });
+  const selectRepo = porId('filtro-repo');
+  if (selectRepo) selectRepo.addEventListener('change', function () { seleccionarRepo(selectRepo.value || null); });
   const busqueda = porId('filtro-texto');
-  busqueda.addEventListener('input', function () { app.filtroTexto = busqueda.value; renderLista(); });
+  const limpiar = porId('limpiar-busqueda');
+  const sincronizarLimpiar = function () { if (limpiar) limpiar.hidden = busqueda.value === ''; };
+  busqueda.addEventListener('input', function () { app.filtroTexto = busqueda.value; sincronizarLimpiar(); renderLista(); });
+  if (limpiar) limpiar.addEventListener('click', function () {
+    busqueda.value = '';
+    app.filtroTexto = '';
+    sincronizarLimpiar();
+    renderLista();
+    busqueda.focus();
+  });
+  sincronizarLimpiar();
+  const volver = porId('volver');
+  if (volver) volver.addEventListener('click', cerrarDetalle);
   const tablist = document.querySelector('.tabs');
   if (tablist) tablist.addEventListener('keydown', flechasTab);
   TABS.forEach(function (tab) {
@@ -924,13 +1142,22 @@ function iniciar() {
   const copiar = porId('copiar-id');
   if (copiar) copiar.addEventListener('click', function () { copiarId(copiar); });
   document.addEventListener('keydown', atajos);
+  // El botón «Atrás» del navegador mueve la selección leyendo el estado/URL.
+  window.addEventListener('popstate', function (evento) {
+    let id = evento.state && evento.state.job ? evento.state.job : null;
+    if (!id) {
+      try { id = new URLSearchParams(location.search).get('job'); } catch (error) { id = null; }
+    }
+    if (id) seleccionar(id, { historial: false });
+    else limpiarSeleccion();
+  });
+  iniciarDivisor();
   const parametros = new URLSearchParams(location.search);
-  app.seleccionado = parametros.get('job');
+  app.seleccionadoInicial = parametros.get('job');
   // El parámetro ?repo= manda sobre lo recordado; si no, se recupera la última elección.
   app.filtroRepo = parametros.get('repo');
-  if (!app.filtroRepo) {
-    try { app.filtroRepo = localStorage.getItem(CLAVE_REPO); } catch (error) { app.filtroRepo = null; }
-  }
+  if (!app.filtroRepo) app.filtroRepo = leerAlmacen(CLAVE_REPO);
+  try { history.replaceState({ job: app.seleccionadoInicial || null }, '', location.href); } catch (error) { /* sin History API */ }
   cargarTodo();
   conectar();
 }

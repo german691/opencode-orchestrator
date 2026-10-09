@@ -16,6 +16,11 @@ import {
   parsearParche,
   resumenAlcance,
   resumenTarea,
+  limitarAnchoLista,
+  anchoListaInicial,
+  agruparTrabajos,
+  tiempoRelativo,
+  ordenarPor,
 } from '../src/panel/cliente-lib.js';
 import { sintetizarEventos, reconstruirFaltantes, mezclarEventos } from '../src/panel/historial.js';
 
@@ -119,6 +124,66 @@ test('filtrarTrabajos: por categoría de chip y por texto', () => {
   assert.deepEqual(filtrarTrabajos(lista, { estado: 'activos', texto: 'tests' }).map((j) => j.id), ['a2']);
   assert.deepEqual(filtrarTrabajos(lista, { texto: 'nada' }), []);
   assert.deepEqual(contarEstados(lista), { todos: 6, activos: 2, fallidos: 2, terminados: 2 });
+});
+
+test('limitarAnchoLista: acota el ancho al rango usable 280..560', () => {
+  assert.equal(limitarAnchoLista(380), 380);
+  assert.equal(limitarAnchoLista(100), 280);
+  assert.equal(limitarAnchoLista(999), 560);
+  assert.equal(limitarAnchoLista(319.6), 320);
+  assert.equal(limitarAnchoLista('420'), 420);
+  // Un valor corrupto o vacío cae al mínimo, nunca deja la columna inusable.
+  assert.equal(limitarAnchoLista('x'), 280);
+  assert.equal(limitarAnchoLista(NaN), 280);
+});
+
+test('anchoListaInicial: fluid clamp(320,28vw,420) y 440 px en pantallas anchas', () => {
+  assert.equal(anchoListaInicial(390), 320);
+  assert.equal(anchoListaInicial(1366), 382);
+  assert.equal(anchoListaInicial(1920), 440);
+  assert.equal(anchoListaInicial(1699), 420);
+  assert.equal(anchoListaInicial(2560), 440);
+  assert.equal(anchoListaInicial(0), 320);
+});
+
+test('agruparTrabajos: separa En curso de Terminados y omite grupos vacíos', () => {
+  const lista = [
+    { id: 'corre', estado: 'running' },
+    { id: 'cola', estado: 'queued' },
+    { id: 'ok', estado: 'succeeded' },
+    { id: 'mal', estado: 'failed' },
+  ];
+  const grupos = agruparTrabajos(lista);
+  assert.deepEqual(grupos.map((g) => [g.clave, g.etiqueta, g.trabajos.map((t) => t.id)]), [
+    ['curso', 'En curso', ['corre', 'cola']],
+    ['terminados', 'Terminados', ['ok', 'mal']],
+  ]);
+  assert.deepEqual(agruparTrabajos([{ id: 'x', estado: 'running' }]).map((g) => g.clave), ['curso']);
+  assert.deepEqual(agruparTrabajos([]), []);
+});
+
+test('tiempoRelativo: hace X s/min/h/d y vacío sin timestamp', () => {
+  const ahora = 1_800_000_000_000;
+  assert.equal(tiempoRelativo(ahora - 3_000, ahora), 'recién');
+  assert.equal(tiempoRelativo(ahora - 30_000, ahora), 'hace 30 s');
+  assert.equal(tiempoRelativo(ahora - 5 * 60_000, ahora), 'hace 5 min');
+  assert.equal(tiempoRelativo(ahora - 3 * 3_600_000, ahora), 'hace 3 h');
+  assert.equal(tiempoRelativo(ahora - 2 * 86_400_000, ahora), 'hace 2 d');
+  assert.equal(tiempoRelativo(null, ahora), '');
+  assert.equal(tiempoRelativo(0, ahora), '');
+});
+
+test('ordenarPor: actividad (defecto), estado y creación', () => {
+  const lista = [
+    { id: 'ok', estado: 'succeeded', creadoEn: 300, actividadEn: 100 },
+    { id: 'corre', estado: 'running', creadoEn: 100, actividadEn: 500 },
+    { id: 'cola', estado: 'queued', creadoEn: 200, actividadEn: 300 },
+  ];
+  assert.deepEqual(ordenarPor(lista).map((j) => j.id), ['corre', 'cola', 'ok']);
+  assert.deepEqual(ordenarPor(lista, 'creacion').map((j) => j.id), ['ok', 'cola', 'corre']);
+  assert.deepEqual(ordenarPor(lista, 'estado').map((j) => j.id), ['corre', 'cola', 'ok']);
+  // No muta la entrada.
+  assert.deepEqual(lista.map((j) => j.id), ['ok', 'corre', 'cola']);
 });
 
 test('filtrarTrabajos: por repositorio (repoNombre) y conteo por repo', () => {
