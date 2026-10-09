@@ -49,8 +49,13 @@ function cabeceraHtml({ titulo, marca, actual, extra = '' }) {
 </header>`;
 }
 
-/** Armazón común: doctype, cabecera de documento y cuerpo. */
-function armazonHtml({ titulo, cabecera, cuerpo, scripts = '' }) {
+/**
+ * Armazón común: doctype, cabecera de documento y cuerpo. `claseCuerpo` permite
+ * marcar la página principal (`panel-app`) para que solo ella use el layout de
+ * aplicación a pantalla completa; auditoría y pizarrón siguen con scroll normal.
+ */
+function armazonHtml({ titulo, cabecera, cuerpo, scripts = '', claseCuerpo = '' }) {
+  const clase = claseCuerpo ? ` class="${claseCuerpo}"` : '';
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -59,7 +64,7 @@ function armazonHtml({ titulo, cabecera, cuerpo, scripts = '' }) {
 <title>${escaparHtml(titulo)}</title>
 <link rel="stylesheet" href="/static/app.css">
 </head>
-<body>
+<body${clase}>
 ${cabecera}
 ${cuerpo}
 ${scripts}
@@ -71,35 +76,58 @@ ${scripts}
 const NAV_PRINCIPAL = `<span id="conexion" class="conexion reconectando" role="status">
     <span class="punto" aria-hidden="true"></span><span id="conexion-texto">Reconectando…</span>
   </span>
-  <span id="contadores" class="contadores">Corriendo 0 · En cola 0 · Total 0</span>
+  <span id="contadores" class="contadores">Corriendo 0/0 · En cola 0</span>
   <span id="concurrencia" class="concurrencia" hidden></span>
   ${navSecciones('trabajos', '<button type="button" id="ayuda" class="boton" aria-haspopup="dialog">Atajos (?)</button>')}`;
 
-/** Cuerpo de la página principal: lista de trabajos + detalle con pestañas. */
-const CUERPO_PRINCIPAL = `<div class="cuerpo">
+/**
+ * Cuerpo de la página principal: layout de aplicación (lista + divisor + detalle).
+ * El divisor es una manija de 6 px con atributos ARIA y foco de teclado; el
+ * detalle separa su barra de título + pestañas (sticky) del contenido que scrollea.
+ */
+const CUERPO_PRINCIPAL = `<div class="cuerpo" id="cuerpo">
   <nav id="lista" class="lista" aria-label="Trabajos">
-    <form class="busqueda" role="search">
-      <label class="oculto" for="filtro-texto">Buscar trabajo</label>
-      <input id="filtro-texto" type="search" placeholder="Buscar por título, id, rama o modelo" autocomplete="off">
-    </form>
-    <div id="chips" class="chips" role="group" aria-label="Filtrar por estado"></div>
-    <div id="chips-repo" class="chips chips-repo" role="group" aria-label="Filtrar por repositorio" hidden></div>
+    <div class="toolbar">
+      <form class="busqueda" role="search">
+        <div class="busqueda-caja">
+          <label class="oculto" for="filtro-texto">Buscar trabajo</label>
+          <input id="filtro-texto" type="search" placeholder="Buscar por título, id, rama o modelo" autocomplete="off">
+          <button type="button" id="limpiar-busqueda" class="boton-limpiar" aria-label="Limpiar búsqueda" hidden>×</button>
+        </div>
+      </form>
+      <div id="chips" class="segmentado" role="group" aria-label="Filtrar por estado"></div>
+      <div class="toolbar-fila">
+        <label class="oculto" for="filtro-repo">Repositorio</label>
+        <select id="filtro-repo" aria-label="Filtrar por repositorio"></select>
+        <label class="oculto" for="orden">Ordenar</label>
+        <select id="orden" aria-label="Ordenar trabajos">
+          <option value="actividad">Actividad reciente</option>
+          <option value="estado">Estado</option>
+          <option value="creacion">Creación</option>
+        </select>
+        <button type="button" id="densidad" class="boton" aria-pressed="false" title="Alternar densidad de la lista">Cómoda</button>
+      </div>
+    </div>
     <ul id="trabajos" class="trabajos" aria-label="Lista de trabajos"></ul>
     <p id="lista-vacia" class="vacia" hidden>No hay trabajos que coincidan.</p>
   </nav>
+  <div id="divisor" class="divisor" role="separator" aria-orientation="vertical" aria-label="Ajustar ancho de la lista" aria-valuenow="380" aria-valuemin="280" aria-valuemax="560" tabindex="0"></div>
   <main id="contenido" class="detalle" tabindex="-1">
+    <button type="button" id="volver" class="boton volver" hidden>← Trabajos</button>
     <p id="sin-seleccion" class="cargando">Elegí un trabajo de la lista.</p>
     <section id="detalle-trabajo" aria-labelledby="titulo-trabajo" hidden>
-      <div class="titulo-fila">
-        <h2 id="titulo-trabajo" class="titulo-trabajo"></h2>
-        <button type="button" id="copiar-id" class="boton" hidden>Copiar id</button>
-      </div>
-      <div class="tabs" role="tablist" aria-label="Vistas del trabajo">
-        <button type="button" role="tab" id="tab-resumen" aria-controls="panel-resumen" aria-selected="true" tabindex="0">Resumen</button>
-        <button type="button" role="tab" id="tab-consola" aria-controls="panel-consola" aria-selected="false" tabindex="-1">Consola</button>
-        <button type="button" role="tab" id="tab-diff" aria-controls="panel-diff" aria-selected="false" tabindex="-1">Diff</button>
-        <button type="button" role="tab" id="tab-alcance" aria-controls="panel-alcance" aria-selected="false" tabindex="-1">Alcance</button>
-        <button type="button" role="tab" id="tab-eventos" aria-controls="panel-eventos" aria-selected="false" tabindex="-1">Eventos</button>
+      <div class="detalle-cabecera">
+        <div class="titulo-fila">
+          <h2 id="titulo-trabajo" class="titulo-trabajo"></h2>
+          <button type="button" id="copiar-id" class="boton" hidden>Copiar id</button>
+        </div>
+        <div class="tabs" role="tablist" aria-label="Vistas del trabajo">
+          <button type="button" role="tab" id="tab-resumen" aria-controls="panel-resumen" aria-selected="true" tabindex="0">Resumen</button>
+          <button type="button" role="tab" id="tab-consola" aria-controls="panel-consola" aria-selected="false" tabindex="-1">Consola</button>
+          <button type="button" role="tab" id="tab-diff" aria-controls="panel-diff" aria-selected="false" tabindex="-1">Diff</button>
+          <button type="button" role="tab" id="tab-alcance" aria-controls="panel-alcance" aria-selected="false" tabindex="-1">Alcance</button>
+          <button type="button" role="tab" id="tab-eventos" aria-controls="panel-eventos" aria-selected="false" tabindex="-1">Eventos</button>
+        </div>
       </div>
       <div id="panel-resumen" role="tabpanel" aria-labelledby="tab-resumen" tabindex="0"></div>
       <div id="panel-consola" role="tabpanel" aria-labelledby="tab-consola" tabindex="0" hidden></div>
@@ -117,6 +145,8 @@ const CUERPO_PRINCIPAL = `<div class="cuerpo">
     <li><span>Buscar</span><span><kbd>/</kbd></span></li>
     <li><span>Pestañas Resumen…Eventos</span><span><kbd>1</kbd>–<kbd>5</kbd></span></li>
     <li><span>Seguir / pausar consola</span><span><kbd>f</kbd></span></li>
+    <li><span>Volver a la lista (móvil)</span><span><kbd>Esc</kbd> / <kbd>Alt</kbd>+<kbd>←</kbd></span></li>
+    <li><span>Ancho de la lista</span><span><kbd>←</kbd> <kbd>→</kbd></span></li>
     <li><span>Esta ayuda</span><span><kbd>?</kbd></span></li>
   </ul>
   <form method="dialog"><button type="submit" class="boton">Cerrar</button></form>
@@ -128,6 +158,7 @@ export const PAGINA = armazonHtml({
   cabecera: cabeceraHtml({ titulo: 'Trabajos de opencode', marca: 'panel en vivo', actual: 'trabajos' }),
   cuerpo: CUERPO_PRINCIPAL,
   scripts: '<script type="module" src="/static/app.js"></script>',
+  claseCuerpo: 'panel-app',
 });
 
 /** Opciones del `<select>` de tipos, con la actual seleccionada. */
