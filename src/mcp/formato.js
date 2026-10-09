@@ -100,12 +100,23 @@ function lineasPrioritarias(texto, { topeLineas, topeCoincidencias }) {
 
 const TEXTO_ESPERA = {
   dependencia: 'espera a que terminen sus dependencias (after)',
+  // `concurrencia` queda por compatibilidad con trabajos ya persistidos por versiones previas;
+  // el planificador ahora distingue el tope del repo del global.
   concurrencia: 'tope de concurrencia alcanzado',
+  tope_del_repo: 'se alcanzó el tope de concurrencia de su repositorio',
+  tope_global: 'se alcanzó el tope de concurrencia global del servidor',
   recurso: 'espera un recurso compartido (p. ej. la base de datos)',
   solapa_alcance: 'sus `writes` se solapan con el trabajo en curso',
   veterano_adelante: 'otro trabajo más antiguo con el que choca va primero',
   esperando_integracion: 'esperando la integración de otro trabajo con el que comparte writes',
 };
+
+/**
+ * Explicación de UNA línea (≤ 100 caracteres) de que un trabajo activo no es un error.
+ * POR QUÉ constante exportada: `opencode_wait_any` la imprime UNA vez para todos los
+ * activos, en lugar de repetirla por trabajo y gastar contexto del orquestador.
+ */
+export const EXPLICACION_ACTIVO = 'No es un error: seguí con opencode_wait, opencode_logs o opencode_cancel.';
 
 /**
  * Por qué un trabajo en cola todavía no arrancó ("" si no hay dato).
@@ -123,17 +134,17 @@ export function describirEspera(trabajo) {
  * Mensaje para un trabajo que sigue activo tras la espera de la llamada.
  * @param {object} trabajo
  * @param {number} [ahora]
+ * @param {{ conExplicacion?: boolean }} [opciones] `conExplicacion: false` omite la
+ *   frase fija; `opencode_wait_any` la agrega una sola vez para todos los activos.
  * @returns {string}
  */
-export function describirActivo(trabajo, ahora = Date.now()) {
+export function describirActivo(trabajo, ahora = Date.now(), { conExplicacion = true } = {}) {
   const edad = duracion(ahora - (trabajo.creadoEn ?? ahora));
   const espera = describirEspera(trabajo);
-  return (
-    `STILL RUNNING | job_id=${trabajo.id} | estado=${trabajo.estado} | edad=${edad} | tarea="${trabajo.titulo ?? ''}"\n` +
-    (espera ? `En cola porque: ${espera}\n` : '') +
-    'No es un error: opencode sigue trabajando en segundo plano. Llamá a opencode_wait con este job_id ' +
-    '(repetí hasta que diga finished), opencode_logs para ver el avance u opencode_cancel para detenerlo.'
-  );
+  const partes = [`STILL RUNNING | job_id=${trabajo.id} | estado=${trabajo.estado} | edad=${edad} | tarea="${trabajo.titulo ?? ''}"`];
+  if (espera) partes.push(`En cola porque: ${espera}`);
+  if (conExplicacion) partes.push(EXPLICACION_ACTIVO);
+  return partes.join('\n');
 }
 
 /**
@@ -162,6 +173,9 @@ export function describirTerminado(trabajo, colas = {}, { completo = false } = {
   if (trabajo.rama) partes.push(`rama: ${trabajo.rama}${r.commit ? `  commit: ${r.commit}` : '  (sin commit)'}`);
   if (trabajo.worktree) partes.push(`worktree: ${trabajo.worktree}${trabajo.limpiado ? ' (limpiado)' : ''}`);
   if (trabajo.error) partes.push(`error: ${trabajo.error}`);
+  // Un proceso terminado por señal no trae `exit` (queda null): mostrarlo solo cuando
+  // aporta, p. ej. "terminado por señal SIGKILL" al cancelar o expirar sin código.
+  if (r.proceso?.senal) partes.push(`terminado por señal ${r.proceso.senal}`);
   // Auto-integración: el trabajo safe ya quedó en la rama de integración sin que el
   // orquestador llamara a opencode_merge (opt-in del perfil).
   if (r.autoIntegrado === true) {

@@ -65,7 +65,8 @@ export const ARCHIVO_PERFIL = '.opencode-orchestrator.json';
 const NOMBRE_AGENTE = 'orq';
 
 const DEFECTOS = Object.freeze({
-  concurrencia: 3,
+  // Tope GLOBAL por defecto (el del servidor); el tope POR REPO es `perfil.concurrency`.
+  concurrencia: 8,
   // Cada cuánto se revisa si el agente se salió del alcance mientras trabaja (0 = no vigilar).
   vigilanciaAlcanceMs: 30 * 1000,
   // Minutos sin escribir NADA tras los cuales se corta al agente (0 = sin límite).
@@ -237,6 +238,8 @@ export class Gestor {
     this.ejecuciones = new Map();
     /** @type {Map<string, { mtime: number, perfil: object }>} cache de perfiles por repo */
     this.perfiles = new Map();
+    /** @type {number} cantidad de fallos al registrar eventos globales (para loguear el 1º y cada 100) */
+    this.fallosDeEvento = 0;
     this.cerrado = false;
 
     for (const trabajo of this.almacen.listar().trabajos) this.trabajos.set(trabajo.id, trabajo);
@@ -278,16 +281,30 @@ export class Gestor {
 
   /**
    * Registra un evento en el registro global de auditoría. Best-effort: la
-   * observabilidad NUNCA debe frenar la operación que se intenta registrar (el
-   * registro devuelve `false` ante un fallo de E/S; un tipo inválido no debería
-   * llegar acá, pero tampoco puede tumbar el trabajo).
+   * observabilidad NUNCA debe frenar la operación que se intenta registrar.
+   *
+   * POR QUÉ deja rastro en stderr (el 1º fallo y luego uno cada 100): un registro que
+   * falla en silencio deja al servidor sin auditoría sin que nadie se entere. Se dosifica
+   * para que un fallo persistente (disco lleno) no inunde el log.
    */
   #evento(evento) {
     if (!this.registro) return;
     try {
-      this.registro.registrar(evento);
+      const persistido = this.registro.registrar(evento);
+      if (persistido === false) this.#reportarFalloDeEvento('el registro devolvió false (fallo de E/S)');
+    } catch (error) {
+      this.#reportarFalloDeEvento(mensajeDeError(error));
+    }
+  }
+
+  /** Cuenta un fallo de registro y lo escribe en stderr el 1º y cada 100. Nunca lanza. */
+  #reportarFalloDeEvento(detalle) {
+    this.fallosDeEvento += 1;
+    if (this.fallosDeEvento !== 1 && this.fallosDeEvento % 100 !== 0) return;
+    try {
+      process.stderr.write(`[opencode-orchestrator] fallo al registrar evento (${this.fallosDeEvento}): ${detalle}\n`);
     } catch {
-      /* ignora */
+      /* sin stderr no hay a dónde avisar */
     }
   }
 
@@ -534,6 +551,11 @@ export class Gestor {
       return valor;
     };
 
+    // Revalidación de cierre: entre el chequeo inicial y acá hubo `await`s (git, perfil).
+    // Si el servidor empezó a cerrar en el medio, el trabajo quedaría encolado para
+    // siempre (`cerrar()` ya vació la cola); se rechaza con un error claro.
+    if (this.cerrado) throw new ErrorDeGestor('El servidor se está cerrando: no acepta trabajos nuevos');
+
     const trabajo = this.almacen.crear({
       estado: 'queued',
       titulo:
@@ -561,6 +583,9 @@ export class Gestor {
       // Opt-in del perfil: el planificador no lo arranca mientras haya un trabajo
       // succeeded del mismo repo, sin integrar, que solape sus writes.
       esperarIntegracion: perfil.esperarIntegracion === true,
+      // Tope de concurrencia POR REPO (el `concurrency` del perfil): el planificador lo
+      // aplica además del tope global del servidor. Se guarda en el job como `esperarIntegracion`.
+      concurrenciaRepo: perfil.concurrency,
       files,
       aceptacion,
       modelo: spec.model ?? this.modelo,

@@ -60,6 +60,38 @@ test('describirEspera y el listado dicen por qué un trabajo sigue en cola', asy
   assert.match(describirActivo(t, 1000), /En cola porque: .*\[aaa, bbb\]/);
 });
 
+test('describirActivo: la explicación es UNA línea de ≤ 100 caracteres y se puede omitir', async () => {
+  const { describirActivo, EXPLICACION_ACTIVO } = await import('../src/mcp/formato.js');
+  const t = { id: 'q1', estado: 'running', creadoEn: 0, titulo: 'T' };
+  const conExplicacion = describirActivo(t, 1000);
+  assert.ok(conExplicacion.includes(EXPLICACION_ACTIVO));
+  assert.ok(EXPLICACION_ACTIVO.length <= 100, `la explicación debe medir ≤ 100 (mide ${EXPLICACION_ACTIVO.length})`);
+  assert.equal(conExplicacion.split('\n').length, 2, 'mensaje + una sola línea de explicación');
+  const sinExplicacion = describirActivo(t, 1000, { conExplicacion: false });
+  assert.ok(!sinExplicacion.includes(EXPLICACION_ACTIVO));
+  assert.equal(sinExplicacion.split('\n').length, 1);
+});
+
+test('describirTerminado: un proceso terminado por señal lo informa; un exit normal no', () => {
+  const conSenal = {
+    ...base(null),
+    estado: 'failed',
+    motivoFin: 'timeout',
+    resultado: { proceso: { exit: null, senal: 'SIGKILL', motivo: 'timeout' } },
+  };
+  assert.match(describirTerminado(conSenal), /terminado por señal SIGKILL/);
+  assert.doesNotMatch(describirTerminado({ ...base(null), resultado: { proceso: { exit: 0, senal: null } } }), /terminado por señal/);
+  assert.doesNotMatch(describirTerminado({ ...base(null), resultado: {} }), /terminado por señal/);
+});
+
+test('describirEspera: los topes nuevos de concurrencia se explican en texto', async () => {
+  const { describirEspera } = await import('../src/mcp/formato.js');
+  const repo = { espera: { motivo: 'tope_del_repo', por: [] } };
+  const global = { espera: { motivo: 'tope_global', por: [] } };
+  assert.match(describirEspera(repo), /tope de concurrencia de su repositorio/);
+  assert.match(describirEspera(global), /tope de concurrencia global/);
+});
+
 test('salida del agente: por defecto solo las últimas 40 líneas y ofrece recuperar todo con completo', () => {
   const salida = Array.from({ length: 60 }, (_, i) => `linea ${i}`).join('\n');
   const porDefecto = describirTerminado({ ...base(null), resultado: {} }, { salida });

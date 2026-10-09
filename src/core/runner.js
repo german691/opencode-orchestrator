@@ -77,12 +77,15 @@ export function existeGrupo(pgid) {
  *
  * @param {number} pgid id de grupo del proceso (el pid del líder con `detached`)
  * @param {number} [graceMs=5000] margen entre SIGTERM y SIGKILL
- * @returns {Promise<void>}
+ * @returns {Promise<'SIGTERM'|'SIGKILL'|null>} la señal con la que se mató el grupo, o
+ *   `null` si no había nada que matar. POR QUÉ se devuelve: el llamador conserva en el
+ *   resultado del runner con qué señal murió el proceso aunque no llegue su `exit`.
  */
 export async function matarGrupo(pgid, graceMs = 5000) {
-  if (!Number.isInteger(pgid) || pgid <= 0) return;
-  if (!existeGrupo(pgid)) return;
+  if (!Number.isInteger(pgid) || pgid <= 0) return null;
+  if (!existeGrupo(pgid)) return null;
 
+  let senal = 'SIGTERM';
   try {
     process.kill(-pgid, 'SIGTERM');
   } catch {
@@ -95,6 +98,7 @@ export async function matarGrupo(pgid, graceMs = 5000) {
   }
 
   if (existeGrupo(pgid)) {
+    senal = 'SIGKILL';
     try {
       process.kill(-pgid, 'SIGKILL');
     } catch {
@@ -106,6 +110,7 @@ export async function matarGrupo(pgid, graceMs = 5000) {
   while (existeGrupo(pgid) && Date.now() < limiteKill) {
     await dormir(PASO_SONDEO_MS);
   }
+  return senal;
 }
 
 /**
@@ -347,14 +352,17 @@ export function ejecutar(opciones = {}) {
       clearTimeout(timerIdle);
       timerIdle = null;
     }
+    let senalDelGrupo = null;
     if (estado.pgid) {
       try {
-        await matarGrupo(estado.pgid, graceMs);
+        senalDelGrupo = await matarGrupo(estado.pgid, graceMs);
       } catch {
         /* nunca colgar por un fallo al matar */
       }
     }
-    finalizar(motivo, {});
+    // Conservamos el `code` real (si lo hubo) y, si el proceso murió por nuestra señal
+    // (el evento `exit` puede no haber llegado todavía), la señal con la que lo matamos.
+    finalizar(motivo, { code: estado.code, signal: estado.signal ?? senalDelGrupo });
   };
 
   /** Cancela el trabajo. Idempotente: repetirla o llamarla tras terminar es inocuo. */

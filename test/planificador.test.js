@@ -635,7 +635,7 @@ test('planificador: esperas explica quién frena a cada trabajo en cola', () => 
   assert.equal(r.esperas.has('libre'), false, 'el que arranca no tiene espera');
 });
 
-test('planificador: esperas marca el tope de concurrencia', () => {
+test('planificador: esperas marca el tope global cuando no hay otro motivo', () => {
   const r = elegibles({
     cola: ['a', 'b'],
     corriendo: [],
@@ -643,7 +643,52 @@ test('planificador: esperas marca el tope de concurrencia', () => {
     trabajos: { a: job({ writes: ['x/**'] }), b: job({ writes: ['y/**'] }) },
   });
   assert.deepEqual(r.arrancar, ['a']);
-  assert.deepEqual(r.esperas.get('b'), { motivo: 'concurrencia', por: ['a'] });
+  assert.deepEqual(r.esperas.get('b'), { motivo: 'tope_global', por: ['a'] });
+});
+
+test('planificador: tope por repo limita aunque el global tenga hueco', () => {
+  const r = elegibles({
+    cola: ['a', 'b', 'c'],
+    corriendo: [],
+    concurrencia: 8,
+    trabajos: {
+      a: job({ repo: 'r1', concurrenciaRepo: 1, writes: ['a/**'] }),
+      b: job({ repo: 'r1', concurrenciaRepo: 1, writes: ['b/**'] }),
+      c: job({ repo: 'r2', concurrenciaRepo: 1, writes: ['c/**'] }),
+    },
+  });
+  assert.deepEqual(r.arrancar, ['a', 'c']);
+  assert.deepEqual(r.esperas.get('b'), { motivo: 'tope_del_repo', por: ['a'] });
+});
+
+test('planificador: topes de repo distintos se aplican por separado', () => {
+  const r = elegibles({
+    cola: ['a2', 'a3', 'b2'],
+    corriendo: ['a1'],
+    concurrencia: 8,
+    trabajos: {
+      a1: job({ repo: 'r1', concurrenciaRepo: 2 }),
+      a2: job({ repo: 'r1', concurrenciaRepo: 2, writes: ['a2/**'] }),
+      a3: job({ repo: 'r1', concurrenciaRepo: 2, writes: ['a3/**'] }),
+      b2: job({ repo: 'r2', concurrenciaRepo: 3, writes: ['b2/**'] }),
+    },
+  });
+  assert.deepEqual(r.arrancar, ['a2', 'b2']);
+  assert.deepEqual(r.esperas.get('a3'), { motivo: 'tope_del_repo', por: ['a1', 'a2'] });
+});
+
+test('planificador: el tope global gana como motivo si también se alcanzó el del repo', () => {
+  const r = elegibles({
+    cola: ['b'],
+    corriendo: ['a'],
+    concurrencia: 1,
+    trabajos: {
+      a: job({ repo: 'r1', concurrenciaRepo: 1 }),
+      b: job({ repo: 'r1', concurrenciaRepo: 1, writes: ['b/**'] }),
+    },
+  });
+  assert.deepEqual(r.arrancar, []);
+  assert.deepEqual(r.esperas.get('b'), { motivo: 'tope_global', por: ['a'] });
 });
 
 test('planificador: entradas hostiles lanzan TypeError', () => {

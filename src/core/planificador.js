@@ -8,7 +8,11 @@
  *
  * Reglas implementadas:
  *  - Cola FIFO con prioridad opcional (mayor prioridad primero; empate por llegada).
- *  - Tope de concurrencia: nunca devuelve más de `concurrencia - corriendo.length`.
+ *  - Topes de concurrencia: uno GLOBAL (`concurrencia`) y uno POR REPO por trabajo
+ *    (`concurrenciaRepo`, el `concurrency` de su perfil). Nunca arranca más de los que
+ *    permiten ambos; el motivo reportado es `tope_global` o `tope_del_repo` (el global
+ *    gana: si los dos están llenos, se informa `tope_global`).
+ *  - Antigüedad con `encoladoEn` para la anti-inanición.
  *  - Dependencias `after`: todas deben estar `succeeded` (o `merged`, que es un
  *    `succeeded` ya integrado: mismo efecto para el dependiente). Si alguna
  *    falló/rechazó/canceló/se perdió, el trabajo queda
@@ -73,6 +77,9 @@ function normalizarTrabajo(bruto, id) {
     estado: trabajo.estado,
     // Opt-in del perfil: esperar a que se integren los trabajos que solapan sus writes.
     esperarIntegracion: trabajo.esperarIntegracion === true,
+    // Tope de trabajos simultáneos POR REPO (el `concurrency` del perfil del trabajo).
+    // `null` = sin tope por repo: solo rige el tope global.
+    concurrenciaRepo: Number.isInteger(trabajo.concurrenciaRepo) && trabajo.concurrenciaRepo > 0 ? trabajo.concurrenciaRepo : null,
   };
 }
 
@@ -236,8 +243,9 @@ function dependenciaBloqueada(trabajo, trabajos) {
  * @param {object} entrada
  * @param {string[]} entrada.cola ids en orden de llegada (FIFO)
  * @param {string[]} entrada.corriendo ids que ya están corriendo
- * @param {number} entrada.concurrencia tope de trabajos simultáneos
+ * @param {number} entrada.concurrencia tope GLOBAL de trabajos simultáneos
  * @param {Map<string, object>|Record<string, object>} entrada.trabajos descriptores por id
+ *   (cada uno puede traer `concurrenciaRepo`, su tope por repositorio)
  * @param {number} [entrada.ahora] instante actual (por defecto `Date.now()`)
  * @param {Record<string, number>} [entrada.recursos] capacidades por recurso
  * @param {boolean} [entrada.serializarEscrituras=true] serializar writes solapados entre worktrees
@@ -263,8 +271,8 @@ export function elegibles(entrada = {}) {
   if (!Array.isArray(corriendo)) throw new TypeError('corriendo debe ser un array de ids');
 
   const instante = Number.isFinite(ahora) ? ahora : Date.now();
-  const tope = Number.isInteger(concurrencia) && concurrencia >= 0 ? concurrencia : 0;
-  const libres = Math.max(0, tope - corriendo.length);
+  // Tope GLOBAL (servidor). Cada trabajo trae además su tope por repo (`concurrenciaRepo`).
+  const topeGlobal = Number.isInteger(concurrencia) && concurrencia >= 0 ? concurrencia : 0;
 
   // Trabajos que ya corren: consumen recursos y acotan el alcance disponible.
   const enCurso = corriendo.map((id) => normalizarTrabajo(obtenerTrabajo(trabajos, id), id));
@@ -344,10 +352,29 @@ export function elegibles(entrada = {}) {
   for (const candidato of candidatos) {
     if (bloqueadosIds.has(candidato.id)) continue;
     if (!listos.has(candidato.id)) continue; // dependencias aún pendientes
-    if (arrancar.length >= libres) {
-      // No quedan huecos: el tope de concurrencia es lo que frena a este trabajo.
-      esperas.set(candidato.id, { motivo: 'concurrencia', por: [...corriendo, ...arrancar] });
+
+    // 1) Tope global: si ya hay `topeGlobal` corriendo o elegidos, no hay hueco. Se
+    //    comprueba ANTES del tope por repo para que el global gane como motivo.
+    const ocupadosGlobal = corriendo.length + arrancar.length;
+    if (ocupadosGlobal >= topeGlobal) {
+      esperas.set(candidato.id, { motivo: 'tope_global', por: [...corriendo, ...arrancar] });
       continue;
+    }
+
+    // 2) Tope por repo: cada repo admite a lo sumo su `concurrency` de perfil. Un trabajo
+    //    sin `concurrenciaRepo` (null) solo está limitado por el global.
+    const repoDelCandidato = candidato.trabajo.repo;
+    const topeRepo = candidato.trabajo.concurrenciaRepo;
+    if (topeRepo !== null) {
+      const enRepo = enCurso.filter((t) => t.repo === repoDelCandidato);
+      const elegidosRepo = elegidos.filter((t) => t.repo === repoDelCandidato);
+      if (enRepo.length + elegidosRepo.length >= topeRepo) {
+        esperas.set(candidato.id, {
+          motivo: 'tope_del_repo',
+          por: [...enRepo, ...elegidosRepo].map((t) => t.id),
+        });
+        continue;
+      }
     }
 
     // Anti-inanición: no adelantar a un veterano con el que chocamos, ya sea por

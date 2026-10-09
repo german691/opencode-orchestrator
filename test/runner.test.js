@@ -478,6 +478,61 @@ test('runner: matarGrupo y existeGrupo son reutilizables', async () => {
   }
 });
 
+test('runner: matarGrupo informa la señal con la que mató (SIGTERM o SIGKILL)', async () => {
+  const { spawn } = await import('node:child_process');
+
+  const dormilon = spawn(NODE, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+  dormilon.unref();
+  try {
+    assert.equal(await matarGrupo(dormilon.pid, 200), 'SIGTERM', 'un proceso normal muere con SIGTERM');
+  } finally {
+    try {
+      process.kill(-dormilon.pid, 'SIGKILL');
+    } catch {
+      /* ya no existe */
+    }
+  }
+
+  const terco = spawn(NODE, [fixture('ignora_sigterm.js')], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: ENTORNO,
+  });
+  terco.unref();
+  try {
+    // Esperamos su "listo\n": recién ahí registró el handler que ignora SIGTERM.
+    await new Promise((resolver) => terco.stdout.once('data', resolver));
+    assert.equal(await matarGrupo(terco.pid, 200), 'SIGKILL', 'el que ignora SIGTERM cae por SIGKILL');
+    assert.equal(existeGrupo(terco.pid), false);
+  } finally {
+    try {
+      process.kill(-terco.pid, 'SIGKILL');
+    } catch {
+      /* ya no existe */
+    }
+  }
+});
+
+test('runner: al expirar conserva la señal y deja el código en null', async () => {
+  const dir = dirTemporal();
+  const resultado = await correr({
+    cmd: NODE,
+    args: [fixture('ignora_sigterm.js')],
+    cwd: dir,
+    stdoutPath: path.join(dir, 'out.log'),
+    timeoutMs: 150,
+    idleTimeoutMs: 10000,
+    graceMs: 200,
+  });
+  try {
+    assert.equal(resultado.motivo, 'timeout');
+    assert.equal(resultado.code, null, 'muerto por señal: no hay código de salida');
+    assert.equal(resultado.signal, 'SIGKILL', 'se conserva la señal real de la muerte');
+  } finally {
+    await asegurarLimpio(resultado.pgid, [resultado.pid]);
+  }
+});
+
 test('runner: onLanzado se invoca una vez, con el pid correcto, antes del primer onSalida', async () => {
   const dir = dirTemporal();
   const orden = [];
