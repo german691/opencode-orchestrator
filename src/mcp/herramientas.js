@@ -205,7 +205,10 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
       },
       manejar: async (args) => {
         const limite = Number.isInteger(args.limite) && args.limite > 0 ? args.limite : 20;
-        return { text: describirListado(gestor.listar({ estado: args.estado, limite }), gestor.resumen(), ahora()), isError: false };
+        // `resumen()` no incluye `trabajosEnDisco`: la retención lo lleva aparte. Se agrega
+        // como campo opcional (sin cambiar el contrato) para que el listado avise al final.
+        const resumen = { ...gestor.resumen(), trabajosEnDisco: gestor.trabajosEnDisco };
+        return { text: describirListado(gestor.listar({ estado: args.estado, limite }), resumen, ahora()), isError: false };
       },
     },
     {

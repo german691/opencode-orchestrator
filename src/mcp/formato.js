@@ -246,21 +246,28 @@ export function describirTerminado(trabajo, colas = {}, { completo = false } = {
 /**
  * Listado de trabajos en texto.
  * @param {object[]} trabajos
- * @param {{ concurrencia: number, corriendo: string[], enCola: string[] }} resumen
+ * @param {{ concurrencia: number, corriendo: string[], enCola: string[], trabajosEnDisco?: number }} resumen
+ *   `trabajosEnDisco` (opcional) es cuántos trabajos antiguos quedaron fuera de memoria por
+ *   la retención; si es > 0 se avisa al final para que el orquestador sepa que la lista no es todo.
  * @param {number} [ahora]
  * @returns {string}
  */
 export function describirListado(trabajos, resumen, ahora = Date.now()) {
   const cabecera = `concurrencia=${resumen.concurrencia} | corriendo=${resumen.corriendo.length} | en cola=${resumen.enCola.length}`;
-  if (trabajos.length === 0) return `${cabecera}\n(sin trabajos)`;
-  const filas = trabajos.map((t) => {
-    const activo = !esTerminal(t.estado);
-    const edad = duracion((activo ? ahora : t.finEn ?? ahora) - (t.creadoEn ?? ahora));
-    const alcance = t.writes?.length ? ` writes=[${t.writes.join(',')}]` : '';
-    const espera = describirEspera(t);
-    return `job_id=${t.id} | ${t.estado}${t.motivoFin ? `(${t.motivoFin})` : ''} | ${activo ? 'edad' : 'duracion'}=${edad} | ${t.mode}/${t.isolation}${alcance}${espera ? ` | espera: ${espera}` : ''} | "${t.titulo ?? ''}"`;
-  });
-  return `${cabecera}\n${filas.join('\n')}`;
+  const filas = trabajos.length === 0
+    ? '(sin trabajos)'
+    : trabajos.map((t) => {
+      const activo = !esTerminal(t.estado);
+      const edad = duracion((activo ? ahora : t.finEn ?? ahora) - (t.creadoEn ?? ahora));
+      const alcance = t.writes?.length ? ` writes=[${t.writes.join(',')}]` : '';
+      const espera = describirEspera(t);
+      return `job_id=${t.id} | ${t.estado}${t.motivoFin ? `(${t.motivoFin})` : ''} | ${activo ? 'edad' : 'duracion'}=${edad} | ${t.mode}/${t.isolation}${alcance}${espera ? ` | espera: ${espera}` : ''} | "${t.titulo ?? ''}"`;
+    }).join('\n');
+  // La retención (`retencion.maxEnMemoria`) deja los trabajos más antiguos solo en disco:
+  // avisarlo al final evita que el orquestador crea que la lista está completa.
+  const enDisco = Number.isInteger(resumen.trabajosEnDisco) ? resumen.trabajosEnDisco : 0;
+  const aviso = enDisco > 0 ? `\n${enDisco} más antiguos en disco (ver panel o \`opencode_logs <id>\`)` : '';
+  return `${cabecera}\n${filas}${aviso}`;
 }
 
 /**

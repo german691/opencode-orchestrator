@@ -22,7 +22,7 @@ un solo árbol, sin tests).
 
 Objetivos:
 
-1. Concurrencia configurable (por defecto 3) con **aislamiento por trabajo**.
+1. Concurrencia configurable (global por defecto 8 con `ORQ_CONCURRENCY`; por repo 3 con `perfil.concurrency`) con **aislamiento por trabajo**.
 2. **Alcance declarado y verificado**: cada trabajo declara qué puede leer y escribir; el
    servidor lo hace cumplir mirando el `git diff`, no confiando en el modelo.
 3. Entornos de desarrollo reproducibles descritos en un **perfil por repo**.
@@ -124,6 +124,13 @@ El servidor valida el perfil (versión, tipos, rutas relativas, patrones válido
 perfiles inválidos con un mensaje claro. Sin perfil, se usan valores seguros por defecto
 (worktrees en `~/work/<repo>`, sin recursos, aceptación vacía).
 
+Secciones opcionales de retención y logs: `logs.maxBytes` acota cada archivo de log de un
+trabajo (1 MB a 200 MB; por defecto 20 MB) y `retencion.dias` / `retencion.maxEnMemoria`
+definen cuántos días se conservan los logs pesados de trabajos terminados (por defecto 30) y
+cuántos trabajos carga el gestor en memoria al arrancar (por defecto 500; los activos siempre
+se cargan). Los que quedan solo en disco no se listan en `opencode_list` y este los cuenta al
+final para que el orquestador sepa que puede leerlos con `opencode_logs <id>`.
+
 ## 7. Aislamiento
 
 - **Worktree por trabajo**: `git worktree add -b job/<id> <root>/<id> <baseBranch>`; se elimina al
@@ -145,9 +152,9 @@ perfiles inválidos con un mensaje claro. Sin perfil, se usan valores seguros po
   `jobs/<id>/job.json`, `stdout.log`, `stderr.log`, `events.jsonl`. Al arrancar, los trabajos
   `running` cuyo pid ya no existe pasan a `lost`; si el pid existe y es del servidor anterior,
   se mata su grupo (no se dejan huérfanos).
-- Concurrencia: tope **global** configurable con `ORQ_CONCURRENCY` (1 a 16; el servidor usa 3 si no
-  se define, y `DEFECTOS.concurrencia` del gestor es 8 cuando se lo construye sin argumento) y tope
-  **por repo** = `perfil.concurrency` (1 a 8, por defecto 3). El planificador aplica ambos a la vez:
+- Concurrencia: tope **global** configurable con `ORQ_CONCURRENCY` (1 a 16; el servidor usa 8 si no
+  se define, igual que `DEFECTOS.concurrencia` del gestor) y tope **por repo** = `perfil.concurrency`
+  (1 a 8, por defecto 3). El planificador aplica ambos a la vez:
   nunca arranca más de los que permiten el global y el del repo; el motivo reportado es `tope_global`
   (gana si los dos están llenos) o `tope_del_repo`.
 - Registro de auditoría en `events.jsonl` por trabajo y `audit.log` global.
@@ -488,6 +495,9 @@ Implementado en el almacén y el registro:
   al orquestador o al panel se lee por la cola (`leerCola`/`leerRango`) con topes.
 - El panel lee logs por rangos de hasta 64 KB por pedido y recorta el diff a 400 KB y el detalle a 64 KB.
 - `opencode_logs` acota `bytes` a 4000 por defecto y 100000 como máximo.
+- El tope por archivo es configurable con `logs.maxBytes` (perfil; por defecto 20 MB) y la purga de
+  logs pesados con `retencion.dias` (por defecto 30); `retencion.maxEnMemoria` (por defecto 500) es
+  cuántos trabajos carga el gestor en memoria.
 - `limpiarTemporales` borra temporales huérfanos con más de 1 h; `opencode_cleanup` borra los worktrees
   terminados, no el registro.
 

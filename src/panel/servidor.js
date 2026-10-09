@@ -75,10 +75,11 @@ export function hostPermitido(host, env = process.env) {
 }
 
 /**
- * Mismo tope por defecto que usa el servidor MCP (`src/server.js` toma 3 de los
- * DEFECTOS del gestor); se duplica acá con un comentario para no acoplar el panel.
+ * Mismo tope por defecto que usa el servidor MCP: `src/server.js` toma 8 para
+ * `ORQ_CONCURRENCY`. Se duplica acá con un comentario para no acoplar el panel al
+ * servidor; si cambia el default global hay que tocar los dos lugares.
  */
-export const CONCURRENCIA_POR_DEFECTO = 3;
+export const CONCURRENCIA_POR_DEFECTO = 8;
 
 /**
  * Concurrencia configurada por entorno, acotada a 1..16 igual que el servidor MCP.

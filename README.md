@@ -62,7 +62,7 @@ las del entorno):
 | Variable | Efecto | Por defecto |
 | --- | --- | --- |
 | `ORQ_STATE_DIR` | Directorio de estado (trabajos, logs, `eventos.jsonl`, pizarrón) | `~/.local/state/opencode-orchestrator` |
-| `ORQ_CONCURRENCY` | Tope **global** de trabajos simultáneos (1 a 16). Cada repo se acota además por `perfil.concurrency` (1 a 8) | 3 (el gestor usa 8 si se lo construye sin valor) |
+| `ORQ_CONCURRENCY` | Tope **global** de trabajos simultáneos (1 a 16). Cada repo se acota además por `perfil.concurrency` (1 a 8) | 8 (tope por repo = `perfil.concurrency`, por defecto 3) |
 | `ORQ_OPENCODE_BIN` | Ejecutable de opencode | `/usr/local/bin/opencode` o `opencode` del PATH |
 | `OPENCODE_MODEL` | Modelo por defecto (`proveedor/modelo`) | el compilado en el gestor |
 | `ORQ_WAIT_MS` | Cuánto bloquea cada herramienta de espera antes de responder `STILL RUNNING` | 45000 |

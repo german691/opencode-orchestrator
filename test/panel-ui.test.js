@@ -192,13 +192,13 @@ test('host: solo se permite loopback salvo ORQ_PANEL_ALLOW_REMOTE=1', () => {
   assert.equal(hostPermitido('0.0.0.0', { ORQ_PANEL_ALLOW_REMOTE: '1' }), true);
 });
 
-test('concurrencia: por defecto 3 y acotada a 1..16 como el servidor MCP', () => {
-  assert.equal(CONCURRENCIA_POR_DEFECTO, 3);
-  assert.equal(concurrenciaDeEntorno({}), 3);
+test('concurrencia: por defecto 8 y acotada a 1..16 como el servidor MCP', () => {
+  assert.equal(CONCURRENCIA_POR_DEFECTO, 8);
+  assert.equal(concurrenciaDeEntorno({}), 8);
   assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: '5' }), 5);
   assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: '99' }), 16);
-  assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: '0' }), 3);
-  assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: 'x' }), 3);
+  assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: '0' }), 8);
+  assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: 'x' }), 8);
 });
 
 test('UI: chips de repositorio, localStorage, ?repo=, aria-busy, Reintentar y Corriendo n/máx', () => {
