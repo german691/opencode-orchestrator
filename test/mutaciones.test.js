@@ -452,3 +452,134 @@ test('recuperarMutacionPendiente: un respaldo que no coincide con el sha256 no s
   assert.equal(fs.readFileSync(path.join(wt, 'x.js'), 'utf8'), 'mutado\n', 'no se toca a ciegas');
   assert.equal(fs.existsSync(path.join(wt, nombreJournalMutacion)), false, 'el journal inválido se descarta');
 });
+
+// ---------------------------------------------------------------------------
+// SEGURIDAD: el journal vive en el worktree del agente y puede ser manipulado.
+// Ninguna violación debe escribir fuera del aislamiento.
+// ---------------------------------------------------------------------------
+
+/** Escribe el journal crudo y devuelve su ruta. @returns {string} */
+function escribirJournal(wt, journal) {
+  fs.mkdirSync(path.join(wt, '.orq'), { recursive: true });
+  const ruta = path.join(wt, nombreJournalMutacion);
+  fs.writeFileSync(ruta, JSON.stringify(journal));
+  return ruta;
+}
+
+test('recuperarMutacionPendiente: rechaza un `archivo` que es symlink a fuera y no escribe el externo', () => {
+  const wt = crearWorktree();
+  const original = Buffer.from('original\n');
+  const externo = path.join(os.tmpdir(), `orq-externo-journal-${process.pid}-${Date.now()}.js`);
+  fs.writeFileSync(externo, 'contenido externo\n');
+
+  // El respaldo es válido (contenido y sha correctos) para aislar el fallo del symlink.
+  fs.mkdirSync(path.join(wt, '.orq'), { recursive: true });
+  fs.writeFileSync(path.join(wt, '.orq', 'mutacion-pendiente.bak'), original);
+  // El archivo declarado es un ENLACE hacia el externo: restaurar escribiría afuera.
+  fs.symlinkSync(externo, path.join(wt, 'x.js'));
+  escribirJournal(wt, { archivo: 'x.js', sha256Original: sha(original), rutaRespaldo: '.orq/mutacion-pendiente.bak' });
+
+  const res = recuperarMutacionPendiente(wt);
+  assert.equal(res.recuperado, false);
+  assert.equal(res.estado, 'journal_invalido');
+  assert.equal(res.motivo, 'ruta_insegura');
+  assert.equal(fs.readFileSync(externo, 'utf8'), 'contenido externo\n', 'el archivo externo queda intacto');
+  assert.equal(fs.lstatSync(path.join(wt, 'x.js')).isSymbolicLink(), true, 'no se reemplazó el enlace');
+  fs.rmSync(externo, { force: true });
+});
+
+test('recuperarMutacionPendiente: rechaza un directorio padre symlink y no escribe el externo', () => {
+  const wt = crearWorktree();
+  const original = Buffer.from('original\n');
+  const dirExterno = fs.mkdtempSync(path.join(os.tmpdir(), 'orq-externo-dir-'));
+  const externo = path.join(dirExterno, 'x.js');
+  fs.writeFileSync(externo, 'contenido externo\n');
+
+  fs.mkdirSync(path.join(wt, '.orq'), { recursive: true });
+  fs.writeFileSync(path.join(wt, '.orq', 'mutacion-pendiente.bak'), original);
+  fs.symlinkSync(dirExterno, path.join(wt, 'sub'), 'dir');
+  escribirJournal(wt, { archivo: 'sub/x.js', sha256Original: sha(original), rutaRespaldo: '.orq/mutacion-pendiente.bak' });
+
+  const res = recuperarMutacionPendiente(wt);
+  assert.equal(res.recuperado, false);
+  assert.equal(res.estado, 'journal_invalido');
+  assert.equal(fs.readFileSync(externo, 'utf8'), 'contenido externo\n', 'el archivo externo queda intacto');
+  fs.rmSync(dirExterno, { recursive: true, force: true });
+});
+
+test('recuperarMutacionPendiente: rechaza `..` en el journal sin escribir nada', () => {
+  const wt = crearWorktree();
+  const original = Buffer.from('original\n');
+  fs.mkdirSync(path.join(wt, '.orq'), { recursive: true });
+  fs.writeFileSync(path.join(wt, '.orq', 'mutacion-pendiente.bak'), original);
+  escribirJournal(wt, { archivo: '../fuera.js', sha256Original: sha(original), rutaRespaldo: '.orq/mutacion-pendiente.bak' });
+
+  const res = recuperarMutacionPendiente(wt);
+  assert.equal(res.recuperado, false);
+  assert.equal(res.estado, 'journal_invalido');
+  assert.equal(fs.existsSync(path.join(wt, '..', 'fuera.js')), false);
+});
+
+test('recuperarMutacionPendiente: rechaza un respaldo fuera de `.orq` aunque el sha coincida', () => {
+  const wt = crearWorktree();
+  const original = Buffer.from('original\n');
+  // Respaldo en la RAÍZ del worktree (fuera de `.orq`), con el sha correcto.
+  fs.writeFileSync(path.join(wt, 'mutacion.bak'), original);
+  fs.writeFileSync(path.join(wt, 'x.js'), Buffer.from('mutado\n'));
+  escribirJournal(wt, { archivo: 'x.js', sha256Original: sha(original), rutaRespaldo: 'mutacion.bak' });
+
+  const res = recuperarMutacionPendiente(wt);
+  assert.equal(res.recuperado, false);
+  assert.equal(res.estado, 'journal_invalido');
+  assert.equal(res.motivo, 'respaldo_inseguro');
+  assert.equal(fs.readFileSync(path.join(wt, 'x.js'), 'utf8'), 'mutado\n', 'no se restaura a ciegas');
+});
+
+test('ejecutarMutaciones: si el archivo se vuelve symlink tras validar, no aplica ni escribe fuera', async () => {
+  const wt = crearWorktree();
+  const archivo = path.join(wt, 'x.js');
+  fs.writeFileSync(archivo, 'original\n');
+  const externo = path.join(os.tmpdir(), `orq-externo-swap-${process.pid}-${Date.now()}.js`);
+  fs.writeFileSync(externo, 'contenido externo\n');
+
+  // El callback de alcance corre DESPUÉS de validar y ANTES de aplicar: ahí reemplazamos
+  // el archivo por un enlace, simulando la carrera que la resolución en realpath corta.
+  const { correr, llamadas } = correrFalso();
+  const resultado = await ejecutarMutaciones({
+    worktree: wt,
+    manifiesto: [{ ...MUTACION_BASE, reemplazar: 'mutado' }],
+    permitido: (ruta) => {
+      assert.equal(ruta, 'x.js');
+      fs.rmSync(archivo);
+      fs.symlinkSync(externo, archivo);
+      return true;
+    },
+    correr,
+  });
+
+  assert.equal(resultado.detalle[0].estado, 'no_aplicable');
+  assert.equal(resultado.detalle[0].motivo, 'ruta_no_segura');
+  assert.equal(llamadas.length, 0, 'no debe correr el comando');
+  assert.equal(fs.readFileSync(externo, 'utf8'), 'contenido externo\n', 'el externo queda intacto');
+  fs.rmSync(externo, { force: true });
+});
+
+test('ejecutarMutaciones: con `.orq` symlink a fuera no escribe el journal ni el respaldo afuera', async () => {
+  const wt = crearWorktree();
+  fs.writeFileSync(path.join(wt, 'x.js'), 'original\n');
+  const dirExterno = fs.mkdtempSync(path.join(os.tmpdir(), 'orq-orq-externo-'));
+  fs.symlinkSync(dirExterno, path.join(wt, '.orq'), 'dir');
+
+  const { correr, llamadas } = correrFalso();
+  const resultado = await ejecutarMutaciones({
+    worktree: wt,
+    manifiesto: [{ ...MUTACION_BASE }],
+    correr,
+  });
+
+  assert.equal(resultado.detalle[0].estado, 'no_aplicable');
+  assert.equal(resultado.detalle[0].motivo, 'orq_no_seguro');
+  assert.equal(llamadas.length, 0);
+  assert.deepEqual(fs.readdirSync(dirExterno), [], 'no se escribió nada en el directorio externo');
+  fs.rmSync(dirExterno, { recursive: true, force: true });
+});

@@ -278,6 +278,76 @@ function dentroDelWorktree(ruta, raiz) {
   return ruta === raiz || ruta.startsWith(`${raiz}${path.sep}`);
 }
 
+/** `realpath` o `null` si la ruta no se puede resolver (no existe, enlace roto, etc.). */
+function realpathSeguro(ruta) {
+  try {
+    return fs.realpathSync(ruta);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resuelve el destino REAL de una ruta relativa y comprueba que escribir ahí quede
+ * DENTRO del worktree. Devuelve la ruta absoluta a usar, o `null` si es insegura.
+ *
+ * POR QUÉ: comparar rutas textualmente no basta; un enlace (el archivo final o
+ * cualquier directorio padre) puede apuntar fuera del aislamiento. Resolvemos el
+ * directorio padre con realpath y exigimos contención; el componente final no puede
+ * ser un symlink (`lstat`), porque escribir a través de él sacaría bytes del worktree.
+ *
+ * @param {string} raizReal worktree ya resuelto con realpath
+ * @param {unknown} relativa ruta relativa declarada
+ * @returns {string|null}
+ */
+function resolverDestinoSeguro(raizReal, relativa) {
+  if (typeof relativa !== 'string' || relativa.length === 0) return null;
+  const normalizada = relativa.replace(/\\/g, '/');
+  if (path.isAbsolute(normalizada) || normalizada.split('/').includes('..')) return null;
+  const destino = path.resolve(raizReal, normalizada);
+  const info = fs.lstatSync(destino, { throwIfNoEntry: false });
+  if (info && info.isSymbolicLink()) return null;
+  const padreReal = realpathSeguro(path.dirname(destino));
+  if (!padreReal || !dentroDelWorktree(padreReal, raizReal)) return null;
+  return path.join(padreReal, path.basename(destino));
+}
+
+/**
+ * Asegura que `.orq/` exista como directorio REAL (nunca un enlace) y devuelve su
+ * realpath dentro del worktree, o `null` si no se puede usar con seguridad.
+ * @param {string} raizReal
+ * @returns {string|null}
+ */
+function prepararDirOrqSeguro(raizReal) {
+  const dirOrq = path.join(raizReal, DIR_ORQ);
+  let info = fs.lstatSync(dirOrq, { throwIfNoEntry: false });
+  if (!info) {
+    try {
+      fs.mkdirSync(dirOrq, { recursive: true });
+    } catch {
+      return null;
+    }
+    info = fs.lstatSync(dirOrq, { throwIfNoEntry: false });
+  }
+  if (!info || !info.isDirectory()) return null;
+  const real = realpathSeguro(dirOrq);
+  if (!real || !dentroDelWorktree(real, raizReal)) return null;
+  return real;
+}
+
+/**
+ * Crea un archivo nuevo sin seguir un enlace preexistente: si ya hay algo en `ruta`, lo
+ * borra SIN seguirlo (borra el enlace mismo) y luego escribe con `wx`, de modo que jamás
+ * se escribe a través de un symlink hacia fuera del worktree.
+ * @param {string} ruta
+ * @param {string|Buffer} contenido
+ */
+function escribirNuevo(ruta, contenido) {
+  const info = fs.lstatSync(ruta, { throwIfNoEntry: false });
+  if (info) fs.unlinkSync(ruta);
+  fs.writeFileSync(ruta, contenido, { flag: 'wx' });
+}
+
 /** Borra el journal de mutación en curso, si existe (best-effort). */
 function borrarJournal(rutaJournal) {
   try {
@@ -297,7 +367,7 @@ function borrarJournal(rutaJournal) {
  * en vez de trasladar/commitear un archivo mutado.
  *
  * @param {string} worktree raíz del worktree a inspeccionar
- * @returns {{ recuperado: boolean, archivo?: string, restaurado?: boolean, motivo?: string }}
+ * @returns {{ recuperado: boolean, archivo?: string, restaurado?: boolean, estado?: string, motivo?: string }}
  */
 export function recuperarMutacionPendiente(worktree) {
   if (typeof worktree !== 'string' || worktree === '') return { recuperado: false };
@@ -315,23 +385,27 @@ export function recuperarMutacionPendiente(worktree) {
     return { recuperado: false }; // sin journal no hay nada pendiente
   }
 
+  // Toda violación se resuelve igual: NO se escribe nada, se descarta/ignora el journal
+  // y se informa `journal_invalido` con el motivo (el gestor lo trata como advertencia,
+  // nunca como falla del trabajo).
+  const invalido = (motivo) => {
+    borrarJournal(rutaJournal);
+    return { recuperado: false, estado: 'journal_invalido', motivo };
+  };
+
   let journal;
   try {
     journal = JSON.parse(crudo);
   } catch {
-    borrarJournal(rutaJournal);
-    return { recuperado: false, motivo: 'journal_invalido' };
+    return invalido('journal_invalido');
   }
   if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
-    borrarJournal(rutaJournal);
-    return { recuperado: false, motivo: 'journal_invalido' };
+    return invalido('journal_invalido');
   }
 
   const archivo = typeof journal.archivo === 'string' ? journal.archivo.replace(/\\/g, '/') : '';
   const respaldo = typeof journal.rutaRespaldo === 'string' ? journal.rutaRespaldo.replace(/\\/g, '/') : '';
   const esperado = typeof journal.sha256Original === 'string' ? journal.sha256Original : '';
-  // El journal se valida como cualquier entrada del manifiesto: rutas relativas y
-  // dentro del worktree. Uno manipulado no puede redirigir la restauración afuera.
   const rutasSeguras =
     archivo !== '' &&
     respaldo !== '' &&
@@ -340,39 +414,49 @@ export function recuperarMutacionPendiente(worktree) {
     !path.isAbsolute(respaldo) &&
     !archivo.split('/').includes('..') &&
     !respaldo.split('/').includes('..');
-  if (!rutasSeguras) {
-    borrarJournal(rutaJournal);
-    return { recuperado: false, motivo: 'journal_invalido' };
+  if (!rutasSeguras) return invalido('journal_invalido');
+
+  // El destino se resuelve por realpath: ni el archivo ni un directorio padre pueden ser
+  // enlaces que saquen la restauración del worktree (p. ej. `archivo` -> /etc/algo).
+  const absoluta = resolverDestinoSeguro(raizReal, archivo);
+  if (!absoluta) return invalido('ruta_insegura');
+
+  // El respaldo debe ser un archivo REGULAR dentro del `.orq/` REAL del worktree. No
+  // alcanza con que la ruta textual esté contenida: `.orq` mismo podría ser un enlace.
+  const dirOrqReal = realpathSeguro(path.join(raizReal, DIR_ORQ));
+  if (!dirOrqReal || dirOrqReal === raizReal || !dentroDelWorktree(dirOrqReal, raizReal)) {
+    return invalido('respaldo_inseguro');
   }
-  const absoluta = path.resolve(raizReal, archivo);
   const rutaRespaldo = path.resolve(raizReal, respaldo);
-  if (!dentroDelWorktree(absoluta, raizReal) || !dentroDelWorktree(rutaRespaldo, raizReal)) {
-    borrarJournal(rutaJournal);
-    return { recuperado: false, motivo: 'journal_invalido' };
+  const infoRespaldo = fs.lstatSync(rutaRespaldo, { throwIfNoEntry: false });
+  if (!infoRespaldo || infoRespaldo.isSymbolicLink() || !infoRespaldo.isFile()) {
+    return invalido('respaldo_inseguro');
+  }
+  const respaldoReal = realpathSeguro(rutaRespaldo);
+  if (!respaldoReal || !dentroDelWorktree(respaldoReal, dirOrqReal)) {
+    return invalido('respaldo_inseguro');
   }
 
   let original;
   try {
-    original = fs.readFileSync(rutaRespaldo);
+    original = fs.readFileSync(respaldoReal);
   } catch {
-    borrarJournal(rutaJournal);
-    return { recuperado: false, motivo: 'sin_respaldo' };
+    return invalido('sin_respaldo');
   }
   if (sha256(original) !== esperado) {
     // El respaldo no es el original que el journal declara: no se restaura a ciegas.
-    borrarJournal(rutaJournal);
-    return { recuperado: false, motivo: 'hash_no_coincide' };
+    return invalido('hash_no_coincide');
   }
 
   try {
     restaurar(absoluta, original, esperado);
   } catch {
     // Si no se pudo verificar la restauración, se deja el journal para reintentar.
-    return { recuperado: false, motivo: 'restauracion_fallida' };
+    return { recuperado: false, estado: 'restauracion_fallida', motivo: 'restauracion_fallida' };
   }
   borrarJournal(rutaJournal);
   try {
-    fs.rmSync(rutaRespaldo, { force: true });
+    fs.rmSync(respaldoReal, { force: true });
   } catch {
     /* el respaldo sobrante no molesta */
   }
@@ -417,7 +501,22 @@ export async function ejecutarMutaciones({ worktree, manifiesto, permitido, corr
       continue;
     }
 
-    const absoluta = path.resolve(raizReal, mutacion.archivo);
+    // Resolución por realpath AL MOMENTO DE APLICAR: aunque la ruta se validó al leer
+    // el manifiesto, entre esa lectura y ahora el archivo pudo volverse un enlace que
+    // sale del worktree. Si el destino dejó de ser seguro, no se aplica nada.
+    const absoluta = resolverDestinoSeguro(raizReal, mutacion.archivo);
+    if (!absoluta) {
+      detalle.push({ archivo: mutacion.archivo, comando: mutacion.comando, estado: 'no_aplicable', motivo: 'ruta_no_segura', ms: 0 });
+      continue;
+    }
+    // El journal y el respaldo viven en `.orq/`, que debe ser un directorio real: si
+    // el agente lo reemplazó por un enlace, escribir ahí dejaría bytes fuera.
+    const dirOrqReal = prepararDirOrqSeguro(raizReal);
+    if (!dirOrqReal) {
+      detalle.push({ archivo: mutacion.archivo, comando: mutacion.comando, estado: 'no_aplicable', motivo: 'orq_no_seguro', ms: 0 });
+      continue;
+    }
+
     const original = fs.readFileSync(absoluta);
     const hashOriginal = sha256(original);
 
@@ -438,15 +537,20 @@ export async function ejecutarMutaciones({ worktree, manifiesto, permitido, corr
 
     // Journal + respaldo ANTES de tocar el archivo: si el servidor muere entre la
     // escritura mutada y la restauración, al arrancar/retomar se puede volver al
-    // original exacto en vez de trasladar y commitear un archivo mutado.
-    const rutaJournal = path.join(raizReal, nombreJournalMutacion);
-    const rutaRespaldo = path.join(raizReal, nombreRespaldoMutacion);
-    fs.mkdirSync(path.join(raizReal, DIR_ORQ), { recursive: true });
-    fs.writeFileSync(rutaRespaldo, original);
-    fs.writeFileSync(
-      rutaJournal,
-      JSON.stringify({ archivo: mutacion.archivo, sha256Original: hashOriginal, rutaRespaldo: nombreRespaldoMutacion }),
-    );
+    // original exacto en vez de trasladar y commitear un archivo mutado. `escribirNuevo`
+    // no sigue un enlace preexistente en la ruta del respaldo o del journal.
+    const rutaJournal = path.join(dirOrqReal, path.basename(nombreJournalMutacion));
+    const rutaRespaldo = path.join(dirOrqReal, path.basename(nombreRespaldoMutacion));
+    try {
+      escribirNuevo(rutaRespaldo, original);
+      escribirNuevo(
+        rutaJournal,
+        JSON.stringify({ archivo: mutacion.archivo, sha256Original: hashOriginal, rutaRespaldo: nombreRespaldoMutacion }),
+      );
+    } catch {
+      detalle.push({ archivo: mutacion.archivo, comando: mutacion.comando, estado: 'no_aplicable', motivo: 'journal_no_escribible', ms: 0 });
+      continue;
+    }
 
     let codigo = null;
     const inicio = Date.now();

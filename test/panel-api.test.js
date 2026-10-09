@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { crearServidorPanel } from '../src/panel/servidor.js';
+import { crearServidorPanel, LIMITE_EVENTOS_MAX } from '../src/panel/servidor.js';
 import { crearFlujoEventos } from '../src/panel/stream.js';
 import { crearRegistroEventos } from '../src/core/eventos.js';
 import { diffDeTrabajo } from '../src/panel/diff.js';
@@ -560,6 +560,59 @@ test('auditoría: pagina con «Cargar más» (límite 200) y respeta ?limite', a
 
     const api = await (await fetch(`${url}/api/eventos?limite=2`)).json();
     assert.equal(api.eventos.length, 2);
+  });
+});
+
+test(`auditoría: en el tope (${LIMITE_EVENTOS_MAX}) oculta «Cargar más» y avisa que filtre por fechas`, async () => {
+  const { base } = crearEstado();
+  const registro = crearRegistroEventos({ dir: path.join(base, 'auditoria'), ahora: () => AHORA });
+  const evento = { ts: AHORA, tipo: 'job.creado', jobId: 'tope0001', estado: 'queued', actor: 'sistema' };
+  let ultimoLimite = null;
+  const historial = {
+    listar: ({ limite } = {}) => {
+      ultimoLimite = limite;
+      // Devuelve suficientes eventos para que el caso de 200 tenga «más» pero muy pocos
+      // para el tope: así el aviso no depende de renderizar 10000 filas.
+      const n = Math.min(Number.isInteger(limite) ? limite : 0, 201);
+      return Array.from({ length: n }, (_, i) => ({ ...evento, ts: AHORA - i }));
+    },
+    titulos: () => ({}),
+  };
+  await conServidor({ baseDir: base, registro, historial }, async (url) => {
+    const html = await (await fetch(`${url}/auditoria?limite=${LIMITE_EVENTOS_MAX}`)).text();
+    assert.equal(ultimoLimite, LIMITE_EVENTOS_MAX + 1, 'pide uno de más para saber si hay más');
+    assert.doesNotMatch(html, /Cargar más/);
+    assert.match(html, new RegExp(`Mostrando los ${LIMITE_EVENTOS_MAX} más recientes`));
+
+    // Con un límite menor la paginación normal sigue ofreciendo «Cargar más».
+    const conMas = await (await fetch(`${url}/auditoria?limite=200`)).text();
+    assert.match(conMas, /Cargar más/);
+    assert.match(conMas, /limite=400/);
+  });
+});
+
+test('eventos API: en el tope informa enTope/hayMas sin cambiar `eventos`', async () => {
+  const { base } = crearEstado();
+  const registro = crearRegistroEventos({ dir: path.join(base, 'auditoria'), ahora: () => AHORA });
+  const evento = { ts: AHORA, tipo: 'job.creado', jobId: 'tope0002', estado: 'queued' };
+  const historial = {
+    listar: ({ limite } = {}) =>
+      Array.from({ length: Math.min(Number.isInteger(limite) ? limite : 0, LIMITE_EVENTOS_MAX + 1) }, (_, i) => ({
+        ...evento,
+        ts: AHORA - i,
+      })),
+    titulos: () => ({}),
+  };
+  await conServidor({ baseDir: base, registro, historial }, async (url) => {
+    const tope = await (await fetch(`${url}/api/eventos?limite=${LIMITE_EVENTOS_MAX}`)).json();
+    assert.equal(tope.enTope, true);
+    assert.equal(tope.hayMas, true);
+    assert.equal(tope.eventos.length, LIMITE_EVENTOS_MAX);
+
+    const chico = await (await fetch(`${url}/api/eventos?limite=200`)).json();
+    assert.equal(chico.enTope, false);
+    assert.equal(chico.hayMas, true);
+    assert.equal(chico.eventos.length, 200);
   });
 });
 

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { crearServidorPanel, hostPermitido, concurrenciaDeEntorno, CONCURRENCIA_POR_DEFECTO } from '../src/panel/servidor.js';
-import { PAGINA } from '../src/panel/pagina.js';
+import { PAGINA, paginaAuditoria } from '../src/panel/pagina.js';
 import { CLIENTE } from '../src/panel/cliente.js';
 import { PIZARRON_CLIENTE } from '../src/panel/pizarron-cliente.js';
 import { crearRegistroEventos } from '../src/core/eventos.js';
@@ -275,6 +275,20 @@ test('auditoría: layout de página, cabecera con aria-current, filtros etiqueta
     },
     { registro },
   );
+});
+
+test('auditoría: en el tope del límite oculta «Cargar más» y avisa que filtre por fechas', () => {
+  const evento = { ts: 1_800_000_000_000, tipo: 'job.creado', jobId: 'abc12345', estado: 'queued', actor: 'sistema' };
+  // En el tope no se ofrece paginar (el límite se recortaría y no avanzaría): se avisa.
+  const enTope = paginaAuditoria({ eventos: [evento], filtros: {}, limite: 10000, hayMas: true, enTope: true });
+  assert.doesNotMatch(enTope, /Cargar más/);
+  assert.match(enTope, /Mostrando los 10000 más recientes; filtrá por fechas para ver más\./);
+
+  // Sin llegar al tope, el enlace avanza el límite con el paso habitual.
+  const pagina = paginaAuditoria({ eventos: [evento], filtros: {}, limite: 200, hayMas: true, enTope: false });
+  assert.match(pagina, /Cargar más/);
+  assert.match(pagina, /limite=400/);
+  assert.doesNotMatch(pagina, /Mostrando los/);
 });
 
 test('auditoría: tabla con caption/aria-label, encabezado fijo y hora legible con ISO', async () => {
