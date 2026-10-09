@@ -149,7 +149,7 @@ export function ejecutarPsql(args, { env } = {}) {
  * Crea un proveedor de recursos a partir de su definición de perfil.
  *
  * @param {object} definicion definición del perfil:
- *   `{ kind, adminUrlEnv, template?, name (con '{job}'), exportAs }`
+ *   `{ kind, adminUrlEnv, template?, name (con '{job}'; admite además '{shard}' opcional), exportAs }`
  * @param {object} [opciones]
  * @param {Record<string,string>} [opciones.env={}] entorno de donde leer la URL de administración
  * @param {(args: string[], opciones?: { env?: Record<string,string> }) => Promise<{code:number,stdout:string,stderr:string}>} [opciones.ejecutarPsql]
@@ -196,7 +196,8 @@ export function crearProveedor(definicion, opciones = {}) {
    * Provisiona la base del trabajo: valida el nombre, limpia cualquier resto con
    * ese nombre (trabajo anterior sucio), la crea y devuelve su URL exportada.
    *
-   * @param {{ id?: string }} [job] trabajo (se usa `job.id` para `{job}`)
+   * @param {{ id?: string, shard?: number|string }} [job] trabajo (`job.id` para `{job}`,
+   *   `job.shard` para `{shard}`; `shard` solo hace falta si el nombre usa el placeholder)
    * @returns {Promise<{ env: Record<string,string>, liberar: () => Promise<void> }>}
    * @throws {Error} sin mostrar la URL de administración en ningún mensaje
    */
@@ -204,7 +205,17 @@ export function crearProveedor(definicion, opciones = {}) {
     const id = job && job.id !== undefined && job.id !== null ? String(job.id) : '';
     if (id === '') throw new Error('El trabajo no tiene id; no se puede nombrar la base');
 
-    const nombre = name.replace(/\{job\}/g, id);
+    // `{shard}` es OPCIONAL: si el nombre no lo usa, el resultado es idéntico al de antes.
+    // Con el placeholder cada fragmento obtiene su propia base (p. ej. `..._test_1`).
+    let nombre = name.replace(/\{job\}/g, id);
+    if (name.includes('{shard}')) {
+      const shard = job && job.shard !== undefined && job.shard !== null ? String(job.shard) : '';
+      if (shard === '') {
+        // Fallamos ANTES de invocar psql: un `{shard}` sin resolver tocaría un nombre inválido.
+        throw new Error("El nombre del recurso usa '{shard}' pero la provisión no recibió 'shard'");
+      }
+      nombre = nombre.replace(/\{shard\}/g, shard);
+    }
     if (!NOMBRE_BASE_TEST.test(nombre)) {
       // Barrera: nunca se crea ni se borra una base que no sea de test con el id dado.
       throw new Error(
