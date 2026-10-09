@@ -280,6 +280,28 @@ test('tras una caída brusca (SIGKILL) el siguiente arranque mata el grupo huér
   await s2.salida;
 });
 
+test('un servidor bloqueado se recupera solo en la llamada siguiente cuando el otro libera el bloqueo', async () => {
+  const e = montarEscenario();
+  const s1 = iniciarServidor(e);
+  await s1.rpc('initialize', {});
+  const s2 = iniciarServidor(e);
+  await s2.rpc('initialize', {});
+  const bloqueado = await s2.llamar('opencode_list', {});
+  assert.equal(bloqueado.isError, true);
+  assert.match(texto(bloqueado), /otro servidor activo/);
+
+  // El primero se va (p.ej. una sesión remota que se cierra) y suelta el bloqueo.
+  s1.proceso.stdin.end();
+  await s1.salida;
+
+  // Sin reconectar: la siguiente llamada del segundo toma el bloqueo y funciona.
+  const recuperado = await s2.llamar('opencode_list', {});
+  assert.equal(recuperado.isError, false, texto(recuperado));
+
+  s2.proceso.stdin.end();
+  await s2.salida;
+});
+
 test('un segundo servidor sobre el mismo estado NO arranca el gestor: sus herramientas informan el motivo', async () => {
   const e = montarEscenario();
   const s1 = iniciarServidor(e);

@@ -55,11 +55,29 @@ function enteroDeEntorno(nombre, porDefecto) {
   return Number.isInteger(valor) && valor > 0 ? valor : porDefecto;
 }
 
-/** Herramientas de reemplazo cuando no se pudo arrancar el gestor: todas informan el motivo. */
-function herramientasBloqueadas(motivo, herramientas) {
+/**
+ * Herramientas de reemplazo cuando no se pudo arrancar el gestor: informan el motivo.
+ *
+ * POR QUÉ `reintentar`: si el bloqueo lo tenía otro servidor que luego murió (p.ej. una
+ * sesión remota que se cerró), este servidor se recuperaba solo al reiniciar el cliente;
+ * ahora cada llamada vuelve a intentar tomar el bloqueo (sin esperar) y, si lo consigue,
+ * pasa a funcionar sin reconectar.
+ *
+ * @param {string} motivo
+ * @param {Array<{ name: string, manejar: Function }>} herramientas
+ * @param {(() => Promise<Array<{ name: string, manejar: Function }> | null>) | null} [reintentar]
+ */
+function herramientasBloqueadas(motivo, herramientas, reintentar = null) {
   return herramientas.map((h) => ({
     ...h,
-    manejar: async () => ({ text: `El servidor no está operativo: ${motivo}`, isError: true }),
+    manejar: async (args) => {
+      if (reintentar) {
+        const reales = await reintentar();
+        const real = reales ? reales.find((r) => r.name === h.name) : null;
+        if (real) return real.manejar(args);
+      }
+      return { text: `El servidor no está operativo: ${motivo}`, isError: true };
+    },
   }));
 }
 
@@ -82,34 +100,74 @@ async function main() {
   let gestor = null;
   let herramientas;
   let bloqueoAdquirido = false;
-  try {
-    // Un solo servidor por directorio de estado: dos servidores se pisarían los trabajos.
-    // Espera corta: tras reiniciar el cliente, el servidor anterior puede estar aún apagándose.
-    await adquirirBloqueoConEspera(almacen, { esperaMs: enteroDeEntorno('ORQ_LOCK_WAIT_MS', 10000) });
-    bloqueoAdquirido = true;
-    // Lo que quedó vivo de una ejecución anterior se reconcilia (y se mata si es nuestro).
-    const perdidos = await almacen.marcarPerdidos();
-    if (perdidos.length > 0) log(`trabajos de una ejecución anterior marcados como perdidos: ${perdidos.join(', ')}`);
-    almacen.limpiarTemporales();
 
-    gestor = new Gestor({
-      almacen,
-      opencode: { cmd: ejecutableDeOpencode() },
-      concurrencia,
-      modelo: process.env.OPENCODE_MODEL || undefined,
-      registro,
-      pizarron,
-    });
-    gestor.registrarArranque({ recuperados: perdidos });
-    // Retención de logs pesados: purga al arrancar y luego cada 6 h (unref + cancelada
-    // en gestor.cerrar()). Sin esto el estado crecería sin límite en un servidor de larga vida.
-    gestor.iniciarRetencion();
-    herramientas = crearHerramientas(gestor, { esperaMs });
+  /**
+   * Toma el bloqueo de instancia y arranca el gestor. Se usa al iniciar (con una espera corta:
+   * tras reiniciar el cliente, el servidor anterior puede estar aún apagándose) y, si falló,
+   * en cada llamada posterior sin esperar. Un solo servidor por directorio de estado: dos
+   * servidores se pisarían los trabajos.
+   */
+  async function arrancarGestor(esperaBloqueoMs) {
+    await adquirirBloqueoConEspera(almacen, { esperaMs: esperaBloqueoMs });
+    bloqueoAdquirido = true;
+    try {
+      // Lo que quedó vivo de una ejecución anterior se reconcilia (y se mata si es nuestro).
+      const perdidos = await almacen.marcarPerdidos();
+      if (perdidos.length > 0) log(`trabajos de una ejecución anterior marcados como perdidos: ${perdidos.join(', ')}`);
+      almacen.limpiarTemporales();
+
+      const nuevo = new Gestor({
+        almacen,
+        opencode: { cmd: ejecutableDeOpencode() },
+        concurrencia,
+        modelo: process.env.OPENCODE_MODEL || undefined,
+        registro,
+        pizarron,
+      });
+      nuevo.registrarArranque({ recuperados: perdidos });
+      // Retención de logs pesados: purga al arrancar y luego cada 6 h (unref + cancelada
+      // en gestor.cerrar()). Sin esto el estado crecería sin límite en un servidor de larga vida.
+      nuevo.iniciarRetencion();
+      gestor = nuevo;
+      return crearHerramientas(nuevo, { esperaMs });
+    } catch (error) {
+      // Si algo falla después de tomar el bloqueo, se suelta: si no, el reintento chocaría con el propio.
+      bloqueoAdquirido = false;
+      try {
+        almacen.liberarBloqueoDeInstancia();
+      } catch {
+        /* ignora */
+      }
+      throw error;
+    }
+  }
+
+  try {
+    herramientas = await arrancarGestor(enteroDeEntorno('ORQ_LOCK_WAIT_MS', 10000));
   } catch (error) {
-    // No se aborta: el cliente ve las herramientas y recibe el motivo en cada llamada.
+    // No se aborta: el cliente ve las herramientas y recibe el motivo en cada llamada; cada
+    // llamada reintenta tomar el bloqueo por si el otro servidor ya se fue.
     log('no se pudo iniciar el gestor:', error?.message ?? error);
     const vacio = crearHerramientas({}, { esperaMs });
-    herramientas = herramientasBloqueadas(error?.message ?? String(error), vacio);
+    let recuperadas = null;
+    let reintentando = null;
+    const reintentar = async () => {
+      if (recuperadas) return recuperadas;
+      if (!reintentando) {
+        reintentando = arrancarGestor(0)
+          .then((reales) => {
+            log('bloqueo de instancia recuperado: el servidor pasó a operativo');
+            recuperadas = reales;
+            return reales;
+          })
+          .catch(() => null)
+          .finally(() => {
+            reintentando = null;
+          });
+      }
+      return reintentando;
+    };
+    herramientas = herramientasBloqueadas(error?.message ?? String(error), vacio, reintentar);
   }
 
   const servidor = crearServidorMcp({
