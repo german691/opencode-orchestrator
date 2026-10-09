@@ -122,11 +122,39 @@ function ultimasLineas(texto, maximo = LINEAS_COLA) {
 }
 
 /**
+ * Clasifica el resultado crudo de un fragmento.
+ *
+ * POR QUÉ: el ejecutor devuelve `codigo: null` cuando el fragmento expira (`timeout`) o queda
+ * sin salida (`idle`). Mapear `null` a 0 haría pasar la compuerta colgada y el trabajo se
+ * commitearía/autointegraría. Un fragmento es OK SOLO si su `codigo` es el entero 0 y no hubo
+ * corte; cualquier otro caso es fallo, con el código real (o -1) y un motivo legible.
+ *
+ * @param {object} resultado
+ * @returns {{ codigo: number, fallo: boolean, motivo: string|undefined }}
+ */
+function clasificarResultado(resultado) {
+  const codigo = Number.isInteger(resultado.codigo) ? resultado.codigo : -1;
+  const senal =
+    typeof resultado.senal === 'string' && resultado.senal
+      ? resultado.senal
+      : typeof resultado.signal === 'string' && resultado.signal
+        ? resultado.signal
+        : null;
+  let motivo;
+  if (resultado.timeout) motivo = 'timeout';
+  else if (resultado.idle) motivo = 'idle';
+  else if (senal) motivo = `senal:${senal}`;
+  else if (!Number.isInteger(resultado.codigo)) motivo = 'sin_codigo';
+  // Un código entero distinto de 0 es un fallo con su código real y sin motivo extra.
+  return { codigo, fallo: codigo !== 0 || motivo !== undefined, motivo };
+}
+
+/**
  * Ejecuta la aceptación partida en N fragmentos en paralelo.
  *
  * @param {object} opciones
  * @param {object} opciones.spec aceptación con sección `paralelo`
- * @param {(comando: string, contexto: { env: Record<string,string>, indice: number }) => Promise<{ codigo: number, salida?: string }>} opciones.ejecutar
+ * @param {(comando: string, contexto: { env: Record<string,string>, indice: number }) => Promise<{ codigo: number|null, salida?: string, timeout?: boolean, idle?: boolean, signal?: string, senal?: string }>} opciones.ejecutar
  *   corre UN fragmento con su entorno; inyectable
  * @param {(indice: number) => Promise<{ env?: Record<string,string>, [clave: string]: unknown }>} [opciones.provisionar]
  *   crea el recurso del fragmento (otra base) y devuelve `env` + los datos para liberar;
@@ -161,12 +189,20 @@ export async function ejecutarParalelo({ spec, ejecutar, provisionar, liberar })
       }
       const env = (datos && datos.env) || {};
       const resultado = (await ejecutar(comando, { env, indice })) || {};
-      const codigo = Number.isInteger(resultado.codigo) ? resultado.codigo : resultado.codigo ? 1 : 0;
+      const clasificado = clasificarResultado(resultado);
       const salida = typeof resultado.salida === 'string' ? resultado.salida : '';
-      return { indice, comando, codigo, ms: Date.now() - inicio, salida };
+      return {
+        indice,
+        comando,
+        codigo: clasificado.codigo,
+        motivo: clasificado.motivo,
+        fallo: clasificado.fallo,
+        ms: Date.now() - inicio,
+        salida,
+      };
     } catch (error) {
       const mensaje = error && error.message ? error.message : String(error);
-      return { indice, comando, codigo: -1, ms: Date.now() - inicio, salida: mensaje };
+      return { indice, comando, codigo: -1, motivo: undefined, fallo: true, ms: Date.now() - inicio, salida: mensaje };
     } finally {
       // Liberar SIEMPRE: si el fragmento falló, su base no debe quedar viva.
       if (datos && typeof liberar === 'function') {
@@ -194,7 +230,7 @@ export async function ejecutarParalelo({ spec, ejecutar, provisionar, liberar })
     );
     pendientes.delete(ganador.indice);
     resultados.push(ganador.resultado);
-    if (cortarAlPrimerFallo && ganador.resultado.codigo !== 0) break;
+    if (cortarAlPrimerFallo && ganador.resultado.fallo) break;
   }
 
   // Los que quedaron corriendo se reportan como cancelados. No se esperan; su `finally`
@@ -206,6 +242,8 @@ export async function ejecutarParalelo({ spec, ejecutar, provisionar, liberar })
       indice,
       comando: comandos[indice - 1],
       codigo: -1,
+      motivo: undefined,
+      fallo: true,
       ms: Date.now() - inicioLote,
       salida: 'cancelado: se cortó al primer fallo',
       cancelado: true,
@@ -213,22 +251,28 @@ export async function ejecutarParalelo({ spec, ejecutar, provisionar, liberar })
   }
 
   const todos = [...resultados, ...cancelados].sort((a, b) => a.indice - b.indice);
-  const fragmentos = todos.map(({ indice, comando, codigo, ms, salida, cancelado }) => ({
+  const fragmentos = todos.map(({ indice, comando, codigo, motivo, ms, salida, cancelado }) => ({
     indice,
     comando,
     codigo,
+    ...(motivo ? { motivo } : {}),
     ms,
     salidaCola: ultimasLineas(salida),
     ...(cancelado ? { cancelado: true } : {}),
   }));
 
-  const ok = todos.length === shards && todos.every((f) => f.codigo === 0);
+  // OK solo si están todos y ninguno es fallo. Se usa el booleano `fallo` (no `codigo === 0`)
+  // porque un fragmento expirado puede traer código 0 pero igual es un corte.
+  const ok = todos.length === shards && todos.every((f) => !f.fallo);
 
   // La salida combinada pone primero los fallidos: el orquestador ve el problema sin buscar.
-  const fallidos = fragmentos.filter((f) => f.codigo !== 0);
-  const exitosos = fragmentos.filter((f) => f.codigo === 0);
+  const fallidos = todos.filter((f) => f.fallo);
+  const exitosos = todos.filter((f) => !f.fallo);
   const salidaCombinada = [...fallidos, ...exitosos]
-    .map((f) => `[${f.indice}/${shards}] ${f.comando} (código ${f.codigo}, ${f.ms} ms)\n${f.salidaCola}`)
+    .map((f) => {
+      const motivo = f.motivo ? `, motivo ${f.motivo}` : '';
+      return `[${f.indice}/${shards}] ${f.comando} (código ${f.codigo}, ${f.ms} ms${motivo})\n${ultimasLineas(f.salida)}`;
+    })
     .join('\n\n');
 
   return { ok, fragmentos, salidaCombinada };

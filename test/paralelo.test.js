@@ -214,3 +214,76 @@ test('paralelo: recurso declarado sin provisionar y falta de ejecutar son errore
     /exige una función 'ejecutar'/,
   );
 });
+
+test('paralelo: un fragmento SOLO es OK con código entero 0 y sin corte', async () => {
+  const casos = [
+    { nombre: 'código 0', resultado: { codigo: 0, salida: 'ok' }, codigo: 0, ok: true, motivo: undefined },
+    {
+      nombre: 'null + timeout',
+      resultado: { codigo: null, timeout: true, salida: 'colgado' },
+      codigo: -1,
+      ok: false,
+      motivo: 'timeout',
+    },
+    {
+      nombre: 'null sin timeout',
+      resultado: { codigo: null, salida: 'sin código' },
+      codigo: -1,
+      ok: false,
+      motivo: 'sin_codigo',
+    },
+    { nombre: 'código distinto de 0', resultado: { codigo: 3, salida: 'falló' }, codigo: 3, ok: false, motivo: undefined },
+    { nombre: 'undefined', resultado: { salida: 'nada' }, codigo: -1, ok: false, motivo: 'sin_codigo' },
+  ];
+
+  for (const caso of casos) {
+    const ejecutar = async () => caso.resultado;
+    const r = await ejecutarParalelo({ spec: spec({ shards: 2, comando: 'x {i}' }), ejecutar });
+
+    assert.equal(r.ok, caso.ok, `${caso.nombre}: ok debe ser ${caso.ok}`);
+    for (const f of r.fragmentos) {
+      assert.equal(f.codigo, caso.codigo, `${caso.nombre}: código`);
+      assert.equal(f.motivo, caso.motivo, `${caso.nombre}: motivo`);
+    }
+    if (caso.motivo) {
+      assert.match(r.salidaCombinada, /motivo /, `${caso.nombre}: el motivo debe verse en la salida combinada`);
+      assert.match(
+        r.salidaCombinada,
+        new RegExp(caso.motivo.replace(':', '\\:')),
+        `${caso.nombre}: el motivo concreto debe verse en la salida combinada`,
+      );
+    }
+  }
+});
+
+test('paralelo: idle y señal de corte son fallos con su motivo', async () => {
+  const casos = [
+    { resultado: { codigo: null, idle: true }, motivo: 'idle' },
+    { resultado: { codigo: null, signal: 'SIGKILL' }, motivo: 'senal:SIGKILL' },
+    { resultado: { codigo: null, senal: 'SIGTERM' }, motivo: 'senal:SIGTERM' },
+  ];
+
+  for (const caso of casos) {
+    const r = await ejecutarParalelo({
+      spec: spec({ shards: 2, comando: 'x {i}' }),
+      ejecutar: async () => caso.resultado,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.fragmentos[0].codigo, -1);
+    assert.equal(r.fragmentos[0].motivo, caso.motivo);
+    assert.match(r.salidaCombinada, new RegExp(caso.motivo.replace(':', '\\:')));
+  }
+});
+
+test('paralelo: un fragmento colgado (null+timeout) hace fallar la compuerta', async () => {
+  const ejecutar = async (comando, { indice }) =>
+    indice === 2 ? { codigo: null, timeout: true, salida: 'se colgó' } : { codigo: 0, salida: 'ok' };
+
+  const r = await ejecutarParalelo({ spec: spec({ shards: 3, comando: 'x {i}' }), ejecutar });
+
+  assert.equal(r.ok, false, 'una compuerta colgada no puede aceptarse');
+  assert.equal(r.fragmentos.find((f) => f.indice === 2).codigo, -1);
+  assert.equal(r.fragmentos.find((f) => f.indice === 2).motivo, 'timeout');
+  // El colgado va primero, como cualquier fallo.
+  assert.ok(r.salidaCombinada.indexOf('[2/3]') < r.salidaCombinada.indexOf('[1/3]'));
+});
