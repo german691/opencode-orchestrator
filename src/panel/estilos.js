@@ -67,6 +67,34 @@ h3{font-size:13px;margin:0}
 .cuerpo{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:calc(var(--esp)*3);padding:calc(var(--esp)*3);height:calc(100vh - 56px)}
 @media (max-width:820px){.cuerpo{grid-template-columns:1fr;height:auto}}
 
+/* Páginas secundarias (auditoría y pizarrón) ------------------------------ */
+/* Mismo sistema de tokens que la principal: padding 20/24 px y ancho cómodo. */
+.pagina{
+  display:flex;flex-direction:column;gap:calc(var(--esp)*4);
+  padding:calc(var(--esp)*5) calc(var(--esp)*6);
+  max-width:1100px;margin:0 auto;width:100%;min-width:0;
+}
+.filtros{
+  display:flex;flex-wrap:wrap;align-items:flex-end;gap:calc(var(--esp)*3);
+  background:var(--card);border:1px solid var(--bd);border-radius:var(--radio);
+  padding:calc(var(--esp)*3) calc(var(--esp)*4);
+}
+.filtros .campo{display:flex;flex-direction:column;gap:var(--esp)}
+.filtros label{font-size:12px;color:var(--mut);font-weight:600}
+.filtros input,.filtros select{
+  font:inherit;min-height:34px;padding:4px 8px;color:var(--fg);
+  background:var(--bg);border:1px solid var(--bd);border-radius:var(--radio);
+}
+.filtros .acciones{display:flex;gap:var(--esp);margin-left:auto}
+.boton-primario{background:var(--activo);color:#fff;border-color:var(--activo);font-weight:600}
+.boton-primario:hover{background:var(--foco);border-color:var(--foco);color:#fff}
+@media (prefers-color-scheme:dark){.boton-primario,.boton-primario:hover{color:#08122a}}
+.tabla-envoltorio{overflow:auto;max-height:70vh;border:1px solid var(--bd);border-radius:var(--radio);background:var(--card)}
+.tabla-envoltorio table{border:0;border-radius:0}
+.paginacion{display:flex;justify-content:center}
+.badge-historico{color:var(--cola);border-color:var(--cola)}
+.campo-iso{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--mut)}
+
 /* Lista de trabajos ------------------------------------------------------- */
 .lista{display:flex;flex-direction:column;gap:calc(var(--esp)*2);min-height:0}
 .busqueda{margin:0}
@@ -184,18 +212,27 @@ details.plegable[open] .plegable-accion{display:none}
 details.plegable>pre{border-radius:0 0 var(--radio) var(--radio)}
 
 /* Pizarrón ---------------------------------------------------------------- */
-.tabla-pizarron{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--bd);border-radius:var(--radio)}
-.tabla-pizarron th,.tabla-pizarron td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd);font-size:13px;vertical-align:top}
-.tabla-pizarron th{color:var(--mut);font-weight:600}
-.valor-pizarron{font-family:ui-monospace,Consolas,monospace;word-break:break-word}
+.tabla-pizarron{border-collapse:collapse;width:100%;background:var(--card)}
+.tabla-pizarron th,.tabla-pizarron td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--bd);font-size:13px;vertical-align:top}
+.tabla-pizarron th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card);z-index:1}
+.tabla-pizarron tbody tr:hover{background:var(--suave)}
+.valor-pizarron{font-family:ui-monospace,Consolas,monospace;word-break:break-word;display:block}
+.valor-pizarron-resumen{cursor:pointer;color:var(--fg);display:flex;gap:var(--esp);align-items:baseline}
+.valor-pizarron-resumen .plegable-accion{margin-left:auto}
+.valor-pizarron pre{margin:var(--esp) 0 0;white-space:pre-wrap;word-break:break-word;background:var(--code);color:var(--codefg);border-radius:var(--radio);padding:8px;max-height:40vh;overflow:auto}
 .marca-conflicto{color:var(--mal);font-weight:700}
 .notas-pizarron{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--esp)}
-.nota-pizarron{display:flex;flex-wrap:wrap;gap:calc(var(--esp)*2);align-items:baseline;background:var(--card);border:1px solid var(--bd);border-radius:var(--radio);padding:6px 10px;font-size:13px}
+.nota-pizarron{display:flex;flex-wrap:wrap;gap:calc(var(--esp)*2);align-items:baseline;background:var(--card);border:1px solid var(--bd);border-radius:var(--radio);padding:8px 10px;font-size:13px}
+.nota-pizarron .nota-autor{font-weight:600}
+.nota-pizarron .nota-texto{flex:1;min-width:0}
 
 /* Auditoría --------------------------------------------------------------- */
-.tabla-auditoria{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--bd);border-radius:var(--radio)}
-.tabla-auditoria th,.tabla-auditoria td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd);font-size:13px;vertical-align:top}
-.tabla-auditoria th{color:var(--mut);font-weight:600}
+.tabla-auditoria{border-collapse:collapse;width:100%;background:var(--card)}
+.tabla-auditoria th,.tabla-auditoria td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--bd);font-size:13px;vertical-align:top}
+.tabla-auditoria th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card);z-index:1}
+.tabla-auditoria tbody tr:hover{background:var(--suave)}
+.tabla-auditoria time{white-space:nowrap;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+
 
 /* Eventos ----------------------------------------------------------------- */
 .eventos{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--esp)}

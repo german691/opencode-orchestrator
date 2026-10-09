@@ -31,7 +31,6 @@ import {
   resumenDeTrabajo,
   estadoDelPanel,
   alcanceDeTrabajo,
-  eventosDeTrabajo,
   leerTrabajo,
   leerPizarron,
   idValido,
@@ -40,7 +39,8 @@ import {
 import { leerRango, archivoDeFuente, LIMITE_MAX } from './logs.js';
 import { diffDeTrabajo } from './diff.js';
 import { crearFlujoEventos } from './stream.js';
-import { PAGINA, paginaAuditoria, paginaPizarron } from './pagina.js';
+import { PAGINA, paginaAuditoria, paginaPizarron, PASO_EVENTOS } from './pagina.js';
+import { crearHistorial } from './historial.js';
 import { PIZARRON_CLIENTE } from './pizarron-cliente.js';
 import { ESTILOS } from './estilos.js';
 import { CLIENTE } from './cliente.js';
@@ -161,11 +161,18 @@ function leerFiltros(params) {
   return filtros;
 }
 
+/** Normaliza el `limite` de eventos: por defecto 200, acotado a 1..10000. */
+function normalizarLimiteEventos(valor) {
+  const n = Number(valor);
+  if (!Number.isFinite(n) || n <= 0) return PASO_EVENTOS;
+  return Math.min(10_000, Math.trunc(n));
+}
+
 /**
  * Atiende las rutas NUEVAS por trabajo (`log`, `diff`, `alcance`, `eventos`).
  * @returns {Promise<boolean>} si la ruta fue manejada
  */
-async function atenderSubruta(res, { accion, id, dirTrabajos, ahora, registro, params }) {
+async function atenderSubruta(res, { accion, id, dirTrabajos, ahora, historial, params }) {
   // El id se valida ANTES de tocar el disco: ninguna variante (codificada o no)
   // puede colarse como ruta.
   if (!idDePanel(id)) {
@@ -201,9 +208,9 @@ async function atenderSubruta(res, { accion, id, dirTrabajos, ahora, registro, p
     return true;
   }
 
-  // eventos: el registro filtrado por jobId, tal cual (vacío si no hay registro).
+  // eventos: el historial filtrado por jobId (reconstruido si el registro no tiene ese trabajo).
   const limite = numeroDeQuery(params.get('limite')) ?? 200;
-  responderJson(res, 200, eventosDeTrabajo(registro, id, { limite }));
+  responderJson(res, 200, historial.listar({ jobId: id, limite }));
   return true;
 }
 
@@ -213,12 +220,22 @@ async function atenderSubruta(res, { accion, id, dirTrabajos, ahora, registro, p
  * @param {string} [opciones.baseDir] directorio de estado (contiene `jobs/`)
  * @param {() => number} [opciones.ahora] reloj inyectable
  * @param {object} [opciones.registro] registro de eventos inyectable
+ * @param {object} [opciones.historial] historial inyectable (registro + reconstrucción)
  * @param {number|null} [opciones.concurrencia] concurrencia del perfil, si se conoce
  * @param {object} [opciones.stream] overrides del flujo SSE (intervalos, máximo)
  */
-export function crearServidorPanel({ baseDir, ahora = Date.now, registro, concurrencia = null, stream } = {}) {
+export function crearServidorPanel({
+  baseDir,
+  ahora = Date.now,
+  registro,
+  historial = null,
+  concurrencia = null,
+  stream,
+} = {}) {
   const dirEstado = baseDir ?? directorioEstado();
   const dirTrabajos = `${dirEstado}/jobs`;
+  const historialEfectivo =
+    historial ?? crearHistorial({ dirTrabajos, dirEstado, registro, ahora: () => ahora() });
   const flujo = crearFlujoEventos({
     trabajos: () => listarTrabajos(dirTrabajos, ahora()),
     estado: () => estadoDelPanel(dirTrabajos, { ahora: ahora(), registro, concurrencia }),
@@ -241,9 +258,23 @@ export function crearServidorPanel({ baseDir, ahora = Date.now, registro, concur
       }
       if (pathname === '/auditoria') {
         const filtros = leerFiltros(url.searchParams);
-        const eventos = registro ? registro.listar(filtros) : [];
+        const limite = normalizarLimiteEventos(filtros.limite);
+        // Se pide uno de más para saber si queda otra página sin contar todo.
+        const encontrados = historialEfectivo.listar({ ...filtros, limite: limite + 1 });
+        const hayMas = encontrados.length > limite;
+        const eventos = hayMas ? encontrados.slice(0, limite) : encontrados;
         res.writeHead(200, CABECERAS_HTML);
-        res.end(paginaAuditoria({ eventos, tipos: registro?.tipos ?? TIPOS, filtros, disponible: Boolean(registro) }));
+        res.end(
+          paginaAuditoria({
+            eventos,
+            tipos: registro?.tipos ?? TIPOS,
+            filtros,
+            disponible: Boolean(registro),
+            titulos: historialEfectivo.titulos(),
+            limite,
+            hayMas,
+          }),
+        );
         return;
       }
       if (pathname === '/pizarron') {
@@ -276,7 +307,9 @@ export function crearServidorPanel({ baseDir, ahora = Date.now, registro, concur
           responderJson(res, 503, { error: 'auditoría no disponible' });
           return;
         }
-        responderJson(res, 200, { ahora: ahora(), eventos: registro.listar(leerFiltros(url.searchParams)) });
+        const filtros = leerFiltros(url.searchParams);
+        filtros.limite = normalizarLimiteEventos(filtros.limite);
+        responderJson(res, 200, { ahora: ahora(), eventos: historialEfectivo.listar(filtros) });
         return;
       }
       if (pathname === '/api/estado') {
@@ -295,7 +328,7 @@ export function crearServidorPanel({ baseDir, ahora = Date.now, registro, concur
           id,
           dirTrabajos,
           ahora,
-          registro,
+          historial: historialEfectivo,
           params: url.searchParams,
         });
         return;

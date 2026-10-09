@@ -1,11 +1,19 @@
 /**
- * Shell HTML del panel y de la página de auditoría.
+ * Shell HTML del panel y de las páginas secundarias (auditoría y pizarrón).
  *
  * POR QUÉ sin JS ni CSS en línea: la CSP del servidor (`style-src 'self'`,
  * `script-src 'self'`) los bloquea. El HTML solo referencia `/static/app.css` y
  * `/static/app.js`; los datos y el texto variable se insertan con textContent
  * desde el cliente, nunca con innerHTML.
+ *
+ * POR QUÉ la auditoría sigue renderizándose en el servidor: es una tabla de solo
+ * lectura con filtros por query string; no necesita JavaScript y así funciona
+ * aun con el cliente bloqueado. La paginación es un enlace «Cargar más».
  */
+import { etiquetaTipo, etiquetaTransicion, formatearHoraEvento, horaIsoEvento, motivoLegible } from './cliente-lib.js';
+
+/** Paso de la paginación de la auditoría (y límite por defecto). */
+export const PASO_EVENTOS = 200;
 
 /** Escapa texto para insertarlo en HTML (la auditoría muestra datos leídos de disco). */
 function escaparHtml(valor) {
@@ -17,26 +25,27 @@ function escaparHtml(valor) {
     .replaceAll("'", '&#39;');
 }
 
-/** Hora en ISO UTC: estable para tests y para comparar entre máquinas. */
-function horaEvento(ts) {
-  const n = Number(ts);
-  return Number.isFinite(n) ? new Date(n).toISOString() : '';
+/** Enlace de sección; marca la actual con `aria-current="page"`. */
+function enlaceSeccion(href, texto, actual, clave) {
+  const marca = clave === actual ? ' aria-current="page"' : '';
+  return `<a href="${href}"${marca}>${texto}</a>`;
 }
 
-/** Columna estado: muestra `anterior → nuevo` cuando hay transición. */
-function estadoEvento(evento) {
-  if (evento.anterior !== undefined && evento.estado !== undefined) {
-    return `${evento.anterior} → ${evento.estado}`;
-  }
-  return evento.estado !== undefined ? evento.estado : '';
+/**
+ * Navegación común a las tres páginas: Trabajos, Auditoría y Pizarrón, con la
+ * actual marcada. `extra` permite sumar controles propios de cada página (p. ej.
+ * el botón de atajos de la principal) dentro del mismo `<nav>`.
+ */
+function navSecciones(actual, extra = '') {
+  return `<nav class="cabecera-nav" aria-label="Secciones">${enlaceSeccion('/', 'Trabajos', actual, 'trabajos')}${enlaceSeccion('/auditoria', 'Auditoría', actual, 'auditoria')}${enlaceSeccion('/pizarron', 'Pizarrón', actual, 'pizarron')}${extra}</nav>`;
 }
 
-/** Enlace de salto y cabecera común a las dos páginas del panel. */
-function cabeceraHtml({ titulo, marca, nav }) {
+/** Enlace de salto y cabecera común a las tres páginas del panel. */
+function cabeceraHtml({ titulo, marca, actual, extra = '' }) {
   return `<a class="saltar" href="#contenido">Saltar al contenido</a>
 <header class="cabecera">
   <span class="cabecera-titulo"><h1>${escaparHtml(titulo)}</h1><span class="marca">${escaparHtml(marca)}</span></span>
-  ${nav}
+  ${navSecciones(actual, extra)}
 </header>`;
 }
 
@@ -64,11 +73,7 @@ const NAV_PRINCIPAL = `<span id="conexion" class="conexion reconectando" role="s
   </span>
   <span id="contadores" class="contadores">Corriendo 0 · En cola 0 · Total 0</span>
   <span id="concurrencia" class="concurrencia" hidden></span>
-  <nav class="cabecera-nav" aria-label="Secciones">
-    <a href="/pizarron">Pizarrón</a>
-    <a href="/auditoria">Auditoría</a>
-    <button type="button" id="ayuda" class="boton" aria-haspopup="dialog">Atajos (?)</button>
-  </nav>`;
+  ${navSecciones('trabajos', '<button type="button" id="ayuda" class="boton" aria-haspopup="dialog">Atajos (?)</button>')}`;
 
 /** Cuerpo de la página principal: lista de trabajos + detalle con pestañas. */
 const CUERPO_PRINCIPAL = `<div class="cuerpo">
@@ -120,52 +125,118 @@ const CUERPO_PRINCIPAL = `<div class="cuerpo">
 /** Página principal (el cliente la hidrata). */
 export const PAGINA = armazonHtml({
   titulo: 'Trabajos de opencode',
-  cabecera: cabeceraHtml({ titulo: 'Trabajos de opencode', marca: 'panel en vivo', nav: NAV_PRINCIPAL }),
+  cabecera: cabeceraHtml({ titulo: 'Trabajos de opencode', marca: 'panel en vivo', actual: 'trabajos' }),
   cuerpo: CUERPO_PRINCIPAL,
   scripts: '<script type="module" src="/static/app.js"></script>',
 });
 
+/** Opciones del `<select>` de tipos, con la actual seleccionada. */
+function opcionesTipo(tipos, seleccionado) {
+  return ['', ...tipos]
+    .map((tipo) => {
+      const marca = tipo === seleccionado ? ' selected' : '';
+      return `<option value="${escaparHtml(tipo)}"${marca}>${escaparHtml(tipo || 'todos')}</option>`;
+    })
+    .join('');
+}
+
+/** Fila de la tabla de auditoría, con etiqueta humana, ícono de transición e insignia histórico. */
+function filaAuditoria(evento, titulos) {
+  const iso = horaIsoEvento(evento.ts);
+  const hora = formatearHoraEvento(evento.ts);
+  const titulo = titulos[evento.jobId] ?? evento.jobId;
+  const trabajo = evento.jobId
+    ? `<a href="/?job=${encodeURIComponent(evento.jobId)}">${escaparHtml(titulo)}</a>`
+    : '';
+  const historico =
+    evento.origen === 'reconstruido' ? ' <span class="badge badge-historico">histórico</span>' : '';
+  const transicion = etiquetaTransicion(evento);
+  return (
+    `<tr><td><time datetime="${escaparHtml(iso)}" title="${escaparHtml(iso)}">${escaparHtml(hora)}</time></td>` +
+    `<td><span title="${escaparHtml(evento.tipo)}">${escaparHtml(etiquetaTipo(evento.tipo))}</span>${historico}</td>` +
+    `<td>${trabajo}</td>` +
+    `<td>${escaparHtml(transicion)}</td>` +
+    `<td>${escaparHtml(motivoLegible(evento.motivo))}</td>` +
+    `<td>${escaparHtml(evento.actor)}</td></tr>`
+  );
+}
+
+/** Enlace «Cargar más» que conserva los filtros y suma un paso al límite. */
+function enlaceCargarMas(filtros, limite) {
+  const params = new URLSearchParams();
+  if (filtros.jobId) params.set('jobId', filtros.jobId);
+  if (filtros.tipo) params.set('tipo', filtros.tipo);
+  if (filtros.desde !== undefined) params.set('desde', String(filtros.desde));
+  if (filtros.hasta !== undefined) params.set('hasta', String(filtros.hasta));
+  params.set('limite', String(limite + PASO_EVENTOS));
+  return `<a class="boton boton-primario" href="/auditoria?${escaparHtml(params.toString())}">Cargar más</a>`;
+}
+
 /**
  * Página de auditoría (HTML plano, renderizado en el servidor, sin JS).
  * Los filtros viajan por query string y se reenvían al registro.
- * @param {{ eventos?: object[], tipos?: readonly string[], filtros?: object, disponible?: boolean }} [datos]
+ *
+ * @param {{ eventos?: object[], tipos?: readonly string[], filtros?: object, disponible?: boolean,
+ *   titulos?: Record<string,string>, limite?: number, hayMas?: boolean }} [datos]
  * @returns {string}
  */
-export function paginaAuditoria({ eventos = [], tipos = [], filtros = {}, disponible = true } = {}) {
-  const opciones = ['', ...tipos]
-    .map((t) => {
-      const sel = t === filtros.tipo ? ' selected' : '';
-      return `<option value="${escaparHtml(t)}"${sel}>${escaparHtml(t || 'todos')}</option>`;
-    })
-    .join('');
-  const filas = eventos
-    .map((e) => {
-      const trabajo = e.jobId
-        ? `<a href="/?job=${encodeURIComponent(e.jobId)}">${escaparHtml(e.jobId)}</a>`
-        : '';
-      return `<tr><td>${escaparHtml(horaEvento(e.ts))}</td><td>${escaparHtml(e.tipo)}</td>` +
-        `<td>${trabajo}</td><td>${escaparHtml(estadoEvento(e))}</td>` +
-        `<td>${escaparHtml(e.motivo)}</td><td>${escaparHtml(e.actor)}</td></tr>`;
-    })
-    .join('');
-  const cuerpo = disponible
-    ? `<table class="tabla-auditoria"><thead><tr><th>hora</th><th>tipo</th><th>trabajo</th><th>estado</th><th>motivo</th><th>actor</th></tr></thead><tbody>${filas}</tbody></table>`
-    : '<p class="nota">Auditoría no disponible</p>';
-  const nav = '<nav class="cabecera-nav" aria-label="Secciones"><a href="/">← Trabajos</a><a href="/pizarron">Pizarrón</a></nav>';
+export function paginaAuditoria({
+  eventos = [],
+  tipos = [],
+  filtros = {},
+  disponible = true,
+  titulos = {},
+  limite = PASO_EVENTOS,
+  hayMas = false,
+} = {}) {
+  const filas = eventos.map((evento) => filaAuditoria(evento, titulos)).join('');
+  const tabla =
+    eventos.length > 0
+      ? `<div class="tabla-envoltorio">
+<table class="tabla-auditoria" aria-label="Eventos registrados, más recientes primero">
+<caption class="oculto">Eventos registrados, más recientes primero</caption>
+<thead><tr><th scope="col">Hora</th><th scope="col">Tipo</th><th scope="col">Trabajo</th><th scope="col">Estado</th><th scope="col">Motivo</th><th scope="col">Autor</th></tr></thead>
+<tbody>${filas}</tbody>
+</table>
+</div>`
+      : '';
+  const vacio = !disponible
+    ? '<p class="vacia" role="status">Auditoría no disponible: el panel no tiene acceso al registro de eventos.</p>'
+    : eventos.length === 0
+      ? '<p class="vacia" role="status">Todavía no hay eventos. Acá se registran los cambios de estado de los trabajos, los merges, las limpiezas y los aportes al pizarrón.</p>'
+      : '';
+  const paginacion = hayMas ? `<div class="paginacion">${enlaceCargarMas(filtros, limite)}</div>` : '';
+  const cuerpo = `<main id="contenido" class="pagina" tabindex="-1">
+<form method="get" action="/auditoria" class="filtros" role="search" aria-label="Filtrar eventos">
+  <div class="campo">
+    <label for="filtro-trabajo">Trabajo</label>
+    <input id="filtro-trabajo" name="jobId" value="${escaparHtml(filtros.jobId ?? '')}" placeholder="id del trabajo" autocomplete="off">
+  </div>
+  <div class="campo">
+    <label for="filtro-tipo">Tipo</label>
+    <select id="filtro-tipo" name="tipo">${opcionesTipo(tipos, filtros.tipo)}</select>
+  </div>
+  <div class="campo">
+    <label for="filtro-desde">Desde</label>
+    <input id="filtro-desde" name="desde" value="${escaparHtml(filtros.desde ?? '')}" inputmode="numeric" size="14" placeholder="timestamp">
+  </div>
+  <div class="campo">
+    <label for="filtro-hasta">Hasta</label>
+    <input id="filtro-hasta" name="hasta" value="${escaparHtml(filtros.hasta ?? '')}" inputmode="numeric" size="14" placeholder="timestamp">
+  </div>
+  <div class="acciones">
+    <button type="submit" class="boton boton-primario">Filtrar</button>
+    <a class="boton" href="/auditoria">Limpiar</a>
+  </div>
+</form>
+${tabla}
+${vacio}
+${paginacion}
+</main>`;
   return armazonHtml({
     titulo: 'Auditoría de opencode',
-    cabecera: cabeceraHtml({ titulo: 'Auditoría de opencode', marca: 'registro de eventos', nav }),
-    cuerpo: `<main id="contenido" class="detalle" tabindex="-1">
-<form method="get" action="/auditoria" class="consola-barra">
-<label>trabajo <input name="jobId" value="${escaparHtml(filtros.jobId ?? '')}"></label>
-<label>tipo <select name="tipo">${opciones}</select></label>
-<label>desde <input name="desde" value="${escaparHtml(filtros.desde ?? '')}" size="14"></label>
-<label>hasta <input name="hasta" value="${escaparHtml(filtros.hasta ?? '')}" size="14"></label>
-<button type="submit" class="boton">Filtrar</button>
-<a href="/auditoria">Recargar</a>
-</form>
-${cuerpo}
-</main>`,
+    cabecera: cabeceraHtml({ titulo: 'Auditoría de opencode', marca: 'registro de eventos', actual: 'auditoria' }),
+    cuerpo,
   });
 }
 
@@ -176,12 +247,10 @@ ${cuerpo}
  * @returns {string}
  */
 export function paginaPizarron() {
-  const nav =
-    '<nav class="cabecera-nav" aria-label="Secciones"><a href="/">← Trabajos</a><a href="/auditoria">Auditoría</a></nav>';
   return armazonHtml({
     titulo: 'Pizarrón de opencode',
-    cabecera: cabeceraHtml({ titulo: 'Pizarrón de opencode', marca: 'contexto compartido', nav }),
-    cuerpo: `<main id="contenido" class="detalle" tabindex="-1">
+    cabecera: cabeceraHtml({ titulo: 'Pizarrón de opencode', marca: 'contexto compartido', actual: 'pizarron' }),
+    cuerpo: `<main id="contenido" class="pagina" tabindex="-1">
 <p id="pizarron-estado" class="nota" role="status" aria-live="polite">Cargando pizarrón…</p>
 <div id="pizarron"></div>
 </main>`,

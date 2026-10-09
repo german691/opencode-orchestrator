@@ -496,3 +496,86 @@ test('stream: al desconectar limpia timers y libera el cupo', () => {
   assert.equal(flujo.cantidadClientes(), 0);
   assert.equal(activos.size, 0);
 });
+
+test('historial: reconstruye los trabajos sin registro y no duplica los que sí lo tienen', async () => {
+  const { base, jobs } = crearEstado();
+  crearJob(jobs, 'viejo001', {
+    estado: 'succeeded',
+    titulo: 'Trabajo viejo',
+    creadoEn: AHORA - 9000,
+    inicioEn: AHORA - 8000,
+    finEn: AHORA - 7000,
+    motivoFin: null,
+  });
+  crearJob(jobs, 'nuevo001', { estado: 'running', creadoEn: AHORA - 1000 });
+  const registro = crearRegistroEventos({ dir: path.join(base, 'auditoria'), ahora: () => AHORA });
+  registro.registrar({ tipo: 'job.creado', jobId: 'nuevo001' });
+  await conServidor({ baseDir: base, registro }, async (url) => {
+    const todos = await (await fetch(`${url}/api/eventos`)).json();
+    const deViejo = todos.eventos.filter((e) => e.jobId === 'viejo001');
+    assert.deepEqual(deViejo.map((e) => e.tipo), ['job.fin', 'job.estado', 'job.creado']);
+    assert.ok(deViejo.every((e) => e.origen === 'reconstruido'), 'los viejos se marcan reconstruido');
+    assert.equal(deViejo[0].estado, 'succeeded');
+
+    // El trabajo CON registro no se duplica ni se reconstruye.
+    const deNuevo = todos.eventos.filter((e) => e.jobId === 'nuevo001');
+    assert.deepEqual(deNuevo.map((e) => e.tipo), ['job.creado']);
+    assert.equal(deNuevo[0].origen, 'registro');
+
+    // El orden final es por fecha descendente mezclando ambos orígenes.
+    const fechas = todos.eventos.map((e) => e.ts);
+    assert.deepEqual(fechas, [...fechas].sort((a, b) => b - a));
+
+    // Los filtros siguen funcionando sobre el historial mezclado.
+    const fin = await (await fetch(`${url}/api/eventos?tipo=job.fin`)).json();
+    assert.deepEqual(fin.eventos.map((e) => e.jobId), ['viejo001']);
+    const porJob = await (await fetch(`${url}/api/eventos?jobId=viejo001`)).json();
+    assert.equal(porJob.eventos.length, 3);
+    const rango = await (await fetch(`${url}/api/eventos?desde=${AHORA - 7500}`)).json();
+    assert.deepEqual(rango.eventos.map((e) => e.jobId), ['nuevo001', 'viejo001']);
+
+    // El endpoint por trabajo también reconstruye.
+    const delTrabajo = await (await fetch(`${url}/api/trabajos/viejo001/eventos`)).json();
+    assert.equal(delTrabajo.length, 3);
+    assert.equal(delTrabajo[0].origen, 'reconstruido');
+  });
+});
+
+test('auditoría: pagina con «Cargar más» (límite 200) y respeta ?limite', async () => {
+  const { base, jobs } = crearEstado();
+  for (const [indice, id] of ['p0000001', 'p0000002', 'p0000003'].entries()) {
+    crearJob(jobs, id, { estado: 'queued', creadoEn: AHORA - (indice + 1) * 1000 });
+  }
+  const registro = crearRegistroEventos({ dir: path.join(base, 'auditoria'), ahora: () => AHORA });
+  await conServidor({ baseDir: base, registro }, async (url) => {
+    const html = await (await fetch(`${url}/auditoria?limite=1`)).text();
+    assert.match(html, /Cargar más/);
+    assert.match(html, /limite=201/);
+    assert.equal((html.match(/<time/g) ?? []).length, 1); // una sola fila visible
+
+    // Sin filtros sobra una página: no aparece el enlace.
+    const completo = await (await fetch(`${url}/auditoria`)).text();
+    assert.doesNotMatch(completo, /Cargar más/);
+    assert.equal((completo.match(/<time/g) ?? []).length, 3);
+
+    const api = await (await fetch(`${url}/api/eventos?limite=2`)).json();
+    assert.equal(api.eventos.length, 2);
+  });
+});
+
+test('auditoría: la etiqueta es humana y el tipo crudo queda en el title; los viejos llevan insignia histórico', async () => {
+  const { base, jobs } = crearEstado();
+  crearJob(jobs, 'viejo002', { estado: 'succeeded', creadoEn: AHORA - 5000, inicioEn: AHORA - 4000, finEn: AHORA - 3000 });
+  const registro = crearRegistroEventos({ dir: path.join(base, 'auditoria'), ahora: () => AHORA });
+  await conServidor({ baseDir: base, registro }, async (url) => {
+    const html = await (await fetch(`${url}/auditoria`)).text();
+    assert.match(html, /Trabajo creado/);
+    assert.match(html, /Trabajo terminado/);
+    assert.match(html, /Cambio de estado/);
+    assert.match(html, /title="job\.creado"/);
+    assert.match(html, /class="badge badge-historico">histórico/);
+    // El trabajo se enlaza y muestra su título cuando lo tiene.
+    assert.match(html, /href="\/\?job=viejo002"/);
+  });
+});
+
