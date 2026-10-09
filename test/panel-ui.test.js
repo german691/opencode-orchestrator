@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { crearServidorPanel } from '../src/panel/servidor.js';
+import { crearServidorPanel, hostPermitido, concurrenciaDeEntorno, CONCURRENCIA_POR_DEFECTO } from '../src/panel/servidor.js';
 import { PAGINA } from '../src/panel/pagina.js';
 import { CLIENTE } from '../src/panel/cliente.js';
 import { PIZARRON_CLIENTE } from '../src/panel/pizarron-cliente.js';
@@ -181,6 +181,43 @@ test('cabecera: enlaces a Pizarrón y Auditoría desde la página principal', as
     const auditoria = await (await fetch(`${url}/auditoria`)).text();
     assert.match(auditoria, /href="\/pizarron"/);
   });
+});
+
+test('host: solo se permite loopback salvo ORQ_PANEL_ALLOW_REMOTE=1', () => {
+  assert.equal(hostPermitido('127.0.0.1', {}), true);
+  assert.equal(hostPermitido('localhost', {}), true);
+  assert.equal(hostPermitido('::1', {}), true);
+  assert.equal(hostPermitido('0.0.0.0', {}), false);
+  assert.equal(hostPermitido('192.168.1.10', {}), false);
+  assert.equal(hostPermitido('0.0.0.0', { ORQ_PANEL_ALLOW_REMOTE: '1' }), true);
+});
+
+test('concurrencia: por defecto 3 y acotada a 1..16 como el servidor MCP', () => {
+  assert.equal(CONCURRENCIA_POR_DEFECTO, 3);
+  assert.equal(concurrenciaDeEntorno({}), 3);
+  assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: '5' }), 5);
+  assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: '99' }), 16);
+  assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: '0' }), 3);
+  assert.equal(concurrenciaDeEntorno({ ORQ_CONCURRENCY: 'x' }), 3);
+});
+
+test('UI: chips de repositorio, localStorage, ?repo=, aria-busy, Reintentar y Corriendo n/máx', () => {
+  // El contenedor donde el cliente pinta los repositorios va en la columna izquierda.
+  assert.match(PAGINA, /id="chips-repo"/);
+  assert.match(PAGINA, /aria-label="Filtrar por repositorio"/);
+  // El filtro se recuerda y se refleja en la URL; se usa la lib pura contarPorRepo.
+  assert.match(CLIENTE, /contarPorRepo/);
+  assert.match(CLIENTE, /localStorage/);
+  assert.match(CLIENTE, /searchParams\.set\('repo'/);
+  assert.match(CLIENTE, /parametros\.get\('repo'\)/);
+  // Accesibilidad: aria-busy al cargar, error legible con botón Reintentar y j/k que
+  // no roban el foco de la búsqueda.
+  assert.match(CLIENTE, /aria-busy/);
+  assert.match(CLIENTE, /'No se pudo cargar: '/);
+  assert.match(CLIENTE, /'Reintentar'/);
+  assert.match(CLIENTE, /moverSeleccion\(evento\.key === 'j' \? 1 : -1, enBusqueda\)/);
+  // La cabecera muestra 'Corriendo n/máx' con la concurrencia del entorno.
+  assert.match(CLIENTE, /'Corriendo ' \+ usada \+ '\/' \+ maxima/);
 });
 
 test('cliente del pizarrón: pasa node --check y refresca por polling', () => {

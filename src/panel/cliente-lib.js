@@ -146,13 +146,15 @@ export function ordenarTrabajos(lista, { activosPrimero = true } = {}) {
 }
 
 /**
- * Filtra por categoría de chip y por texto (título, id, modelo o rama).
+ * Filtra por categoría de chip, por texto (título, id, modelo o rama) y por
+ * repositorio (`repoNombre`).
  * @param {object[]} lista
- * @param {{ estado?: 'todos'|'activos'|'fallidos'|'terminados', texto?: string }} [opciones]
+ * @param {{ estado?: 'todos'|'activos'|'fallidos'|'terminados', texto?: string, repo?: string|null }} [opciones]
  * @returns {object[]}
  */
-export function filtrarTrabajos(lista, { estado = 'todos', texto = '' } = {}) {
+export function filtrarTrabajos(lista, { estado = 'todos', texto = '', repo = null } = {}) {
   const consulta = String(texto ?? '').trim().toLowerCase();
+  const objetivoRepo = repo ? String(repo) : null;
   const coincideCategoria = (trabajo) => {
     const actual = trabajo?.estado ?? '';
     if (estado === 'activos') return ACTIVOS.has(actual);
@@ -161,11 +163,27 @@ export function filtrarTrabajos(lista, { estado = 'todos', texto = '' } = {}) {
     return true;
   };
   return (Array.isArray(lista) ? lista : []).filter((trabajo) => {
+    if (objetivoRepo !== null && String(trabajo?.repoNombre ?? '') !== objetivoRepo) return false;
     if (!coincideCategoria(trabajo)) return false;
     if (consulta === '') return true;
     const campos = [trabajo?.titulo, trabajo?.id, trabajo?.modelo, trabajo?.rama];
     return campos.some((valor) => String(valor ?? '').toLowerCase().includes(consulta));
   });
+}
+
+/**
+ * Cuenta trabajos por repositorio para los chips. Los trabajos sin `repoNombre`
+ * caen bajo la etiqueta '(sin repo)' para no perderlos de vista.
+ * @param {object[]} lista
+ * @returns {Map<string, number>}
+ */
+export function contarPorRepo(lista) {
+  const conteos = new Map();
+  for (const trabajo of Array.isArray(lista) ? lista : []) {
+    const nombre = trabajo?.repoNombre ?? '(sin repo)';
+    conteos.set(nombre, (conteos.get(nombre) ?? 0) + 1);
+  }
+  return conteos;
 }
 
 /**

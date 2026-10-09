@@ -78,6 +78,7 @@ const CUERPO_PRINCIPAL = `<div class="cuerpo">
       <input id="filtro-texto" type="search" placeholder="Buscar por título, id, rama o modelo" autocomplete="off">
     </form>
     <div id="chips" class="chips" role="group" aria-label="Filtrar por estado"></div>
+    <div id="chips-repo" class="chips chips-repo" role="group" aria-label="Filtrar por repositorio" hidden></div>
     <ul id="trabajos" class="trabajos" aria-label="Lista de trabajos"></ul>
     <p id="lista-vacia" class="vacia" hidden>No hay trabajos que coincidan.</p>
   </nav>

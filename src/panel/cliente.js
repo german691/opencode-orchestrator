@@ -10,7 +10,7 @@
  * línea. Todo nodo se crea con `createElement` y el texto se asigna con
  * `textContent`, así que nada leído de disco puede inyectar HTML.
  */
-export const CLIENTE = String.raw`import { formatearDuracion, etiquetaEstado, motivoLegible, ordenarTrabajos, filtrarTrabajos, contarEstados, parsearParche, resumenAlcance, resumenTarea } from '/static/lib.js';
+export const CLIENTE = String.raw`import { formatearDuracion, etiquetaEstado, motivoLegible, ordenarTrabajos, filtrarTrabajos, contarEstados, contarPorRepo, parsearParche, resumenAlcance, resumenTarea } from '/static/lib.js';
 
 const porId = function (id) { return document.getElementById(id); };
 const crear = function (etiqueta, clase, texto) {
@@ -33,12 +33,16 @@ const MOTIVO_ESPERA = {
 
 // Estado de la aplicación en memoria. La lista se actualiza de forma incremental:
 // cada fila existente se reutiliza y solo se pinta de nuevo su contenido.
+const CLAVE_REPO = 'orq.panel.repo';
+
 const app = {
   trabajos: [],
   porId: new Map(),
   seleccionado: null,
   filtroEstado: 'todos',
   filtroTexto: '',
+  // Repositorio elegido en los chips (null = todos); se recuerda en localStorage.
+  filtroRepo: null,
   tab: 'resumen',
   resumenGlobal: null,
   cargado: {},
@@ -95,7 +99,7 @@ function renderCabecera(resumen) {
     barra.value = Math.min(usada, maxima);
     barra.setAttribute('aria-label', 'Concurrencia usada ' + usada + ' de ' + maxima);
     caja.hidden = false;
-    caja.replaceChildren(crear('span', '', 'Concurrencia ' + usada + '/' + maxima), barra);
+    caja.replaceChildren(crear('span', '', 'Corriendo ' + usada + '/' + maxima), barra);
   } else {
     caja.hidden = true;
     caja.replaceChildren();
@@ -106,7 +110,7 @@ function renderCabecera(resumen) {
 // --- Lista de trabajos ------------------------------------------------------
 
 function trabajosVisibles() {
-  const filtrados = filtrarTrabajos(app.trabajos, { estado: app.filtroEstado, texto: app.filtroTexto });
+  const filtrados = filtrarTrabajos(app.trabajos, { estado: app.filtroEstado, texto: app.filtroTexto, repo: app.filtroRepo });
   return ordenarTrabajos(filtrados);
 }
 
@@ -127,6 +131,7 @@ function pintarFila(boton, trabajo) {
     meta.append(crear('span', 'trabajo-semaforo semaforo-' + trabajo.semaforo, 'sin salida hace ' + formatearDuracion(trabajo.segundosSinSalida)));
   }
   if (trabajo.espera) meta.append(crear('span', 'trabajo-espera', textoEspera(trabajo.espera)));
+  if (trabajo.tieneAdvertencias) meta.append(crear('span', 'trabajo-aviso', '⚠ con advertencias'));
   boton.replaceChildren(estado, titulo, meta);
 }
 
@@ -155,7 +160,52 @@ function renderLista() {
   });
   porId('lista-vacia').hidden = visibles.length !== 0;
   actualizarChips();
+  crearChipsRepo();
   actualizarTitulo();
+}
+
+function crearChipsRepo() {
+  const contenedor = porId('chips-repo');
+  if (!contenedor) return;
+  const entradas = Array.from(contarPorRepo(app.trabajos).entries())
+    .sort(function (a, b) { return b[1] - a[1] || a[0].localeCompare(b[0]); });
+  // Con un solo repositorio (o ninguno) no hay nada que elegir: se oculta el grupo.
+  if (entradas.length < 2) { contenedor.hidden = true; contenedor.replaceChildren(); return; }
+  contenedor.hidden = false;
+  const chips = [{ nombre: null, etiqueta: 'Todos', cuenta: app.trabajos.length }].concat(
+    entradas.map(function (entrada) { return { nombre: entrada[0], etiqueta: entrada[0], cuenta: entrada[1] }; }),
+  );
+  contenedor.replaceChildren();
+  chips.forEach(function (chip) {
+    const boton = crear('button', 'chip');
+    boton.type = 'button';
+    boton.setAttribute('aria-pressed', app.filtroRepo === chip.nombre ? 'true' : 'false');
+    boton.append(crear('span', '', chip.etiqueta), crear('span', 'cuenta', String(chip.cuenta)));
+    boton.addEventListener('click', function () { seleccionarRepo(chip.nombre); });
+    contenedor.append(boton);
+  });
+}
+
+function seleccionarRepo(nombre) {
+  app.filtroRepo = nombre || null;
+  // Se recuerda la elección para la próxima visita y se refleja en ?repo= para
+  // poder compartir el enlace; el listado se filtra localmente para no perder los
+  // contadores del resto de los repositorios.
+  try {
+    if (app.filtroRepo) localStorage.setItem(CLAVE_REPO, app.filtroRepo);
+    else localStorage.removeItem(CLAVE_REPO);
+  } catch (error) {
+    // Sin localStorage (modo privado) el filtro sigue vivo en memoria.
+  }
+  try {
+    const url = new URL(location.href);
+    if (app.filtroRepo) url.searchParams.set('repo', app.filtroRepo);
+    else url.searchParams.delete('repo');
+    history.replaceState(null, '', url);
+  } catch (error) {
+    // Sin History API no es crítico.
+  }
+  renderLista();
 }
 
 function crearChips() {
@@ -281,6 +331,24 @@ function cargarTab(tab) {
   else if (tab === 'eventos' && !cache.eventos) cargarEventos(id);
 }
 
+// Marca la pestaña como ocupada mientras se pide su contenido (aria-busy) y la
+// deja lista con un mensaje de error legible y un botón para reintentar.
+function marcarCargando(panel, texto) {
+  panel.setAttribute('aria-busy', 'true');
+  panel.replaceChildren(crear('p', 'cargando', texto || 'Cargando…'));
+}
+
+function mostrarErrorCarga(panel, error, reintentar) {
+  panel.removeAttribute('aria-busy');
+  panel.replaceChildren();
+  const detalle = error && error.message ? error.message : 'error de red';
+  panel.append(crear('p', 'error', 'No se pudo cargar: ' + detalle));
+  const boton = crear('button', 'boton', 'Reintentar');
+  boton.type = 'button';
+  boton.addEventListener('click', reintentar);
+  panel.append(boton);
+}
+
 // --- Pestaña Resumen --------------------------------------------------------
 
 function filaResumen(dl, etiqueta, valor) {
@@ -349,9 +417,11 @@ function pintarResumen(panel, trabajo, alcance) {
   panel.append(bloqueUltimaSalida(trabajo.transcript));
 }
 
+// El prompt, el transcript y la última salida SOLO viven en el detalle: el listado
+// de /api/trabajos es liviano, así que el Resumen pide /api/trabajos/:id al seleccionar.
 async function cargarResumen(id) {
   const panel = porId('panel-resumen');
-  panel.replaceChildren(crear('p', 'cargando', 'Cargando resumen…'));
+  marcarCargando(panel, 'Cargando resumen…');
   try {
     const respuestas = await Promise.all([
       fetch('/api/trabajos/' + encodeURIComponent(id)),
@@ -367,11 +437,12 @@ async function cargarResumen(id) {
       cache.alcance = true;
     }
     if (app.seleccionado !== id) return;
+    panel.removeAttribute('aria-busy');
     panel.replaceChildren();
     pintarResumen(panel, detalle, alcance);
     cache.resumen = true;
   } catch (error) {
-    panel.replaceChildren(crear('p', 'error', 'No se pudo cargar el resumen.'));
+    mostrarErrorCarga(panel, error, function () { cargarResumen(id); });
   }
 }
 
@@ -590,16 +661,17 @@ function pintarDiff(panel, diff) {
 
 async function cargarDiff(id) {
   const panel = porId('panel-diff');
-  panel.replaceChildren(crear('p', 'cargando', 'Cargando diff…'));
+  marcarCargando(panel, 'Cargando diff…');
   try {
     const respuesta = await fetch('/api/trabajos/' + encodeURIComponent(id) + '/diff');
     if (!respuesta.ok) throw new Error('estado ' + respuesta.status);
     const diff = await respuesta.json();
     if (app.seleccionado !== id) return;
+    panel.removeAttribute('aria-busy');
     pintarDiff(panel, diff);
     (app.cargado[id] = app.cargado[id] || {}).diff = true;
   } catch (error) {
-    panel.replaceChildren(crear('p', 'error', 'No se pudo cargar el diff.'));
+    mostrarErrorCarga(panel, error, function () { cargarDiff(id); });
   }
 }
 
@@ -646,20 +718,22 @@ async function cargarAlcance(id) {
   const cache = app.cargado[id] || (app.cargado[id] = {});
   if (cache.alcanceDatos) {
     cache.alcance = true;
+    panel.removeAttribute('aria-busy');
     pintarAlcance(panel, cache.alcanceDatos);
     return;
   }
-  panel.replaceChildren(crear('p', 'cargando', 'Cargando alcance…'));
+  marcarCargando(panel, 'Cargando alcance…');
   try {
     const respuesta = await fetch('/api/trabajos/' + encodeURIComponent(id) + '/alcance');
     if (!respuesta.ok) throw new Error('estado ' + respuesta.status);
     const alcance = await respuesta.json();
     if (app.seleccionado !== id) return;
+    panel.removeAttribute('aria-busy');
     cache.alcanceDatos = alcance;
     cache.alcance = true;
     pintarAlcance(panel, alcance);
   } catch (error) {
-    panel.replaceChildren(crear('p', 'error', 'No se pudo cargar el alcance.'));
+    mostrarErrorCarga(panel, error, function () { cargarAlcance(id); });
   }
 }
 
@@ -689,16 +763,17 @@ function pintarEventos(panel, eventos) {
 
 async function cargarEventos(id) {
   const panel = porId('panel-eventos');
-  panel.replaceChildren(crear('p', 'cargando', 'Cargando eventos…'));
+  marcarCargando(panel, 'Cargando eventos…');
   try {
     const respuesta = await fetch('/api/trabajos/' + encodeURIComponent(id) + '/eventos');
     if (!respuesta.ok) throw new Error('estado ' + respuesta.status);
     const eventos = await respuesta.json();
     if (app.seleccionado !== id) return;
+    panel.removeAttribute('aria-busy');
     pintarEventos(panel, eventos);
     (app.cargado[id] = app.cargado[id] || {}).eventos = true;
   } catch (error) {
-    panel.replaceChildren(crear('p', 'error', 'No se pudieron cargar los eventos.'));
+    mostrarErrorCarga(panel, error, function () { cargarEventos(id); });
   }
 }
 
@@ -776,12 +851,18 @@ function conectar() {
 
 // --- Teclado ----------------------------------------------------------------
 
-function moverSeleccion(delta) {
+function moverSeleccion(delta, conservarFoco) {
   const visibles = trabajosVisibles();
   if (visibles.length === 0) return;
   let indice = visibles.findIndex(function (trabajo) { return trabajo.id === app.seleccionado; });
   indice = indice === -1 ? 0 : Math.max(0, Math.min(visibles.length - 1, indice + delta));
   seleccionar(visibles[indice].id);
+  if (conservarFoco) {
+    // Navegar con j/k mientras se escribe en la búsqueda: el foco se queda ahí.
+    const busqueda = porId('filtro-texto');
+    if (busqueda) busqueda.focus();
+    return;
+  }
   const li = app.filas.get(visibles[indice].id);
   if (li && li.firstChild) li.firstChild.focus();
 }
@@ -800,11 +881,18 @@ function enCampoDeTexto(elemento) {
 function atajos(evento) {
   if (evento.altKey || evento.ctrlKey || evento.metaKey) return;
   const campo = enCampoDeTexto(evento.target);
+  const enBusqueda = evento.target === porId('filtro-texto');
   if (evento.key === '/' && !campo) { evento.preventDefault(); porId('filtro-texto').focus(); return; }
   if (evento.key === '?' && !campo) { evento.preventDefault(); abrirAyuda(); return; }
+  // j/k navegan la lista AUN con el foco en la búsqueda (y no lo pierden): así se
+  // filtra y se recorre el resultado en el mismo gesto.
+  if (evento.key === 'j' || evento.key === 'k') {
+    if (campo && !enBusqueda) return;
+    evento.preventDefault();
+    moverSeleccion(evento.key === 'j' ? 1 : -1, enBusqueda);
+    return;
+  }
   if (campo) return;
-  if (evento.key === 'j') { evento.preventDefault(); moverSeleccion(1); return; }
-  if (evento.key === 'k') { evento.preventDefault(); moverSeleccion(-1); return; }
   if (evento.key === 'f') { evento.preventDefault(); alternarSeguir(); return; }
   if (evento.key >= '1' && evento.key <= '5') { evento.preventDefault(); activarTab(TABS[Number(evento.key) - 1]); }
 }
@@ -836,7 +924,13 @@ function iniciar() {
   const copiar = porId('copiar-id');
   if (copiar) copiar.addEventListener('click', function () { copiarId(copiar); });
   document.addEventListener('keydown', atajos);
-  app.seleccionado = new URLSearchParams(location.search).get('job');
+  const parametros = new URLSearchParams(location.search);
+  app.seleccionado = parametros.get('job');
+  // El parámetro ?repo= manda sobre lo recordado; si no, se recupera la última elección.
+  app.filtroRepo = parametros.get('repo');
+  if (!app.filtroRepo) {
+    try { app.filtroRepo = localStorage.getItem(CLAVE_REPO); } catch (error) { app.filtroRepo = null; }
+  }
   cargarTodo();
   conectar();
 }

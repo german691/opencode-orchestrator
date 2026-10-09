@@ -8,6 +8,7 @@ import {
   ordenarTrabajos,
   filtrarTrabajos,
   contarEstados,
+  contarPorRepo,
   parsearParche,
   resumenAlcance,
   resumenTarea,
@@ -103,6 +104,26 @@ test('filtrarTrabajos: por categoría de chip y por texto', () => {
   assert.deepEqual(filtrarTrabajos(lista, { estado: 'activos', texto: 'tests' }).map((j) => j.id), ['a2']);
   assert.deepEqual(filtrarTrabajos(lista, { texto: 'nada' }), []);
   assert.deepEqual(contarEstados(lista), { todos: 6, activos: 2, fallidos: 2, terminados: 2 });
+});
+
+test('filtrarTrabajos: por repositorio (repoNombre) y conteo por repo', () => {
+  const lista = [
+    { id: 'a1', estado: 'running', repoNombre: 'compras' },
+    { id: 'a2', estado: 'queued', repoNombre: 'compras' },
+    { id: 'b1', estado: 'failed', repoNombre: 'opencode-orchestrator' },
+    { id: 'c1', estado: 'succeeded' },
+  ];
+  assert.deepEqual(filtrarTrabajos(lista, { repo: 'compras' }).map((j) => j.id), ['a1', 'a2']);
+  assert.deepEqual(filtrarTrabajos(lista, { repo: 'compras', estado: 'activos' }).map((j) => j.id), ['a1', 'a2']);
+  assert.deepEqual(filtrarTrabajos(lista, { repo: 'opencode-orchestrator' }).map((j) => j.id), ['b1']);
+  assert.deepEqual(filtrarTrabajos(lista, { repo: 'nope' }), []);
+  // Sin repo no filtra por repositorio.
+  assert.equal(filtrarTrabajos(lista, { repo: null }).length, 4);
+
+  const conteos = contarPorRepo(lista);
+  assert.equal(conteos.get('compras'), 2);
+  assert.equal(conteos.get('opencode-orchestrator'), 1);
+  assert.equal(conteos.get('(sin repo)'), 1);
 });
 
 test('parsearParche: archivo modificado con números de línea por lado', () => {

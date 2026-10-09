@@ -94,7 +94,11 @@ export function crearFlujoEventos({
    */
   function atender(req, res) {
     if (clientes.size >= maxClientes) {
-      res.writeHead(503, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.writeHead(503, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      });
       res.end(JSON.stringify({ error: 'demasiados clientes de stream' }));
       return false;
     }
