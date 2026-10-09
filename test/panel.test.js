@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { semaforo, listarTrabajos, detalleDeTrabajo, sinAnsi, idValido } from '../src/panel/datos.js';
 import { crearServidorPanel } from '../src/panel/servidor.js';
+import { crearRegistroEventos } from '../src/core/eventos.js';
 
 const AHORA = 1_800_000_000_000;
 
@@ -141,4 +142,55 @@ test('lista: un trabajo en cola muestra por qué espera; uno corriendo no', () =
   const lista = listarTrabajos(jobs, AHORA);
   assert.deepEqual(lista.find((j) => j.id === 'cola1').espera, espera);
   assert.equal(lista.find((j) => j.id === 'corre').espera, null);
+});
+
+test('auditoría: la página y /api/eventos usan el registro inyectado con filtros', async () => {
+  const { base, jobs } = crearEstado();
+  crearJob(jobs, 'abc', { estado: 'running', titulo: 'Demo', creadoEn: AHORA - 1000 }, { stderr: 'hola', hace: 1 });
+  const registro = crearRegistroEventos({ dir: path.join(base, 'auditoria'), ahora: () => AHORA });
+  registro.registrar({ tipo: 'job.creado', jobId: 'abc', actor: 'herramienta:coding' });
+  registro.registrar({ tipo: 'job.fin', jobId: 'otro', motivo: 'listo' });
+  const servidor = crearServidorPanel({ baseDir: base, ahora: () => AHORA, registro });
+  await new Promise((r) => servidor.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${servidor.address().port}`;
+  try {
+    const pagina = await fetch(`${url}/auditoria`);
+    assert.equal(pagina.status, 200);
+    const html = await pagina.text();
+    assert.match(html, /Auditoría de opencode/);
+    assert.match(html, /job\.creado/);
+    assert.match(html, /\/\?job=abc/);
+
+    const todos = await (await fetch(`${url}/api/eventos`)).json();
+    assert.equal(todos.eventos.length, 2);
+
+    const porJob = await (await fetch(`${url}/api/eventos?jobId=abc`)).json();
+    assert.deepEqual(porJob.eventos.map((e) => e.jobId), ['abc']);
+
+    const porTipo = await (await fetch(`${url}/api/eventos?tipo=job.fin`)).json();
+    assert.deepEqual(porTipo.eventos.map((e) => e.tipo), ['job.fin']);
+
+    const paginaFiltrada = await fetch(`${url}/auditoria?jobId=otro`);
+    const htmlFiltrado = await paginaFiltrada.text();
+    assert.match(htmlFiltrado, /job\.fin/);
+    assert.match(htmlFiltrado, /\/\?job=otro/);
+    assert.equal(htmlFiltrado.includes('/?job=abc'), false);
+  } finally {
+    await new Promise((r) => servidor.close(r));
+  }
+});
+
+test('auditoría: sin registro inyectado avisa que no está disponible', async () => {
+  const { base } = crearEstado();
+  const servidor = crearServidorPanel({ baseDir: base, ahora: () => AHORA });
+  await new Promise((r) => servidor.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${servidor.address().port}`;
+  try {
+    const pagina = await fetch(`${url}/auditoria`);
+    assert.equal(pagina.status, 200);
+    assert.match(await pagina.text(), /Auditoría no disponible/);
+    assert.equal((await fetch(`${url}/api/eventos`)).status, 503);
+  } finally {
+    await new Promise((r) => servidor.close(r));
+  }
 });
