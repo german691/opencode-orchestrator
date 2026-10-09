@@ -325,6 +325,27 @@ test('estilos: layout de páginas secundarias con tokens, cabecera fija y foco v
   });
 });
 
+test('estilos: páginas secundarias llenan el ancho con cabecera, contenedor y tablas al 100%', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    // La cabecera no debe quedar recortada a un ancho menor al de la ventana.
+    assert.match(css, /\.cabecera\{[^}]*width:100%/);
+    // `.pagina` ocupa el 100% hasta 1100px y se centra; con border-box el padding
+    // no ensancha el contenedor ni lo saca del viewport.
+    assert.match(
+      css,
+      /\.pagina\{[^}]*width:100%[^}]*max-width:1100px[^}]*margin-inline:auto[^}]*box-sizing:border-box/,
+    );
+    // Las tablas llenan su contenedor y es el envoltorio el que scrollea dentro.
+    assert.match(css, /\.tabla-auditoria\{[^}]*width:100%/);
+    assert.match(css, /\.tabla-pizarron\{[^}]*width:100%/);
+    assert.match(css, /\.tabla-envoltorio\{[^}]*overflow:auto/);
+    // A 360 px no hay scroll horizontal de página: los campos se apilan al 100%.
+    assert.match(css, /@media \(max-width:600px\)/);
+    assert.match(css, /\.filtros input,\.filtros select\{width:100%/);
+  });
+});
+
 test('pizarrón cliente: refresca sin perder scroll ni plegables y muestra el estado vacío informativo', () => {
   assert.match(PIZARRON_CLIENTE, /from '\/static\/lib\.js'/);
   assert.match(PIZARRON_CLIENTE, /formatearHoraEvento/);
