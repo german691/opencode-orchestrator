@@ -582,3 +582,36 @@ test('runner: onLanzado no se invoca si el cmd no existe', async () => {
   assert.equal(llamado, 0);
   assert.equal(resultado.pid, null);
 });
+
+test('runner: el log se acota conservando cabeza, cola y una línea marcadora', async () => {
+  const dir = dirTemporal();
+  const out = path.join(dir, 'stdout.log');
+  // 1 MB de salida con un tope de 200 KB y cabeza/cola chicas: fuerza la compactación.
+  const resultado = await correr({
+    cmd: NODE,
+    args: [fixture('volumen.js'), '1'],
+    cwd: dir,
+    stdoutPath: out,
+    timeoutMs: 30000,
+    idleTimeoutMs: 30000,
+    graceMs: 300,
+    maxLogBytes: 200_000,
+    logHeadBytes: 50_000,
+    logTailBytes: 80_000,
+  });
+
+  try {
+    assert.equal(resultado.motivo, 'exit');
+    assert.equal(resultado.code, 0);
+    // El archivo quedó por debajo del tope (no acumuló el MB completo).
+    const tamano = fs.statSync(out).size;
+    assert.ok(tamano < 200_000, `el log debería quedar por debajo del tope (${tamano})`);
+    // Conserva el principio y el final (todo 'x') y deja la marca con los bytes omitidos.
+    const texto = fs.readFileSync(out, 'utf8');
+    assert.match(texto, /\[… \d+ bytes omitidos …\]/);
+    assert.ok(texto.startsWith('x'.repeat(1000)), 'debe conservar la cabeza del log');
+    assert.ok(texto.endsWith('x'.repeat(1000)), 'debe conservar la cola del log');
+  } finally {
+    await asegurarLimpio(resultado.pgid, [resultado.pid]);
+  }
+});

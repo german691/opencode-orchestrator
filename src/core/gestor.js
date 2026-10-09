@@ -24,6 +24,7 @@ import path from 'node:path';
 
 import { esTerminal } from './estados.js';
 import { compilar } from './glob.js';
+import { leerColaDeArchivo } from './colas.js';
 import { identidadDeProceso } from './identidad.js';
 import { aRutaDelServidor } from '../rutas.js';
 import {
@@ -196,6 +197,7 @@ export class Gestor {
     autor = DEFECTOS.autor,
     registro = null,
     pizarron = null,
+    maxEnMemoria = 500,
   } = {}) {
     if (!almacen) throw new ErrorDeGestor('El gestor necesita un almacén de trabajos');
     if (!opencode || typeof opencode.cmd !== 'string' || opencode.cmd === '') {
@@ -241,8 +243,16 @@ export class Gestor {
     /** @type {number} cantidad de fallos al registrar eventos globales (para loguear el 1º y cada 100) */
     this.fallosDeEvento = 0;
     this.cerrado = false;
+    /** @type {number} tope de trabajos que el gestor carga en memoria al arrancar */
+    this.maxEnMemoria = Number.isInteger(maxEnMemoria) && maxEnMemoria > 0 ? maxEnMemoria : 500;
+    /** @type {number} trabajos que quedaron solo en disco (no cargados en memoria) */
+    this.trabajosEnDisco = 0;
+    /** @type {NodeJS.Timeout|null} timer de la retención de logs (unref) */
+    this.timerRetencion = null;
 
-    for (const trabajo of this.almacen.listar().trabajos) this.trabajos.set(trabajo.id, trabajo);
+    const inicial = this.almacen.listar({ maxEnMemoria: this.maxEnMemoria });
+    this.trabajosEnDisco = inicial.omitidos ?? 0;
+    for (const trabajo of inicial.trabajos) this.trabajos.set(trabajo.id, trabajo);
   }
 
   // ---------------------------------------------------------------------------
@@ -906,6 +916,7 @@ export class Gestor {
                 env: entorno,
                 stdoutPath: rutas.stdout,
                 stderrPath: rutas.stderr,
+                maxLogBytes: perfil.logs?.maxBytes,
                 timeoutMs: job.timeoutMs,
                 idleTimeoutMs: job.idleTimeoutMs,
                 graceMs: this.graceMs,
@@ -986,8 +997,8 @@ export class Gestor {
         const fallo = {
           codigo: resultadoProceso.code,
           motivo: resultadoProceso.motivo,
-          stderr: leerColaArchivo(rutas.stderr, 8192),
-          stdout: leerColaArchivo(rutas.stdout, 8192),
+          stderr: leerColaDeArchivo(rutas.stderr, { bytes: 8192 }),
+          stdout: leerColaDeArchivo(rutas.stdout, { bytes: 8192 }),
           duracionMs: resultadoProceso.duracionMs,
         };
         const actual = await this.#alcanceDeTrabajo({
@@ -1084,6 +1095,7 @@ export class Gestor {
                   env: entorno,
                   timeoutMs: timeoutMs ?? timeoutMutacionesMs,
                   ctl,
+                  maxLogBytes: perfil.logs?.maxBytes,
                 }),
               timeoutMs: timeoutMutacionesMs,
             });
@@ -1157,6 +1169,7 @@ export class Gestor {
             env: entorno,
             stdoutPath: path.join(rutas.dir, 'aceptacion.log'),
             stderrPath: path.join(rutas.dir, 'aceptacion.err.log'),
+            maxLogBytes: perfil.logs?.maxBytes,
             // Tope de la aceptación: el del perfil (la compuerta completa pasa de 10 min) o el por defecto.
             timeoutMs: perfil.aceptacionTimeoutMs ?? DEFECTOS.aceptacionTimeoutMs,
             graceMs: this.graceMs,
@@ -1167,14 +1180,14 @@ export class Gestor {
             ejecutada: true,
             exit: salida.code,
             motivo: salida.motivo,
-            cola: leerColaArchivo(path.join(rutas.dir, 'aceptacion.log'), 2000),
+            cola: leerColaDeArchivo(path.join(rutas.dir, 'aceptacion.log'), { bytes: 2000 }),
           };
           // Solo si falló: el bloque de fallos (qué test, qué error) suele estar en stderr o en
           // medio del stdout; sin esto había que abrir los logs a mano para saber por qué se rechazó.
           if (salida.motivo !== 'exit' || salida.code !== 0) {
             aceptado.fallos = resumirFallos({
-              stdout: leerColaArchivo(path.join(rutas.dir, 'aceptacion.log'), 400_000),
-              stderr: leerColaArchivo(path.join(rutas.dir, 'aceptacion.err.log'), 400_000),
+              stdout: leerColaDeArchivo(path.join(rutas.dir, 'aceptacion.log'), { bytes: 400_000 }),
+              stderr: leerColaDeArchivo(path.join(rutas.dir, 'aceptacion.err.log'), { bytes: 400_000 }),
             });
           }
           if (salida.motivo === 'cancelado') return this.#terminar(id, 'cancelled', { proceso, motivoFin: 'cancelado', aceptacion: aceptado, mutaciones });
@@ -1331,10 +1344,10 @@ export class Gestor {
    * Devuelve la forma que espera `ejecutarMutaciones` (`codigo`, `salida`, `timeout`).
    *
    * @param {string} comando
-   * @param {{ cwd: string, env: NodeJS.ProcessEnv, timeoutMs?: number, ctl: AbortController, logBase?: string }} opciones
+   * @param {{ cwd: string, env: NodeJS.ProcessEnv, timeoutMs?: number, ctl: AbortController, logBase?: string, maxLogBytes?: number }} opciones
    * @returns {Promise<{ codigo: number|null, salida: string, timeout: boolean }>}
    */
-  async #correrComando(comando, { cwd, env, timeoutMs, ctl, logBase }) {
+  async #correrComando(comando, { cwd, env, timeoutMs, ctl, logBase, maxLogBytes }) {
     let salida = '';
     const resultado = await ejecutar({
       cmd: '/bin/sh',
@@ -1343,6 +1356,7 @@ export class Gestor {
       env,
       stdoutPath: logBase ? `${logBase}.out.log` : undefined,
       stderrPath: logBase ? `${logBase}.err.log` : undefined,
+      maxLogBytes,
       timeoutMs,
       graceMs: this.graceMs,
       signal: ctl.signal,
@@ -1385,6 +1399,7 @@ export class Gestor {
           timeoutMs,
           ctl,
           logBase: path.join(rutas.dir, `aceptacion-${indice}`),
+          maxLogBytes: perfil.logs?.maxBytes,
         });
       },
       provisionar: async (indice) => {
@@ -1617,6 +1632,7 @@ export class Gestor {
         env: entornoRevision,
         stdoutPath: path.join(rutas.dir, 'revision.log'),
         stderrPath: path.join(rutas.dir, 'revision.err.log'),
+        maxLogBytes: perfil.logs?.maxBytes,
         timeoutMs: REVISION_TIMEOUT_MS,
         graceMs: this.graceMs,
         signal: ctl.signal,
@@ -1717,7 +1733,17 @@ export class Gestor {
 
   /** @param {string} id @returns {object} */
   obtener(id) {
-    const trabajo = this.trabajos.get(id);
+    let trabajo = this.trabajos.get(id);
+    if (!trabajo) {
+      // Los trabajos más antiguos no se cargan en memoria (retención); se leen del
+      // disco bajo demanda y quedan cacheados para las siguientes consultas.
+      try {
+        trabajo = this.almacen.leer(id) ?? undefined;
+      } catch {
+        trabajo = undefined;
+      }
+      if (trabajo) this.trabajos.set(id, trabajo);
+    }
     if (!trabajo) throw new ErrorDeGestor(`No existe el trabajo '${id}'`);
     return trabajo;
   }
@@ -1773,7 +1799,7 @@ export class Gestor {
   /** Cola del log de la aceptación de un trabajo. */
   logsAceptacion(id, bytes = 4000) {
     this.obtener(id);
-    return leerColaArchivo(path.join(this.almacen.rutasDeLogs(id).dir, 'aceptacion.log'), bytes);
+    return leerColaDeArchivo(path.join(this.almacen.rutasDeLogs(id).dir, 'aceptacion.log'), { bytes });
   }
 
   /**
@@ -1893,12 +1919,71 @@ export class Gestor {
   }
 
   /**
+   * Purga los logs PESADOS de los trabajos TERMINADOS hace más de los días que
+   * declara la retención del perfil de su repo, conservando `job.json`. Registra un
+   * evento global `cleanup` con la cantidad y los bytes liberados. Best-effort.
+   *
+   * @param {{ ahora?: number }} [opciones]
+   * @returns {Promise<{ cantidad: number, bytes: number }>}
+   */
+  async purgarLogsAntiguos({ ahora = Date.now() } = {}) {
+    let cantidad = 0;
+    let bytes = 0;
+    // Se recorren TODOS los trabajos del disco (no solo los cargados en memoria): los
+    // más viejos son justamente los candidatos a purgar.
+    const todos = this.almacen.listar({ maxEnMemoria: 0 }).trabajos;
+    /** @type {Map<string, object|null>} */
+    const perfiles = new Map();
+    for (const trabajo of todos) {
+      if (!esTerminal(trabajo.estado)) continue;
+      let perfil = perfiles.get(trabajo.repo);
+      if (perfil === undefined) {
+        try {
+          perfil = await this.#perfilDe(trabajo.repo);
+        } catch {
+          perfil = null;
+        }
+        perfiles.set(trabajo.repo, perfil);
+      }
+      const dias = perfil?.retencion?.dias ?? 30;
+      const limite = ahora - dias * 24 * 60 * 60 * 1000;
+      if ((trabajo.finEn ?? 0) >= limite) continue;
+      const res = this.almacen.purgarLogsDeTrabajo(trabajo.id);
+      cantidad += res.cantidad;
+      bytes += res.bytes;
+    }
+    if (cantidad > 0) this.#evento({ tipo: 'cleanup', detalle: { motivo: 'retencion', cantidad, bytes } });
+    return { cantidad, bytes };
+  }
+
+  /**
+   * Inicia la retención de logs: una purga inmediata y luego cada `intervaloMs`
+   * (6 h por defecto). El timer es `unref()` para no mantener vivo el proceso, y
+   * `cerrar()` lo cancela.
+   *
+   * @param {{ intervaloMs?: number }} [opciones]
+   * @returns {void}
+   */
+  iniciarRetencion({ intervaloMs = 6 * 60 * 60 * 1000 } = {}) {
+    if (this.timerRetencion) return;
+    void this.purgarLogsAntiguos().catch(() => {});
+    this.timerRetencion = setInterval(() => {
+      void this.purgarLogsAntiguos().catch(() => {});
+    }, intervaloMs);
+    this.timerRetencion.unref?.();
+  }
+
+  /**
    * Cierre ordenado: no acepta más trabajos, descarta la cola y cancela lo que corre
    * (matando los grupos) esperando a que liberen sus recursos.
    * @param {number} [esperaMs=20000]
    */
   async cerrar(esperaMs = 20000) {
     this.cerrado = true;
+    if (this.timerRetencion) {
+      clearInterval(this.timerRetencion);
+      this.timerRetencion = null;
+    }
     for (const id of [...this.cola]) {
       this.#guardar(id, { estado: 'cancelled', motivoFin: 'servidor_cerrado' });
       this.#evento({ tipo: 'job.cancelado', jobId: id, motivo: 'servidor_cerrado' });
@@ -1913,23 +1998,3 @@ export class Gestor {
   }
 }
 
-/** Últimos `bytes` de un archivo de texto (vacío si no existe). */
-function leerColaArchivo(ruta, bytes) {
-  try {
-    const fd = fs.openSync(ruta, 'r');
-    try {
-      const tamano = fs.fstatSync(fd).size;
-      const aLeer = Math.min(bytes, tamano);
-      if (aLeer === 0) return '';
-      const buffer = Buffer.alloc(aLeer);
-      fs.readSync(fd, buffer, 0, aLeer, tamano - aLeer);
-      let inicio = 0;
-      while (inicio < buffer.length && (buffer[inicio] & 0xc0) === 0x80) inicio += 1;
-      return buffer.subarray(inicio).toString('utf8');
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return '';
-  }
-}

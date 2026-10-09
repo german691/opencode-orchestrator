@@ -5,7 +5,7 @@
  *
  * Variables de entorno:
  *   ORQ_STATE_DIR        directorio de estado (por defecto ~/.local/state/opencode-orchestrator)
- *   ORQ_CONCURRENCY      tope de trabajos simultáneos (1 a 16; por defecto 3)
+ *   ORQ_CONCURRENCY      tope de trabajos simultáneos (1 a 16; por defecto 8)
  *   ORQ_OPENCODE_BIN     ejecutable de opencode (por defecto /usr/local/bin/opencode o `opencode`)
  *   OPENCODE_MODEL       modelo por defecto (proveedor/modelo)
  *   ORQ_WAIT_MS          cuánto bloquea cada llamada antes de devolver STILL RUNNING (por defecto 45000)
@@ -75,7 +75,7 @@ async function main() {
   // su cuenta más adelante). El servidor es el único que escribe el archivo vivo; cada
   // worktree recibe un symlink de solo lectura al habilitarse en el perfil del repo.
   const pizarron = crearPizarron({ dir: almacen.dir });
-  const concurrencia = Math.min(16, enteroDeEntorno('ORQ_CONCURRENCY', 3));
+  const concurrencia = Math.min(16, enteroDeEntorno('ORQ_CONCURRENCY', 8));
   const esperaMs = enteroDeEntorno('ORQ_WAIT_MS', 45000);
 
   let gestor = null;
@@ -99,6 +99,9 @@ async function main() {
       pizarron,
     });
     gestor.registrarArranque({ recuperados: perdidos });
+    // Retención de logs pesados: purga al arrancar y luego cada 6 h (unref + cancelada
+    // en gestor.cerrar()). Sin esto el estado crecería sin límite en un servidor de larga vida.
+    gestor.iniciarRetencion();
     herramientas = crearHerramientas(gestor, { esperaMs });
   } catch (error) {
     // No se aborta: el cliente ve las herramientas y recibe el motivo en cada llamada.

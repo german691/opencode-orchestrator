@@ -36,8 +36,15 @@ const TOPE_ESPERA_GRUPO_MS = 2000;
 /** Tope para vaciar las tuberías tras la salida natural del proceso. */
 const TOPE_VACIADO_PIPES_MS = 1000;
 
-/** Tope para cerrar y vaciar los archivos de log. */
-const TOPE_CIERRE_LOGS_MS = 1000;
+/**
+ * Tope por defecto de un log de trabajo (20 MB). Al superarlo se conserva la cabeza
+ * (primeros `LOG_HEAD_BYTES_DEFECTO`) y la cola (últimos `LOG_TAIL_BYTES_DEFECTO`),
+ * con una línea marcadora en el medio. Así un agente que escupe cientos de MB no
+ * llena el disco, pero se sigue viendo cómo empezó y cómo terminó.
+ */
+const LOG_MAX_BYTES_DEFECTO = 20 * 1024 * 1024;
+const LOG_HEAD_BYTES_DEFECTO = 2 * 1024 * 1024;
+const LOG_TAIL_BYTES_DEFECTO = 8 * 1024 * 1024;
 
 /**
  * Mensaje legible de un error, sin asumir que trae `.message`.
@@ -132,6 +139,10 @@ export async function matarGrupo(pgid, graceMs = 5000) {
  * @param {NodeJS.ProcessEnv} [opciones.env] entorno (si falta, hereda el del orquestador)
  * @param {string} [opciones.stdoutPath] archivo (append) para stdout
  * @param {string} [opciones.stderrPath] archivo (append) para stderr
+ * @param {number} [opciones.maxLogBytes] tope por archivo de log (por defecto 20 MB);
+ *   al superarlo se conserva la cabeza y la cola con una línea marcadora
+ * @param {number} [opciones.logHeadBytes] bytes de cabeza conservados al truncar
+ * @param {number} [opciones.logTailBytes] bytes de cola conservados al truncar
  * @param {number} [opciones.timeoutMs] tope total; 0/ausente = sin tope
  * @param {number} [opciones.idleTimeoutMs] tope sin bytes en stdout/stderr
  * @param {number} [opciones.graceMs=5000] margen SIGTERM -> SIGKILL
@@ -153,6 +164,9 @@ export function ejecutar(opciones = {}) {
     env,
     stdoutPath,
     stderrPath,
+    maxLogBytes = LOG_MAX_BYTES_DEFECTO,
+    logHeadBytes = LOG_HEAD_BYTES_DEFECTO,
+    logTailBytes = LOG_TAIL_BYTES_DEFECTO,
     timeoutMs,
     idleTimeoutMs,
     graceMs = 5000,
@@ -185,9 +199,9 @@ export function ejecutar(opciones = {}) {
   let timerTotal = null;
   /** @type {NodeJS.Timeout|null} */
   let timerIdle = null;
-  /** @type {import('node:fs').WriteStream|null} */
+  /** @type {{ escribir: (f: Buffer) => void, cerrar: () => void }|null} */
   let archivoOut = null;
-  /** @type {import('node:fs').WriteStream|null} */
+  /** @type {{ escribir: (f: Buffer) => void, cerrar: () => void }|null} */
   let archivoErr = null;
   const decOut = new StringDecoder('utf8');
   const decErr = new StringDecoder('utf8');
@@ -201,25 +215,9 @@ export function ejecutar(opciones = {}) {
     }, idleTimeoutMs);
   };
 
-  /** Escribe un fragmento respetando contrapresión (pausa la fuente si hace falta). */
-  const escribir = (archivo, fragmento, origen) => {
-    if (!archivo) return;
-    let drenado;
-    try {
-      drenado = archivo.write(fragmento);
-    } catch {
-      return; // un log que falla no debe tumbar la corrida
-    }
-    if (!drenado) {
-      origen.pause();
-      archivo.once('drain', () => {
-        try {
-          origen.resume();
-        } catch {
-          /* el flujo pudo cerrarse mientras estaba en pausa */
-        }
-      });
-    }
+  /** Escribe un fragmento en el log (síncrono: da contrapresión real al proceso). */
+  const escribir = (archivo, fragmento) => {
+    if (archivo) archivo.escribir(fragmento);
   };
 
   /** Entrega cada fragmento al observador (si lo hay) y reinicia la inactividad. */
@@ -238,27 +236,11 @@ export function ejecutar(opciones = {}) {
     programarIdle();
   };
 
-  /** Cierra un archivo de log y espera a que se vacíe, con tope para no colgar. */
-  const cerrarArchivo = (archivo) =>
-    new Promise((res) => {
-      if (!archivo) return res();
-      let listo = false;
-      const fin = () => {
-        if (!listo) {
-          listo = true;
-          res();
-        }
-      };
-      archivo.once('finish', fin);
-      archivo.once('close', fin);
-      archivo.once('error', fin);
-      try {
-        archivo.end();
-      } catch {
-        fin();
-      }
-      setTimeout(fin, TOPE_CIERRE_LOGS_MS);
-    });
+  /** Cierra un archivo de log (la escritura es síncrona: no hay nada que esperar). */
+  const cerrarArchivo = (archivo) => {
+    if (archivo) archivo.cerrar();
+    return Promise.resolve();
+  };
 
   /**
    * Único punto de resolución. Idempotente: la primera llamada gana.
@@ -388,19 +370,90 @@ export function ejecutar(opciones = {}) {
     return adjuntar();
   }
 
-  /** Abre (creando el directorio) un log en modo append. */
+  /**
+   * Abre (creando el directorio) un log en modo append con tope: al superar
+   * `maxLogBytes` conserva la cabeza (`logHeadBytes`) y la cola (`logTailBytes`)
+   * separadas por una línea marcadora. POR QUÉ escritura síncrona: además de dar
+   * contrapresión real al proceso (bloquea cuando el disco no da abasto), permite
+   * truncar el archivo sin pelear con el buffer de un WriteStream. El descriptor
+   * conserva la bandera O_APPEND, así que sigue siendo válido tras reescribir.
+   */
   const abrirLog = (ruta) => {
     if (!ruta) return null;
+    let fd;
     try {
       fs.mkdirSync(path.dirname(ruta), { recursive: true });
-      const archivo = fs.createWriteStream(ruta, { flags: 'a' });
-      archivo.on('error', () => {
-        /* un log roto no debe tumbar la corrida */
-      });
-      return archivo;
+      fd = fs.openSync(ruta, 'a');
     } catch {
       return null;
     }
+    let bytes = 0;
+    try {
+      bytes = fs.fstatSync(fd).size;
+    } catch {
+      /* tamaño desconocido: se recalcula al truncar */
+    }
+    const head = Number.isFinite(logHeadBytes) && logHeadBytes > 0 ? logHeadBytes : 0;
+    const tail = Number.isFinite(logTailBytes) && logTailBytes > 0 ? logTailBytes : 0;
+    return {
+      escribir(fragmento) {
+        if (fd === null) return;
+        try {
+          fs.writeSync(fd, fragmento);
+          bytes += fragmento.length;
+        } catch {
+          return; // un log que falla no debe tumbar la corrida
+        }
+        if (bytes > maxLogBytes) this.compactar();
+      },
+      /** Conserva cabeza + marcador + cola; el fd sigue válido con O_APPEND. */
+      compactar() {
+        if (fd === null) return;
+        let contenido;
+        try {
+          contenido = fs.readFileSync(ruta);
+        } catch {
+          return;
+        }
+        if (contenido.length <= maxLogBytes) {
+          bytes = contenido.length;
+          return;
+        }
+        let cabeza = head;
+        let cola = tail;
+        // Si la configuración pide más cabeza+cola que el propio tope, se escala para
+        // que el archivo quede por debajo del tope y no se compacte en cada byte.
+        if (cabeza + cola >= maxLogBytes) {
+          cabeza = Math.floor(maxLogBytes * 0.1);
+          cola = Math.floor(maxLogBytes * 0.4);
+        }
+        if (contenido.length <= cabeza + cola) {
+          bytes = contenido.length;
+          return;
+        }
+        let inicioCola = contenido.length - cola;
+        // No cortar un carácter multibyte: avanzar hasta el inicio del siguiente.
+        while (inicioCola < contenido.length && (contenido[inicioCola] & 0xc0) === 0x80) inicioCola += 1;
+        const omitidos = inicioCola - cabeza;
+        const marcador = Buffer.from(`\n[… ${omitidos} bytes omitidos …]\n`, 'utf8');
+        const compactado = Buffer.concat([contenido.subarray(0, cabeza), marcador, contenido.subarray(inicioCola)]);
+        try {
+          fs.writeFileSync(ruta, compactado);
+        } catch {
+          return;
+        }
+        bytes = compactado.length;
+      },
+      cerrar() {
+        if (fd === null) return;
+        try {
+          fs.closeSync(fd);
+        } catch {
+          /* ignora */
+        }
+        fd = null;
+      },
+    };
   };
   archivoOut = abrirLog(stdoutPath);
   archivoErr = abrirLog(stderrPath);
@@ -436,7 +489,7 @@ export function ejecutar(opciones = {}) {
 
   if (child.stdout) {
     child.stdout.on('data', (fragmento) => {
-      escribir(archivoOut, fragmento, child.stdout);
+      escribir(archivoOut, fragmento);
       alDato('stdout', fragmento);
     });
     child.stdout.on('error', () => {
@@ -445,7 +498,7 @@ export function ejecutar(opciones = {}) {
   }
   if (child.stderr) {
     child.stderr.on('data', (fragmento) => {
-      escribir(archivoErr, fragmento, child.stderr);
+      escribir(archivoErr, fragmento);
       alDato('stderr', fragmento);
     });
     child.stderr.on('error', () => {

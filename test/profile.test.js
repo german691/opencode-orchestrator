@@ -485,3 +485,28 @@ test('validarPerfil: revisor se delega en configRevisor (default deshabilitado)'
     (error) => error.errores.some((e) => /revisor\.model: campo desconocido/.test(e)),
   );
 });
+
+test('validarPerfil: logs opcional con tope por defecto de 20 MB y rango 1 MB–200 MB', () => {
+  const base = { version: 1, name: 'sistema' };
+  const porDefecto = validarPerfil(base).logs;
+  assert.equal(porDefecto.maxBytes, 20 * 1024 * 1024);
+  assert.equal(perfilPorDefecto('x').logs.maxBytes, 20 * 1024 * 1024);
+  assert.equal(validarPerfil({ ...base, logs: { maxBytes: 1024 * 1024 } }).logs.maxBytes, 1024 * 1024);
+  assert.equal(validarPerfil({ ...base, logs: { maxBytes: 200 * 1024 * 1024 } }).logs.maxBytes, 200 * 1024 * 1024);
+  assert.throws(() => validarPerfil({ ...base, logs: [] }), /logs: debe ser un objeto/);
+  assert.throws(() => validarPerfil({ ...base, logs: { maxBytes: 1000 } }), /logs\.maxBytes/);
+  assert.throws(() => validarPerfil({ ...base, logs: { maxBytes: 'x' } }), /logs\.maxBytes/);
+  assert.throws(() => validarPerfil({ ...base, logs: { otro: 1 } }), /logs\.otro: campo desconocido/);
+});
+
+test('validarPerfil: retencion opcional con defaults 30 días / 500 en memoria', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.deepEqual(validarPerfil(base).retencion, { dias: 30, maxEnMemoria: 500 });
+  assert.deepEqual(perfilPorDefecto('x').retencion, { dias: 30, maxEnMemoria: 500 });
+  assert.deepEqual(validarPerfil({ ...base, retencion: { dias: 7 } }).retencion, { dias: 7, maxEnMemoria: 500 });
+  assert.deepEqual(validarPerfil({ ...base, retencion: { maxEnMemoria: 10 } }).retencion, { dias: 30, maxEnMemoria: 10 });
+  assert.throws(() => validarPerfil({ ...base, retencion: [] }), /retencion: debe ser un objeto/);
+  assert.throws(() => validarPerfil({ ...base, retencion: { dias: 0 } }), /retencion\.dias/);
+  assert.throws(() => validarPerfil({ ...base, retencion: { maxEnMemoria: 0 } }), /retencion\.maxEnMemoria/);
+  assert.throws(() => validarPerfil({ ...base, retencion: { raro: 1 } }), /retencion\.raro: campo desconocido/);
+});

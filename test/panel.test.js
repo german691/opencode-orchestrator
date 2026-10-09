@@ -218,3 +218,28 @@ test('auditoría: sin registro inyectado avisa que no está disponible', async (
     await new Promise((r) => servidor.close(r));
   }
 });
+
+test('servidor: HEAD responde como GET sin cuerpo y un fallo interno se informa con 500', async () => {
+  const { base, jobs } = crearEstado();
+  crearJob(jobs, 'abc', { estado: 'running', titulo: 'Demo', creadoEn: AHORA - 1000 }, { stderr: 'hola', hace: 1 });
+  // Un registro cuya lectura revienta fuerza la rama 500 del manejador.
+  const registroRoto = { listar() { throw new Error('boom de auditoría'); } };
+  const servidor = crearServidorPanel({ baseDir: base, ahora: () => AHORA, registro: registroRoto });
+  await new Promise((r) => servidor.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${servidor.address().port}`;
+  try {
+    // HEAD se atiende igual que GET pero sin cuerpo (Node descarta el body).
+    const head = await fetch(`${url}/`, { method: 'HEAD' });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.equal(await head.text(), '');
+
+    // El error interno no tumba el servidor: responde 500 con el mensaje.
+    const roto = await fetch(`${url}/api/estado`);
+    assert.equal(roto.status, 500);
+    const cuerpo = await roto.json();
+    assert.match(cuerpo.error, /boom de auditoría/);
+  } finally {
+    await new Promise((r) => servidor.close(r));
+  }
+});

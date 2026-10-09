@@ -55,6 +55,16 @@ test('etiquetaEstado: texto + ícono + clase, nunca solo color', () => {
   assert.equal(motivoLegible(''), '');
 });
 
+test('motivoLegible: motivos de espera del planificador con su texto en claro', () => {
+  // Estos motivos los emite el planificador (tope por repo, tope global y esperar
+  // la integración): sin traducción la UI mostraría el crudo y confundiría.
+  assert.equal(motivoLegible('tope_del_repo'), 'tope de concurrencia del repositorio');
+  assert.equal(motivoLegible('tope_global'), 'tope global de concurrencia');
+  assert.equal(motivoLegible('esperando_integracion'), 'esperando que se integre un trabajo anterior');
+  // Un motivo desconocido se devuelve crudo (nunca vacío si el motivo existe).
+  assert.equal(motivoLegible('inventado'), 'inventado');
+});
+
 test('ordenarTrabajos: activos primero y, dentro del grupo, el más reciente', () => {
   const lista = [
     { id: 'ok', estado: 'succeeded', creadoEn: 300 },

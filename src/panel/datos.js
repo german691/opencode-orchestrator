@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { leerColaDeArchivo } from '../core/colas.js';
 import { resumirFallos } from '../core/fallos.js';
 import { verificarCambios } from '../core/scope.js';
 import { diffDeTrabajo } from './diff.js';
@@ -64,21 +65,8 @@ function mtimeMs(archivo) {
 
 /** Lee los últimos `max` bytes de un archivo como texto (vacío si no existe). */
 export function leerCola(archivo, max = MAX_BYTES_LOG) {
-  let fd;
-  try {
-    fd = fs.openSync(archivo, 'r');
-    const { size } = fs.fstatSync(fd);
-    const inicio = Math.max(0, size - max);
-    const buffer = Buffer.alloc(size - inicio);
-    fs.readSync(fd, buffer, 0, buffer.length, inicio);
-    let texto = buffer.toString('utf8');
-    if (inicio > 0) texto = `[... recortado ...]\n${texto.slice(texto.indexOf('\n') + 1)}`;
-    return texto;
-  } catch {
-    return '';
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
+  // El panel sí marca el recorte: avisa que se perdió el comienzo del log.
+  return leerColaDeArchivo(archivo, { bytes: max, recortar: true });
 }
 
 /** Quita secuencias de color ANSI del transcript de opencode. */

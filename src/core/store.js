@@ -22,6 +22,7 @@ import path from 'node:path';
 
 import { ESTADOS, esTerminal, transicionar } from './estados.js';
 import { existeGrupo, matarGrupo } from './runner.js';
+import { leerColaDeArchivo } from './colas.js';
 import { coincideIdentidad, identidadDeProceso, bootIdActual } from './identidad.js';
 
 /** Id de trabajo en disco: minúsculas/dígitos, guiones, sin punto ni barra. */
@@ -29,6 +30,15 @@ const ID_ALMACEN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 /** Tope por defecto del `audit.log` antes de rotar (5 MB). */
 const TOPE_AUDITORIA_BYTES = 5 * 1024 * 1024;
+
+/** Tope por defecto del `events.jsonl` de un trabajo antes de rotar (2 MB). */
+const TOPE_EVENTS_BYTES = 2 * 1024 * 1024;
+
+/** Tope por defecto de trabajos que el almacén carga en memoria (los activos siempre entran). */
+const MAX_EN_MEMORIA_POR_DEFECTO = 500;
+
+/** Sufijos de log pesado de un trabajo que la retención puede purgar conservando `job.json`. */
+const LOGS_PESADOS = /\.(log|jsonl)$/;
 
 /** Edad por defecto de un temporal huérfano antes de poder borrarlo (1 h). */
 const EDAD_TEMPORAL_MS = 60 * 60 * 1000;
@@ -120,11 +130,13 @@ function sanearPrompt(valor, profundidad = 0) {
  */
 export class AlmacenDeTrabajos {
   /**
-   * @param {{ dir?: string, topeAuditoriaBytes?: number }} [opciones] directorio de
+   * @param {{ dir?: string, topeAuditoriaBytes?: number, topeEventsBytes?: number, maxEnMemoria?: number }} [opciones] directorio de
    *   estado; por defecto `$ORQ_STATE_DIR` o `~/.local/state/opencode-orchestrator`.
    *   `topeAuditoriaBytes` es el tamaño a partir del cual `auditar` rota el log.
+   *   `topeEventsBytes` es el tamaño a partir del cual `agregarEvento` rota el `events.jsonl`.
+   *   `maxEnMemoria` acota cuántos trabajos devuelve `listar` en memoria (los activos siempre entran).
    */
-  constructor({ dir, topeAuditoriaBytes = TOPE_AUDITORIA_BYTES } = {}) {
+  constructor({ dir, topeAuditoriaBytes = TOPE_AUDITORIA_BYTES, topeEventsBytes = TOPE_EVENTS_BYTES, maxEnMemoria = MAX_EN_MEMORIA_POR_DEFECTO } = {}) {
     const base =
       dir ??
       process.env.ORQ_STATE_DIR ??
@@ -136,6 +148,12 @@ export class AlmacenDeTrabajos {
     this.topeAuditoriaBytes = Number.isFinite(topeAuditoriaBytes) && topeAuditoriaBytes > 0
       ? topeAuditoriaBytes
       : TOPE_AUDITORIA_BYTES;
+    /** @type {number} tope de bytes del events.jsonl de cada trabajo antes de rotar */
+    this.topeEventsBytes = Number.isFinite(topeEventsBytes) && topeEventsBytes > 0
+      ? topeEventsBytes
+      : TOPE_EVENTS_BYTES;
+    /** @type {number} tope de trabajos cargados en memoria (los activos siempre entran) */
+    this.maxEnMemoria = Number.isInteger(maxEnMemoria) && maxEnMemoria > 0 ? maxEnMemoria : MAX_EN_MEMORIA_POR_DEFECTO;
     /** @type {{ pid: number, identidad: object|null }|null} nuestro lock de instancia */
     this._lockPropio = null;
   }
@@ -316,10 +334,14 @@ export class AlmacenDeTrabajos {
    * estado y límite. Los `job.json` corruptos se OMITEN y se reportan en
    * `corruptos` para que un archivo roto no tumbe el listado completo.
    *
-   * @param {{ estado?: string, limite?: number }} [opciones]
-   * @returns {{ trabajos: object[], corruptos: Array<{ id: string, error: string }> }}
+   * @param {{ estado?: string, limite?: number, maxEnMemoria?: number }} [opciones]
+   *   `maxEnMemoria` acota cuántos trabajos se cargan en memoria: se conservan los
+   *   `maxEnMemoria` más recientes MÁS todos los activos (no terminales), y el resto
+   *   queda en disco (se informa cuántos en `omitidos`). Sin el parámetro rige el
+   *   tope del constructor. Un valor no positivo equivale a "sin tope".
+   * @returns {{ trabajos: object[], corruptos: Array<{ id: string, error: string }>, omitidos: number }}
    */
-  listar({ estado, limite } = {}) {
+  listar({ estado, limite, maxEnMemoria } = {}) {
     const dirJobs = path.join(this.dir, 'jobs');
     /** @type {object[]} */
     const trabajos = [];
@@ -330,7 +352,7 @@ export class AlmacenDeTrabajos {
     try {
       entradas = fs.readdirSync(dirJobs, { withFileTypes: true });
     } catch {
-      return { trabajos, corruptos }; // aún no hay directorio de trabajos
+      return { trabajos, corruptos, omitidos: 0 }; // aún no hay directorio de trabajos
     }
 
     for (const entrada of entradas) {
@@ -348,13 +370,61 @@ export class AlmacenDeTrabajos {
 
     trabajos.sort((a, b) => (b.creadoEn ?? 0) - (a.creadoEn ?? 0));
     let resultado = trabajos;
+    const tope = Number.isInteger(maxEnMemoria) ? maxEnMemoria : this.maxEnMemoria;
+    let omitidos = 0;
+    if (Number.isInteger(tope) && tope > 0 && resultado.length > tope) {
+      // Se conservan los `tope` más recientes (por fecha) y TODOS los activos: un
+      // trabajo en curso nunca puede quedar fuera de la memoria del gestor.
+      const conservados = new Map(resultado.slice(0, tope).map((t) => [t.id, t]));
+      for (const trabajo of resultado) {
+        if (!esTerminal(trabajo.estado)) conservados.set(trabajo.id, trabajo);
+      }
+      resultado = resultado.filter((t) => conservados.has(t.id));
+      omitidos = trabajos.length - resultado.length;
+    }
     if (estado !== undefined) resultado = resultado.filter((t) => t.estado === estado);
     if (Number.isInteger(limite) && limite >= 0) resultado = resultado.slice(0, limite);
-    return { trabajos: resultado, corruptos };
+    return { trabajos: resultado, corruptos, omitidos };
   }
 
   /**
-   * Agrega un evento al `events.jsonl` del trabajo con marca de tiempo.
+   * Purga los logs PESADOS de un trabajo (stdout/stderr, aceptación, eventos) conservando
+   * `job.json` y el resto de la metadata. La usa la retención del perfil para que un
+   * directorio de estado de larga vida no crezca sin límite.
+   *
+   * @param {string} id
+   * @returns {{ cantidad: number, bytes: number }} archivos borrados y bytes liberados
+   */
+  purgarLogsDeTrabajo(id) {
+    validarId(id);
+    const dir = this.rutasDeLogs(id).dir;
+    let entradas;
+    try {
+      entradas = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return { cantidad: 0, bytes: 0 };
+    }
+    let cantidad = 0;
+    let bytes = 0;
+    for (const entrada of entradas) {
+      if (!entrada.isFile() || !LOGS_PESADOS.test(entrada.name)) continue;
+      const ruta = path.join(dir, entrada.name);
+      try {
+        bytes += fs.statSync(ruta).size;
+        fs.rmSync(ruta, { force: true });
+        cantidad += 1;
+      } catch {
+        /* best-effort: un log que no se puede borrar no debe romper la retención */
+      }
+    }
+    return { cantidad, bytes };
+  }
+
+  /**
+   * Agrega un evento al `events.jsonl` del trabajo con marca de tiempo. Si el archivo
+   * ya alcanzó `topeEventsBytes`, lo rota a `events.1.jsonl` (un solo respaldo) antes de
+   * escribir. POR QUÉ: sin tope, los eventos de un trabajo muy hablador crecerían sin
+   * límite en un servidor de larga vida.
    * @param {string} id
    * @param {object} [evento]
    * @returns {object} el evento persistido
@@ -367,6 +437,15 @@ export class AlmacenDeTrabajos {
       ...(esObjetoPlano(evento) ? evento : {}),
       ocurridoEn: Date.now(),
     };
+    // Rotación simple: si el archivo superó el tope, se renombra a `events.1.jsonl`
+    // (se sobrescribe el respaldo anterior) y se empieza uno nuevo.
+    try {
+      if (fs.statSync(rutas.events).size >= this.topeEventsBytes) {
+        fs.renameSync(rutas.events, `${rutas.events}.1`);
+      }
+    } catch {
+      /* ausente o no rotable: se sigue anexando al mismo archivo */
+    }
     fs.appendFileSync(rutas.events, `${JSON.stringify(completo)}\n`);
     return completo;
   }
@@ -429,24 +508,8 @@ export class AlmacenDeTrabajos {
     const archivo = ARCHIVO_CANAL[canal];
     if (!archivo) throw new Error(`canal desconocido: ${canal} (permitidos: stdout, stderr, events)`);
     const cantidad = Number.isInteger(bytes) && bytes > 0 ? bytes : 0;
-    const ruta = path.join(this.rutasDeLogs(id).dir, archivo);
-    if (cantidad === 0 || !fs.existsSync(ruta)) return '';
-
-    const fd = fs.openSync(ruta, 'r');
-    try {
-      const tamano = fs.fstatSync(fd).size;
-      const aLeer = Math.min(cantidad, tamano);
-      if (aLeer === 0) return '';
-      const buffer = Buffer.alloc(aLeer);
-      fs.readSync(fd, buffer, 0, aLeer, tamano - aLeer);
-      // Si el corte cayó dentro de un carácter, el primer byte del buffer es de
-      // continuación (10xxxxxx). Lo saltamos hasta el inicio del siguiente carácter.
-      let inicio = 0;
-      while (inicio < buffer.length && (buffer[inicio] & 0xc0) === 0x80) inicio += 1;
-      return buffer.subarray(inicio).toString('utf8');
-    } finally {
-      fs.closeSync(fd);
-    }
+    if (cantidad === 0) return '';
+    return leerColaDeArchivo(path.join(this.rutasDeLogs(id).dir, archivo), { bytes: cantidad });
   }
 
   /**
