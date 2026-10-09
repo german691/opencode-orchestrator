@@ -536,6 +536,73 @@ const ESCENARIOS = [
     },
     esperado: { arrancar: ['c', 'v'], bloqueados: [] },
   },
+  {
+    // `esperarIntegracion`: no partir de una base que quedará obsoleta cuando integren
+    // al anterior (hoy arranca y el conflicto aparece recién en el merge).
+    nombre: 'esperarIntegracion: no arranca si otro succeeded del mismo repo solapa writes',
+    entrada: {
+      cola: ['a'],
+      corriendo: [],
+      concurrencia: 2,
+      trabajos: {
+        a: job({ writes: ['src/**'], esperarIntegracion: true }),
+        previo: job({ estado: 'succeeded', writes: ['src/a.js'] }),
+      },
+    },
+    esperado: { arrancar: [], bloqueados: [] },
+  },
+  {
+    nombre: 'esperarIntegracion: un merged no frena (ya está integrado)',
+    entrada: {
+      cola: ['a'],
+      corriendo: [],
+      concurrencia: 2,
+      trabajos: {
+        a: job({ writes: ['src/**'], esperarIntegracion: true }),
+        previo: job({ estado: 'merged', writes: ['src/a.js'] }),
+      },
+    },
+    esperado: { arrancar: ['a'], bloqueados: [] },
+  },
+  {
+    nombre: 'esperarIntegracion: writes disjuntos no frenan',
+    entrada: {
+      cola: ['a'],
+      corriendo: [],
+      concurrencia: 2,
+      trabajos: {
+        a: job({ writes: ['src/**'], esperarIntegracion: true }),
+        previo: job({ estado: 'succeeded', writes: ['docs/**'] }),
+      },
+    },
+    esperado: { arrancar: ['a'], bloqueados: [] },
+  },
+  {
+    nombre: 'esperarIntegracion apagado por defecto: arranca aunque solape',
+    entrada: {
+      cola: ['a'],
+      corriendo: [],
+      concurrencia: 2,
+      trabajos: {
+        a: job({ writes: ['src/**'] }),
+        previo: job({ estado: 'succeeded', writes: ['src/a.js'] }),
+      },
+    },
+    esperado: { arrancar: ['a'], bloqueados: [] },
+  },
+  {
+    nombre: 'esperarIntegracion: repos distintos no se frenan',
+    entrada: {
+      cola: ['a'],
+      corriendo: [],
+      concurrencia: 2,
+      trabajos: {
+        a: job({ repo: 'r2', writes: ['src/**'], esperarIntegracion: true }),
+        previo: job({ repo: 'r1', estado: 'succeeded', writes: ['src/a.js'] }),
+      },
+    },
+    esperado: { arrancar: ['a'], bloqueados: [] },
+  },
 ];
 
 for (const escenario of ESCENARIOS) {
@@ -588,4 +655,21 @@ test('planificador: concurrencia inválida se trata como 0', () => {
   const resultado = elegibles({ cola: ['a'], corriendo: [], concurrencia: -1, trabajos: { a: job() } });
   assert.deepEqual(resultado.arrancar, []);
   assert.deepEqual(resultado.bloqueados, []);
+});
+
+test('planificador: esperarIntegracion explica a qué ids espera', () => {
+  const r = elegibles({
+    cola: ['a', 'libre'],
+    corriendo: [],
+    concurrencia: 3,
+    trabajos: {
+      a: job({ writes: ['src/**'], esperarIntegracion: true }),
+      previoA: job({ estado: 'succeeded', writes: ['src/a.js'] }),
+      previoB: job({ estado: 'succeeded', writes: ['src/b.js'] }),
+      libre: job({ writes: ['docs/**'], esperarIntegracion: true }),
+    },
+  });
+  assert.deepEqual(r.arrancar, ['libre']);
+  assert.deepEqual(r.esperas.get('a'), { motivo: 'esperando_integracion', por: ['previoA', 'previoB'] });
+  assert.equal(r.esperas.has('libre'), false);
 });

@@ -10,6 +10,7 @@
 
 import { compilar } from './glob.js';
 import { normalizarParalelo } from './paralelo.js';
+import { parametrosDeTexto } from './recetas.js';
 import { configReanudacion } from './reanudacion.js';
 import { configRevisor } from './revisor.js';
 import { homedir } from 'node:os';
@@ -53,7 +54,22 @@ const CLAVES_PERFIL = new Set([
   'mutaciones',
   'pizarron',
   'revisor',
+  'recetas',
+  'autoIntegrar',
+  'esperarIntegracion',
 ]);
+
+/** Campos permitidos dentro de una receta. */
+const CLAVES_RECETA = new Set(['descripcion', 'prompt', 'writes', 'reads', 'mode', 'accept', 'resources', 'solo_aceptacion']);
+
+/** Modos admitidos en una receta (los mismos que `opencode.js`). */
+const MODOS_RECETA = new Set(['readonly', 'safe', 'auto']);
+
+/** Campos permitidos dentro de `autoIntegrar`. */
+const CLAVES_AUTOINTEGRAR = new Set(['habilitado', 'requiereRevisor', 'soloSinAdvertencias']);
+
+/** Valores por defecto de la auto-integración (apagada salvo opt-in). */
+const AUTOINTEGRAR_POR_DEFECTO = Object.freeze({ habilitado: false, requiereRevisor: false, soloSinAdvertencias: true });
 
 /** Campos permitidos dentro de `pizarron`. */
 const CLAVES_PIZARRON = new Set(['habilitado', 'maxEntradasPorTrabajo']);
@@ -132,6 +148,69 @@ function validarRama(campo, valor, errores) {
   // Mismos caracteres que rechaza workspace.js: mejor fallar al validar el perfil que al crear el worktree.
   for (const caracter of ['~', '^', ':', '?', '*', '[', '\\']) {
     if (valor.includes(caracter)) errores.push(`${campo}: no puede contener '${caracter}'`);
+  }
+}
+
+/**
+ * Valida la sección `recetas` y acumula los problemas con la ruta del campo.
+ *
+ * POR QUÉ validar acá y no al expandir: un typo en una receta (p. ej. `pompt`) no
+ * se detecta hasta que alguien la usa. Validar el perfil entero al cargarlo hace
+ * que el error aparezca en `opencode_profile` y no a mitad de un trabajo.
+ *
+ * @param {unknown} recetas
+ * @param {string[]} errores acumulador
+ * @returns {void}
+ */
+function validarRecetas(recetas, errores) {
+  if (!esObjetoPlano(recetas)) {
+    errores.push('recetas: debe ser un objeto de recetas');
+    return;
+  }
+  for (const [nombre, receta] of Object.entries(recetas)) {
+    const base = `recetas.${nombre}`;
+    if (nombre.trim() === '') errores.push('recetas: el nombre de la receta no puede estar vacío');
+    if (!esObjetoPlano(receta)) {
+      errores.push(`${base}: debe ser un objeto`);
+      continue;
+    }
+    for (const clave of Object.keys(receta)) {
+      if (!CLAVES_RECETA.has(clave)) errores.push(`${base}.${clave}: campo desconocido`);
+    }
+    if (typeof receta.prompt !== 'string' || receta.prompt.trim() === '') {
+      errores.push(`${base}.prompt: debe ser un texto no vacío`);
+    }
+    for (const campo of ['writes', 'reads', 'resources']) {
+      if (receta[campo] === undefined) continue;
+      if (!Array.isArray(receta[campo]) || receta[campo].some((v) => typeof v !== 'string' || v.trim() === '')) {
+        errores.push(`${base}.${campo}: debe ser un array de textos no vacíos`);
+      }
+    }
+    // Los `writes` sin placeholders se comprueban como globs; los que tienen
+    // `{param}` no pueden compilarse hasta expandir y se validan al enviar.
+    if (Array.isArray(receta.writes)) {
+      receta.writes.forEach((patron, indice) => {
+        if (typeof patron !== 'string' || parametrosDeTexto(patron).length > 0) return;
+        try {
+          compilar(patron);
+        } catch (error) {
+          errores.push(`${base}.writes[${indice}]: patrón inválido (${error.message})`);
+        }
+      });
+    }
+    if (receta.mode !== undefined && !MODOS_RECETA.has(receta.mode)) {
+      errores.push(`${base}.mode: debe ser 'readonly', 'safe' o 'auto'`);
+    }
+    if (
+      receta.accept !== undefined &&
+      typeof receta.accept !== 'string' &&
+      !esObjetoPlano(receta.accept)
+    ) {
+      errores.push(`${base}.accept: debe ser un texto o un objeto { paralelo }`);
+    }
+    if (receta.solo_aceptacion !== undefined && typeof receta.solo_aceptacion !== 'boolean') {
+      errores.push(`${base}.solo_aceptacion: debe ser true o false`);
+    }
   }
 }
 
@@ -385,6 +464,36 @@ export function validarPerfil(objeto) {
     }
   }
 
+  // Sección opcional `recetas`: plantillas de tarea con parámetros que el orquestador
+  // invoca por nombre (`receta: <nombre>` + `params`). Su validación es estructural;
+  // los valores concretos se comprueban al expandir (ver src/core/recetas.js).
+  if (objeto.recetas !== undefined) validarRecetas(objeto.recetas, errores);
+
+  // Sección opcional `esperarIntegracion`: un trabajo no arranca si otro del mismo repo,
+  // ya `succeeded` y sin integrar, escribe los mismos patrones (evita partir de una base
+  // que quedará obsoleta y generar conflictos de merge).
+  if (objeto.esperarIntegracion !== undefined && typeof objeto.esperarIntegracion !== 'boolean') {
+    errores.push('esperarIntegracion: debe ser true o false');
+  }
+
+  // Sección opcional `autoIntegrar`: integra solo los trabajos safe que terminan bien.
+  let autoIntegrar = { ...AUTOINTEGRAR_POR_DEFECTO };
+  if (objeto.autoIntegrar !== undefined) {
+    if (!esObjetoPlano(objeto.autoIntegrar)) {
+      errores.push('autoIntegrar: debe ser un objeto');
+    } else {
+      for (const clave of Object.keys(objeto.autoIntegrar)) {
+        if (!CLAVES_AUTOINTEGRAR.has(clave)) errores.push(`autoIntegrar.${clave}: campo desconocido`);
+      }
+      for (const clave of ['habilitado', 'requiereRevisor', 'soloSinAdvertencias']) {
+        if (objeto.autoIntegrar[clave] !== undefined && typeof objeto.autoIntegrar[clave] !== 'boolean') {
+          errores.push(`autoIntegrar.${clave}: debe ser true o false`);
+        }
+      }
+      autoIntegrar = { ...AUTOINTEGRAR_POR_DEFECTO, ...objeto.autoIntegrar };
+    }
+  }
+
   // Sección opcional `mutaciones`: el agente declara en `.orq/mutaciones.json` cambios de
   // texto; el servidor los aplica, corre el comando y restaura. `exigirTodas` convierte una
   // mutación no detectada en rechazo; `habilitado: false` desactiva la ejecución.
@@ -505,7 +614,34 @@ export function validarPerfil(objeto) {
     pizarron,
     // Revisor automático de solo lectura sobre trabajos safe exitosos (opt-in).
     revisor,
+    // Recetas del repo: plantillas de tarea con parámetros (p. ej. `tests de {modulo}`).
+    recetas: copiarRecetas(objeto.recetas),
+    // Auto-integración de trabajos safe exitosos (opt-in del perfil).
+    autoIntegrar,
+    // Si es true, un trabajo espera a que se integren los que solapan sus writes.
+    esperarIntegracion: objeto.esperarIntegracion === true,
   };
+}
+
+/**
+ * Copia superficial (con arrays clonados) de la sección `recetas`.
+ * @param {unknown} recetas
+ * @returns {Record<string, object>}
+ */
+function copiarRecetas(recetas) {
+  if (!esObjetoPlano(recetas)) return {};
+  /** @type {Record<string, object>} */
+  const copia = {};
+  for (const [nombre, receta] of Object.entries(recetas)) {
+    if (!esObjetoPlano(receta)) continue;
+    copia[nombre] = {
+      ...receta,
+      ...(Array.isArray(receta.writes) ? { writes: [...receta.writes] } : {}),
+      ...(Array.isArray(receta.reads) ? { reads: [...receta.reads] } : {}),
+      ...(Array.isArray(receta.resources) ? { resources: [...receta.resources] } : {}),
+    };
+  }
+  return copia;
 }
 
 /**
@@ -568,6 +704,9 @@ export function perfilPorDefecto(nombreRepo) {
     mutaciones: { ...MUTACIONES_POR_DEFECTO },
     pizarron: { ...PIZARRON_POR_DEFECTO },
     revisor: configRevisor(undefined),
+    recetas: {},
+    autoIntegrar: { ...AUTOINTEGRAR_POR_DEFECTO },
+    esperarIntegracion: false,
   };
 }
 

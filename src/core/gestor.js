@@ -39,6 +39,7 @@ import { leerManifiesto, ejecutarMutaciones, nombreManifiesto } from './mutacion
 import { ejecutarParalelo, normalizarParalelo } from './paralelo.js';
 import { elegibles } from './planificador.js';
 import { cargarPerfil, perfilPorDefecto, resolverRaizWorktrees } from './profile.js';
+import { expandirReceta } from './recetas.js';
 import { decidirReanudacion, esFalloDeTransporte, textoAdvertencia } from './reanudacion.js';
 import { construirPromptRevision, debeRevisar, parsearVeredicto, resumenRevision } from './revisor.js';
 import { crearProveedor } from './recursos.js';
@@ -364,11 +365,14 @@ export class Gestor {
     // integración, o re-verificación de un trabajo rechazado ya arreglado). No necesita prompt.
     // Algunos clientes con el esquema de la herramienta en caché mandan los booleanos como texto
     // ("true"): se aceptan, o `solo_aceptacion` se ignoraría y correría al agente sin querer.
-    const soloAceptacion = spec.solo_aceptacion === true || spec.solo_aceptacion === 'true';
+    // `receta`: nombre de una receta del perfil que se expande con `params` (el prompt
+    // resultante puede no venir en la llamada, por eso se difiere la exigencia de prompt).
+    const conReceta = typeof spec.receta === 'string' && spec.receta !== '';
+    let soloAceptacion = spec.solo_aceptacion === true || spec.solo_aceptacion === 'true';
     if (soloAceptacion && (typeof spec.prompt !== 'string' || spec.prompt.trim() === '')) {
       spec = { ...spec, prompt: 'Solo aceptación (no se ejecuta el agente).' };
     }
-    if (typeof spec.prompt !== 'string' || spec.prompt.trim() === '') {
+    if (!conReceta && (typeof spec.prompt !== 'string' || spec.prompt.trim() === '')) {
       throw new ErrorDeGestor('`prompt` es obligatorio');
     }
     if (spec.base !== undefined && spec.base !== 'base' && spec.base !== 'integracion') {
@@ -412,6 +416,39 @@ export class Gestor {
       throw new ErrorDeGestor('cwd debe estar dentro del repositorio');
     }
     const perfil = await this.#perfilDe(repo);
+
+    // Expansión de la receta: el prompt final es el de la receta más las notas que hayan
+    // venido en la llamada; los campos explícitos de la llamada pisan a los de la receta.
+    if (conReceta) {
+      const definicion = perfil.recetas?.[spec.receta];
+      if (!definicion) {
+        const declaradas = Object.keys(perfil.recetas ?? {});
+        throw new ErrorDeGestor(
+          `receta desconocida '${spec.receta}' (el perfil declara: ${declaradas.join(', ') || 'ninguna'})`,
+        );
+      }
+      let expandida;
+      try {
+        expandida = expandirReceta(definicion, spec.params ?? {});
+      } catch (error) {
+        throw new ErrorDeGestor(`receta '${spec.receta}': ${mensajeDeError(error)}`);
+      }
+      const notas =
+        typeof spec.prompt === 'string' && spec.prompt.trim() !== ''
+          ? `\n\nNotas adicionales:\n${spec.prompt}`
+          : '';
+      spec = {
+        ...spec,
+        prompt: `${expandida.prompt}${notas}`,
+        mode: spec.mode !== undefined ? spec.mode : expandida.mode,
+        writes: spec.writes !== undefined ? spec.writes : expandida.writes,
+        reads: spec.reads !== undefined ? spec.reads : expandida.reads,
+        resources: spec.resources !== undefined ? spec.resources : expandida.resources,
+        accept: spec.accept !== undefined ? spec.accept : expandida.accept,
+        solo_aceptacion: spec.solo_aceptacion !== undefined ? spec.solo_aceptacion : expandida.solo_aceptacion,
+      };
+      soloAceptacion = spec.solo_aceptacion === true || spec.solo_aceptacion === 'true';
+    }
 
     // Solo-aceptación y retomar un trabajo necesitan SIEMPRE un worktree propio.
     const exigeWorktree = soloAceptacion || origen !== null;
@@ -474,8 +511,14 @@ export class Gestor {
     // por defecto (lint, tests) correría en vano sobre el árbol real. Una `accept` explícita sí corre.
     let aceptacion = null;
     if (spec.accept !== undefined && spec.accept !== null && spec.accept !== '') {
-      if (typeof spec.accept !== 'string') throw new ErrorDeGestor('`accept` debe ser un texto');
-      aceptacion = Object.hasOwn(perfil.accept ?? {}, spec.accept) ? perfil.accept[spec.accept] : spec.accept;
+      if (typeof spec.accept === 'string') {
+        aceptacion = Object.hasOwn(perfil.accept ?? {}, spec.accept) ? perfil.accept[spec.accept] : spec.accept;
+      } else if (esAceptacionValida(spec.accept)) {
+        // Compuerta en fragmentos pasada directamente (p. ej. desde una receta del perfil).
+        aceptacion = spec.accept;
+      } else {
+        throw new ErrorDeGestor('`accept` debe ser un texto o un objeto { paralelo }');
+      }
     } else if (origen?.aceptacion) {
       aceptacion = origen.aceptacion; // retomar: la misma aceptación que el trabajo original
     } else if (modo !== 'readonly' && esAceptacionValida(perfil.accept?.default)) {
@@ -515,6 +558,9 @@ export class Gestor {
       writes,
       resources,
       after,
+      // Opt-in del perfil: el planificador no lo arranca mientras haya un trabajo
+      // succeeded del mismo repo, sin integrar, que solape sus writes.
+      esperarIntegracion: perfil.esperarIntegracion === true,
       files,
       aceptacion,
       modelo: spec.model ?? this.modelo,
@@ -1170,7 +1216,7 @@ export class Gestor {
           soloArchivos: archivosTrabajo,
         });
       }
-      return this.#terminar(id, 'succeeded', {
+      this.#terminar(id, 'succeeded', {
         proceso,
         archivos: archivosTrabajo,
         resumen,
@@ -1180,6 +1226,10 @@ export class Gestor {
         commit,
         ...(revision ? { revision } : {}),
       });
+      // Auto-integración (opt-in del perfil): se resuelve ANTES de notificar el fin, así
+      // quien espera el trabajo ya lo ve `merged` (o `succeeded` con la advertencia).
+      await this.#autoIntegrar(id, perfil);
+      return;
     } catch (error) {
       const mensaje = error instanceof Error ? error.message : String(error);
       try {
@@ -1363,7 +1413,10 @@ export class Gestor {
     if (typeof raizTrabajo !== 'string' || raizTrabajo === '') return;
     try {
       const rutaAporte = path.join(raizTrabajo, DIR_ORQ, 'aporte.json');
-      const res = this.pizarron.fusionarAporte(id, rutaAporte);
+      // Tope de entradas por trabajo: el aporte entero podría inundar el pizarrón. Se
+      // recorta a un archivo temporal en el estado del trabajo (pizarron.js no se toca).
+      const rutaRecortada = this.#aporteRecortado(id, rutaAporte, perfil.pizarron?.maxEntradasPorTrabajo);
+      const res = this.pizarron.fusionarAporte(id, rutaRecortada ?? rutaAporte);
       const fusionadas = res?.fusionadas ?? 0;
       const conflictos = res?.conflictos ?? 0;
       if (fusionadas > 0 || conflictos > 0) {
@@ -1373,6 +1426,89 @@ export class Gestor {
     } catch {
       /* el pizarrón jamás debe afectar al trabajo */
     }
+  }
+
+  /**
+   * Devuelve la ruta de un aporte RECORTADO a las primeras `max` entradas, escrito en el
+   * directorio de estado del trabajo, o `null` si no hace falta recortar.
+   *
+   * POR QUÉ una copia: `pizarron.js` lee un archivo, así que para aplicar el tope sin
+   * tocar su API se le pasa este temporal. Si el aporte ya entra en el tope, se devuelve
+   * `null` y se usa el original (se preserva el comportamiento actual).
+   *
+   * @param {string} id
+   * @param {string} rutaAporte ruta del `.orq/aporte.json` del worktree
+   * @param {number|undefined} max tope de entradas por trabajo
+   * @returns {string|null}
+   */
+  #aporteRecortado(id, rutaAporte, max) {
+    if (!Number.isInteger(max) || max < 1) return null;
+    let aporte;
+    try {
+      aporte = JSON.parse(fs.readFileSync(rutaAporte, 'utf8'));
+    } catch {
+      return null; // ausente o corrupto: que lo maneje el pizarrón como hasta ahora
+    }
+    if (aporte === null || typeof aporte !== 'object' || Array.isArray(aporte)) return null;
+    if (!Array.isArray(aporte.entradas) || aporte.entradas.length <= max) return null;
+    try {
+      const destino = path.join(this.almacen.rutasDeLogs(id).dir, 'aporte-recortado.json');
+      fs.writeFileSync(destino, JSON.stringify({ ...aporte, entradas: aporte.entradas.slice(0, max) }));
+      return destino;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Auto-integración (opt-in del perfil `autoIntegrar`): cuando un trabajo `safe` con
+   * commit termina `succeeded` y cumple las condiciones, se integra solo en la rama de
+   * integración reutilizando `integrar` (misma lógica que `opencode_merge`; nunca avanza
+   * la base). Ante conflicto queda `succeeded` con una advertencia y el motivo.
+   *
+   * @param {string} id
+   * @param {object|null} perfil
+   * @returns {Promise<void>}
+   */
+  async #autoIntegrar(id, perfil) {
+    const config = perfil?.autoIntegrar;
+    if (config?.habilitado !== true) return;
+    const trabajo = this.trabajos.get(id);
+    if (!trabajo || trabajo.estado !== 'succeeded' || trabajo.mode !== 'safe') return;
+    const resultado = trabajo.resultado ?? {};
+    if (!resultado.commit) return; // sin commit no hay nada que integrar
+    if (config.requiereRevisor && resultado.revision?.veredicto !== 'APRUEBA') {
+      this.#eventoDeTrabajo(id, { tipo: 'autointegracion_omitida', motivo: 'revision_no_aprueba' });
+      return;
+    }
+    const advertencias = Array.isArray(resultado.advertencias) ? resultado.advertencias : [];
+    if (config.soloSinAdvertencias && advertencias.length > 0) {
+      this.#eventoDeTrabajo(id, { tipo: 'autointegracion_omitida', motivo: 'con_advertencias' });
+      return;
+    }
+    let res;
+    try {
+      res = await this.integrar(id, { actor: 'servidor:auto' });
+    } catch (error) {
+      res = { ok: false, motivo: mensajeDeError(error) };
+    }
+    const actual = this.trabajos.get(id);
+    if (res.ok) {
+      // `integrar` ya dejó `merged` y registró el evento `merge` con actor 'servidor:auto'.
+      this.#guardar(id, { resultado: { ...actual.resultado, autoIntegrado: true, autoIntegradoEn: res.rama } }, 'servidor:auto');
+      this.#eventoDeTrabajo(id, { tipo: 'autointegrado', sha: res.sha, rama: res.rama });
+      return;
+    }
+    const motivo =
+      res.motivo === 'base_no_sincronizable'
+        ? 'no se pudo sincronizar la base dentro de la integración'
+        : Array.isArray(res.conflictos) && res.conflictos.length > 0
+          ? `conflictos: ${res.conflictos.join(', ')}`
+          : res.motivo ?? 'no se pudo integrar';
+    const advert =
+      `No se pudo integrar automáticamente (${motivo}). Queda succeeded: integralo con opencode_merge.`;
+    this.#guardar(id, { resultado: { ...actual.resultado, advertencias: [...advertencias, advert] } }, 'servidor:auto');
+    this.#eventoDeTrabajo(id, { tipo: 'autointegracion_fallida', motivo: res.motivo ?? null, conflictos: res.conflictos ?? null });
   }
 
   /**
@@ -1661,6 +1797,8 @@ export class Gestor {
         this.almacen.auditar({ accion: 'avanzar_base', id, ok: base.ok, sha: base.sha, motivo: base.motivo });
         this.#evento({ tipo: 'avanzar_base', jobId: id, actor, detalle: { ok: base.ok, sha: base.sha, motivo: base.motivo } });
       }
+      // Con `esperarIntegracion`, los trabajos frenados por este ya pueden arrancar.
+      this.#bombear();
       return { ok: true, sha: resultado.sha, rama: perfil.integrationBranch, baseAvanzada: base, base: perfil.baseBranch };
     }
     this.#eventoDeTrabajo(id, { tipo: 'integracion_con_conflictos', conflictos: resultado.conflictos });

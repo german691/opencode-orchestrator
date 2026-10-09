@@ -129,7 +129,7 @@ const vivo = (pid) => {
   }
 };
 
-test('el servidor expone las 11 herramientas y su stdout es solo protocolo', async () => {
+test('el servidor expone las 13 herramientas y su stdout es solo protocolo', async () => {
   const e = montarEscenario();
   const s = iniciarServidor(e);
   const init = await s.rpc('initialize', { protocolVersion: '2024-11-05' });
@@ -137,7 +137,7 @@ test('el servidor expone las 11 herramientas y su stdout es solo protocolo', asy
   const { result } = await s.rpc('tools/list');
   assert.deepEqual(
     result.tools.map((t) => t.name).sort(),
-    ['opencode_board_get', 'opencode_board_post', 'opencode_cancel', 'opencode_cleanup', 'opencode_coding', 'opencode_list', 'opencode_logs', 'opencode_merge', 'opencode_profile', 'opencode_wait', 'opencode_wait_any'],
+    ['opencode_batch', 'opencode_board_get', 'opencode_board_post', 'opencode_cancel', 'opencode_cleanup', 'opencode_coding', 'opencode_list', 'opencode_logs', 'opencode_merge', 'opencode_profile', 'opencode_status', 'opencode_wait', 'opencode_wait_any'],
   );
   s.proceso.stdin.end();
   const { codigo } = await s.salida;
@@ -411,6 +411,36 @@ test('opencode_board_post y opencode_board_get operan sobre el pizarrón vía el
 
   const inexistente = await s.llamar('opencode_board_get', { clave: 'no.existe' });
   assert.match(texto(inexistente), /no existe/);
+
+  s.proceso.stdin.end();
+  await s.salida;
+});
+
+test('opencode_batch encola varias tareas en una llamada y opencode_status resume el estado', async () => {
+  const e = montarEscenario();
+  const s = iniciarServidor({ ...e, env: { ORQ_FAKE_ESCRIBIR: 'src/nuevo.js', ORQ_FAKE_DORMIR: '50' } });
+
+  const lote = await s.llamar('opencode_batch', {
+    tareas: [
+      { prompt: 'a', cwd: e.repo, mode: 'safe', writes: ['src/**'], title: 'uno' },
+      { prompt: 'b', cwd: e.repo, mode: 'safe', writes: ['src/**'], title: 'dos' },
+      // Tercera inválida: su error va en su línea sin impedir las otras dos.
+      { prompt: 'malo', cwd: e.repo, mode: 'safe' },
+    ],
+  });
+  assert.equal(lote.isError, true, 'una tarea inválida marca la respuesta como error');
+  const lineas = texto(lote).trim().split('\n');
+  assert.equal(lineas.length, 3);
+  assert.match(lineas[0], /^[0-9a-f]{8} \| uno \| \w+ \|/);
+  assert.match(lineas[1], /^[0-9a-f]{8} \| dos \| \w+ \|/);
+  assert.match(lineas[2], /^ERROR: En modo safe `writes` es obligatorio/);
+  const id = lineas[0].split(' | ')[0];
+
+  await s.llamar('opencode_wait', { job_id: id });
+  const estado = await s.llamar('opencode_status', {});
+  assert.equal(estado.isError, false, texto(estado));
+  assert.match(texto(estado), /corriendo=\d+ \| en cola=\d+ \| verificando=\d+/);
+  assert.match(texto(estado), new RegExp(`sin integrar: .*${id}`));
 
   s.proceso.stdin.end();
   await s.salida;

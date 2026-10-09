@@ -122,6 +122,35 @@ test('pizarrón: un aporte corrupto no rompe el trabajo ni ensucia el pizarrón'
   await gestor.cerrar();
 });
 
+test('pizarrón: maxEntradasPorTrabajo recorta el aporte a las primeras N entradas', async (t) => {
+  const m = await montar(t, { perfil: { pizarron: { habilitado: true, maxEntradasPorTrabajo: 2 } } });
+  const pizarron = crearPizarron({ dir: path.join(m.base, 'pizarron') });
+  const aporte = JSON.stringify({
+    entradas: [
+      { clave: 'contrato.uno', valor: 1 },
+      { clave: 'contrato.dos', valor: 2 },
+      { clave: 'contrato.tres', valor: 3 },
+    ],
+  });
+  const gestor = crearGestorConPizarron(m.almacen, {
+    entorno: entornoFalso({
+      ORQ_FAKE_ESCRIBIR_CONTENIDO: JSON.stringify([{ ruta: '.orq/aporte.json', contenido: aporte }]),
+    }),
+    pizarron,
+    home: m.home,
+    fake: m.fake,
+  });
+
+  const trabajo = await gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  const fin = await gestor.esperar(trabajo.id, 15000);
+  assert.equal(fin.estado, 'succeeded');
+
+  const claves = Object.keys(pizarron.leer().claves);
+  assert.deepEqual(claves.sort(), ['contrato.dos', 'contrato.uno'], 'solo entran las primeras 2');
+
+  await gestor.cerrar();
+});
+
 test('pizarrón deshabilitado: no crea el enlace ni agrega instrucciones al prompt', async (t) => {
   const m = await montar(t); // sin `pizarron`: por defecto deshabilitado
   const pizarron = crearPizarron({ dir: path.join(m.base, 'pizarron') });

@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { describirPizarronClave, describirPizarronLista, describirTerminado } from '../src/mcp/formato.js';
+import {
+  describirEstado,
+  describirPerfil,
+  describirPizarronClave,
+  describirPizarronLista,
+  describirTerminado,
+} from '../src/mcp/formato.js';
 
 const base = (aceptacion) => ({
   id: 'abc12345',
@@ -146,6 +152,65 @@ test('pizarrón sin clave: versión, claves truncadas a 200 y últimas 5 notas',
   assert.match(texto, /nota 2/);
   assert.match(texto, /nota 6/);
   assert.doesNotMatch(texto, /nota 1\b/);
+});
+
+test('describirTerminado: un trabajo auto-integrado agrega la línea al resumen', () => {
+  const conAuto = {
+    ...base(null),
+    estado: 'merged',
+    resultado: { autoIntegrado: true, autoIntegradoEn: 'staging' },
+  };
+  assert.match(describirTerminado(conAuto), /integrado automáticamente en staging/);
+  assert.doesNotMatch(describirTerminado({ ...base(null), resultado: {} }), /integrado automáticamente/);
+});
+
+test('describirPerfil: lista las recetas con sus parámetros requeridos', () => {
+  const texto = describirPerfil({
+    repo: '/r',
+    archivo: '/r/.opencode-orchestrator.json',
+    existe: true,
+    perfil: {
+      recetas: {
+        tests: { prompt: 'tests de {modulo}', writes: ['{modulo}/**'], descripcion: 'corre tests' },
+        revisar: { prompt: 'revisá el diff' },
+      },
+    },
+  });
+  assert.match(texto, /recetas \(2\):/);
+  assert.match(texto, /tests: params: modulo - corre tests/);
+  assert.match(texto, /revisar: sin parámetros/);
+});
+
+test('describirEstado: contadores, activos y succeeded sin integrar, con tope de líneas', () => {
+  const trabajos = [
+    { id: 'run1', estado: 'running', creadoEn: 0, titulo: 'corriendo' },
+    { id: 'ver1', estado: 'verifying', creadoEn: 0, titulo: 'verificando' },
+    { id: 'ok1', estado: 'succeeded', creadoEn: 0, finEn: 1000, titulo: 'listo' },
+    { id: 'mg1', estado: 'merged', creadoEn: 0, finEn: 1000, titulo: 'ya integrado' },
+    { id: 'fail1', estado: 'failed', creadoEn: 0, finEn: 1000, titulo: 'falló' },
+  ];
+  const texto = describirEstado({ trabajos, resumen: { corriendo: ['run1'], enCola: [] }, ahora: 2000 });
+  const lineas = texto.split('\n');
+  assert.match(lineas[0], /^corriendo=1 \| en cola=0 \| verificando=1$/);
+  assert.ok(lineas.some((l) => /^run1 \| running \|/.test(l)));
+  assert.ok(lineas.some((l) => /^ok1 \| succeeded \|/.test(l)));
+  assert.ok(!lineas.some((l) => l.startsWith('mg1')), 'merged no se lista (ya integrado)');
+  assert.ok(!lineas.some((l) => l.startsWith('fail1')), 'los fallidos no se listan');
+  assert.equal(lineas.at(-1), 'sin integrar: ok1');
+
+  // Título truncado a 60.
+  const largo = describirEstado({
+    trabajos: [{ id: 'x1', estado: 'running', creadoEn: 0, titulo: 'z'.repeat(120) }],
+    resumen: { corriendo: ['x1'], enCola: [] },
+  });
+  const fila = largo.split('\n').find((l) => l.startsWith('x1'));
+  assert.equal((fila.split(' | ')[3]).length, 61, '60 caracteres + el …');
+
+  // Tope: nunca más de 25 líneas.
+  const muchos = Array.from({ length: 40 }, (_, i) => ({ id: `j${i}`, estado: 'running', creadoEn: 0, titulo: 'x' }));
+  const tabla = describirEstado({ trabajos: muchos, resumen: { corriendo: muchos.map((t) => t.id), enCola: [] } });
+  assert.ok(tabla.split('\n').length <= 25, `tabla de ${tabla.split('\n').length} líneas`);
+  assert.match(tabla, /… \(\+\d+ más\)/);
 });
 
 test('pizarrón con clave: valor completo e historial; clave ausente se informa', () => {
