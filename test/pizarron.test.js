@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { crearPizarron, instruccionesParaAgente } from '../src/core/pizarron.js';
+import { crearPizarron, instruccionesParaAgente, MAX_APORTE_BYTES, motivoAporteInvalido } from '../src/core/pizarron.js';
 
 /** Directorios temporales a limpiar al final. */
 const dirs = [];
@@ -43,7 +43,7 @@ test('leer: sin archivo devuelve un documento vacío versión 0', () => {
   const p = crearPizarron({ dir: dirTemporal() });
   const doc = p.leer();
   assert.equal(doc.version, 0);
-  assert.deepEqual(doc.claves, {});
+  assert.deepEqual({ ...doc.claves }, {});
   assert.deepEqual(doc.notas, []);
   assert.equal(fs.existsSync(p.rutaViva()), false);
   assert.equal(p.version(), 0);
@@ -296,4 +296,83 @@ test('instruccionesParaAgente: corto y menciona los dos archivos de .orq', () =>
   assert.match(texto, /\.orq\/aporte\.json/);
   assert.match(texto, /SOLO LECTURA/i);
   assert.match(texto, /mutaciones\.json/);
+});
+
+test('post: las claves reservadas se rechazan sin romper ni contaminar el prototipo', () => {
+  const p = crearPizarron({ dir: dirTemporal(), ahora: reloj() });
+  for (const clave of ['__proto__', 'constructor', 'prototype', 'toString', 'hasOwnProperty']) {
+    const res = p.post({ clave, valor: { contaminado: true }, jobId: 'j' });
+    // `__proto__`/`constructor`/`prototype` se rechazan explícitamente; `toString` y
+    // `hasOwnProperty` ahora son claves normales (antes rompían con TypeError).
+    if (['__proto__', 'constructor', 'prototype'].includes(clave)) {
+      assert.deepEqual(res, { aplicado: false, conflicto: false, motivo: 'invalida' }, `debe rechazar ${clave}`);
+    } else {
+      assert.equal(res.aplicado, true, `${clave} debe poder publicarse como clave normal`);
+    }
+  }
+  assert.equal({}.contaminado, undefined, 'no se contaminó Object.prototype');
+  assert.equal(typeof {}.toString, 'function', 'toString sigue intacto');
+  const doc = p.leer();
+  assert.equal(Object.hasOwn(doc.claves, '__proto__'), false);
+  assert.equal(Object.hasOwn(doc.claves, 'constructor'), false);
+  assert.equal(Object.hasOwn(doc.claves, 'prototype'), false);
+});
+
+test('leer: un documento persistido con claves reservadas no contamina ni las conserva', () => {
+  const dir = dirTemporal();
+  fs.writeFileSync(
+    path.join(dir, 'pizarron.json'),
+    JSON.stringify({
+      version: 3,
+      actualizado: 10,
+      claves: {
+        '__proto__': { valor: { contaminado: true }, jobId: 'j' },
+        constructor: { valor: 1, jobId: 'j' },
+        prototype: { valor: 1, jobId: 'j' },
+        buena: { valor: 2, jobId: 'j' },
+      },
+      notas: [],
+    }),
+  );
+  const p = crearPizarron({ dir, ahora: reloj() });
+  const doc = p.leer();
+  assert.equal({}.contaminado, undefined, 'no se contaminó Object.prototype');
+  assert.equal(typeof {}.constructor, 'function');
+  assert.deepEqual(Object.keys(doc.claves), ['buena']);
+  assert.equal(doc.claves.buena.valor, 2);
+});
+
+test('fusionarAporte: un aporte mayor a 1 MB se ignora sin leerlo y lo informa', () => {
+  const dir = dirTemporal();
+  const p = crearPizarron({ dir, ahora: reloj() });
+  const ruta = path.join(dir, 'aporte.json');
+  fs.writeFileSync(ruta, Buffer.alloc(MAX_APORTE_BYTES + 1, 0x20));
+
+  assert.equal(motivoAporteInvalido(ruta), 'demasiado_grande');
+  assert.deepEqual(p.fusionarAporte('j', ruta), {
+    fusionadas: 0,
+    ignoradas: 1,
+    invalido: true,
+    motivo: 'demasiado_grande',
+  });
+  assert.equal(p.version(), 0);
+});
+
+test('fusionarAporte: un enlace que sale del worktree se ignora', () => {
+  const worktree = dirTemporal();
+  const externo = dirTemporal();
+  const destino = path.join(externo, 'afuera.json');
+  fs.writeFileSync(destino, JSON.stringify({ entradas: [{ clave: 'a', valor: 1 }] }));
+  const enlace = path.join(worktree, '.orq.json');
+  fs.symlinkSync(destino, enlace);
+
+  const p = crearPizarron({ dir: worktree, ahora: reloj() });
+  assert.equal(motivoAporteInvalido(enlace, worktree), 'fuera_del_worktree');
+  assert.deepEqual(p.fusionarAporte('j', enlace, { raizWorktree: worktree }), {
+    fusionadas: 0,
+    ignoradas: 1,
+    invalido: true,
+    motivo: 'fuera_del_worktree',
+  });
+  assert.equal(p.version(), 0);
 });

@@ -8,6 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -18,6 +19,29 @@ import {
   leerEventos,
   montar,
 } from './gestor-comun.js';
+
+/** sha256 de un Buffer, igual que en el módulo de mutaciones. */
+function sha(contenido) {
+  return createHash('sha256').update(contenido).digest('hex');
+}
+
+/**
+ * Simula una caída del servidor a mitad de una mutación: deja el archivo mutado y el
+ * journal + respaldo que `ejecutarMutaciones` habría escrito antes de mutar.
+ * @param {string} worktree
+ * @param {string} archivoRel
+ * @param {Buffer} original
+ */
+function simularMutacionPendiente(worktree, archivoRel, original) {
+  const dirOrq = path.join(worktree, '.orq');
+  fs.mkdirSync(dirOrq, { recursive: true });
+  fs.writeFileSync(path.join(worktree, archivoRel), 'MUTADO\n');
+  fs.writeFileSync(path.join(dirOrq, 'mutacion-pendiente.bak'), original);
+  fs.writeFileSync(
+    path.join(dirOrq, 'mutacion-pendiente.json'),
+    JSON.stringify({ archivo: archivoRel, sha256Original: sha(original), rutaRespaldo: '.orq/mutacion-pendiente.bak' }),
+  );
+}
 
 /**
  * Agrega y commitea un archivo en la rama main del repo montado, para que el worktree
@@ -325,6 +349,70 @@ test('aceptación paralela: un fragmento que falla rechaza y libera TODAS las ba
   const drops = llamadas.filter((s) => s.startsWith('DROP DATABASE'));
   assert.equal(drops.length, 4, 'limpieza previa + liberación de cada uno de los dos shards');
   assert.equal(fin.resultado.commit, undefined, 'un rechazo no se commitea');
+
+  await gestor.cerrar();
+});
+
+// ---------------------------------------------------------------------------
+// Recuperación de una mutación que quedó pegada por una caída del servidor
+// ---------------------------------------------------------------------------
+
+test('desde_job: restaura una mutación pendiente del worktree origen ANTES de trasladar', async (t) => {
+  const m = await montar(t);
+  await commitArchivo(m.repo, 'subA/pendiente.js', 'ORIGINAL\n');
+  const gestor = crearGestor(m.almacen, {
+    fake: m.fake,
+    entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'subA/otro.txt' }),
+    home: m.home,
+  });
+  const original = await gestor.enviar({ prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  const finOriginal = await gestor.esperar(original.id, 15000);
+  assert.equal(finOriginal.estado, 'succeeded');
+  const worktreeOrigen = finOriginal.worktree;
+
+  // El origen "murió" con una mutación aplicada y sin restaurar.
+  simularMutacionPendiente(worktreeOrigen, 'subA/pendiente.js', Buffer.from('ORIGINAL\n'));
+
+  const reintento = await gestor.enviar({
+    cwd: m.repo,
+    desde_job: original.id,
+    solo_aceptacion: true,
+    accept: 'true',
+  });
+  const finReintento = await gestor.esperar(reintento.id, 15000);
+  assert.equal(finReintento.estado, 'succeeded');
+  assert.equal(
+    fs.readFileSync(path.join(worktreeOrigen, 'subA/pendiente.js'), 'utf8'),
+    'ORIGINAL\n',
+    'el worktree origen debe quedar restaurado antes de trasladar',
+  );
+  assert.ok(
+    (finReintento.resultado.advertencias ?? []).some((a) => /se restauró un archivo que había quedado mutado/.test(a)),
+    `falta la advertencia de restauración (${(finReintento.resultado.advertencias ?? []).join(' | ')})`,
+  );
+
+  await gestor.cerrar();
+});
+
+test('arranque: al recuperar un trabajo huérfano se restaura el archivo que quedó mutado', async (t) => {
+  const m = await montar(t);
+  await commitArchivo(m.repo, 'subA/pendiente.js', 'ORIGINAL\n');
+  const gestor = crearGestor(m.almacen, {
+    fake: m.fake,
+    entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'subA/otro.txt' }),
+    home: m.home,
+  });
+  const original = await gestor.enviar({ prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  const finOriginal = await gestor.esperar(original.id, 15000);
+  const worktreeOrigen = finOriginal.worktree;
+
+  simularMutacionPendiente(worktreeOrigen, 'subA/pendiente.js', Buffer.from('ORIGINAL\n'));
+  gestor.registrarArranque({ recuperados: [original.id] });
+
+  assert.equal(fs.readFileSync(path.join(worktreeOrigen, 'subA/pendiente.js'), 'utf8'), 'ORIGINAL\n');
+  const eventos = leerEventos(m.estadoDir, original.id).filter((e) => e.tipo === 'mutacion_pendiente_recuperada');
+  assert.equal(eventos.length, 1, 'debe dejar constancia de la restauración');
+  assert.match(eventos[0].advertencia, /se restauró un archivo que había quedado mutado/);
 
   await gestor.cerrar();
 });

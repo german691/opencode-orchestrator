@@ -240,3 +240,60 @@ test('el gestor carga solo maxEnMemoria trabajos y lee los viejos del disco bajo
   assert.equal(gestor.trabajos.has('term1000'), true);
   await gestor.cerrar(200);
 });
+
+test('desde_job y after resuelven trabajos que quedaron solo en disco (retención)', async (t) => {
+  const m = await montar(t);
+  const gestor1 = crearGestor(m.almacen, {
+    fake: m.fake,
+    entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'subA/nuevo.txt' }),
+    home: m.home,
+  });
+  const original = await gestor1.enviar({ prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  const finOriginal = await gestor1.esperar(original.id, 15000);
+  assert.equal(finOriginal.estado, 'succeeded');
+  await gestor1.cerrar();
+
+  // Trabajos más nuevos: con `maxEnMemoria: 1` empujan al original fuera de la memoria.
+  const ahora = Date.now();
+  m.almacen.crear({ id: 'nuevo0001', estado: 'succeeded', repo: m.repo, creadoEn: ahora + 1000 });
+  m.almacen.crear({ id: 'nuevo0002', estado: 'succeeded', repo: m.repo, creadoEn: ahora + 2000 });
+
+  const gestor = new Gestor({
+    almacen: m.almacen,
+    opencode: { cmd: NODE, argsPrefijo: [m.fake] },
+    concurrencia: 2,
+    entornoBase: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'subB/nuevo.txt' }),
+    home: m.home,
+    graceMs: 300,
+    maxEnMemoria: 1,
+  });
+  assert.equal(gestor.trabajos.has(original.id), false, 'el original quedó solo en disco');
+
+  // `after` con un id solo en disco: no debe dar "no existe" y el dependiente debe correr.
+  const dependiente = await gestor.enviar({
+    prompt: 'B',
+    cwd: path.join(m.repo, 'subB'),
+    mode: 'safe',
+    writes: ['subB/**'],
+    after: [original.id],
+  });
+  assert.equal(gestor.trabajos.has(original.id), true, 'obtener() lo trae del disco y lo cachea');
+  const finDependiente = await gestor.esperar(dependiente.id, 15000);
+  assert.equal(finDependiente.estado, 'succeeded');
+
+  // `desde_job` con el MISMO trabajo viejo también se resuelve desde disco. Se borra
+  // de la caché para forzar la lectura de disco (el `after` de arriba lo había cacheado).
+  gestor.trabajos.delete(original.id);
+  assert.equal(gestor.trabajos.has(original.id), false);
+  const reintento = await gestor.enviar({
+    cwd: m.repo,
+    desde_job: original.id,
+    solo_aceptacion: true,
+    accept: 'test -f subA/nuevo.txt',
+  });
+  assert.equal(gestor.trabajos.has(original.id), true, 'obtener() lo trae del disco para desde_job');
+  const finReintento = await gestor.esperar(reintento.id, 15000);
+  assert.equal(finReintento.estado, 'succeeded');
+
+  await gestor.cerrar();
+});

@@ -65,6 +65,26 @@ test('listar: respeta orden y limite', (t) => {
   assert.deepEqual(registro.listar({ orden: 'asc', limite: 2 }).map((e) => e.jobId), ['a', 'b']);
 });
 
+test('listar: tras la rotación, lee también el respaldo eventos.1.jsonl', (t) => {
+  const dir = crearDir(t);
+  let reloj = AHORA;
+  const registro = crearRegistroEventos({ dir, ahora: () => reloj });
+  reloj = AHORA - 500;
+  registro.registrar({ tipo: 'job.creado', jobId: 'antiguo' });
+  // Fuerza la rotación: se llena el archivo por encima del tope y el próximo registro rota.
+  fs.appendFileSync(path.join(dir, 'eventos.jsonl'), 'x'.repeat(5 * 1024 * 1024 + 1));
+  reloj = AHORA;
+  registro.registrar({ tipo: 'job.fin', jobId: 'reciente' });
+
+  assert.equal(fs.existsSync(path.join(dir, 'eventos.1.jsonl')), true, 'debe haber rotado');
+  // El respaldo (más viejo) debe seguir visible; sin esto el panel pierde el historial.
+  assert.deepEqual(registro.listar().map((e) => e.jobId), ['reciente', 'antiguo']);
+  assert.deepEqual(registro.listar({ orden: 'asc' }).map((e) => e.jobId), ['antiguo', 'reciente']);
+  // Los filtros y el límite también aplican sobre el respaldo.
+  assert.deepEqual(registro.listar({ jobId: 'antiguo' }).map((e) => e.jobId), ['antiguo']);
+  assert.deepEqual(registro.listar({ limite: 1 }).map((e) => e.jobId), ['reciente']);
+});
+
 test('listar: ignora líneas corruptas sin fallar', (t) => {
   const dir = crearDir(t);
   const registro = crearRegistroEventos({ dir, ahora: () => AHORA });
