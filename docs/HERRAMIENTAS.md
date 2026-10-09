@@ -102,8 +102,9 @@ toda la salida sin recortar.
 
 Espera hasta ~45 s a que TERMINE alguno de varios trabajos y devuelve el resumen de los
 que ya terminaron (con su detalle) y el estado de los que siguen activos. Evita sondear
-uno por uno; repetí hasta que no quede ninguno activo. La explicación de que «no es un
-error» se imprime UNA sola vez para todos los activos, no por trabajo.
+uno por uno; repetí hasta que no quede ninguno activo. `completo: true` recupera toda la
+salida sin recortar. La explicación de que «no es un error» se imprime UNA sola vez para
+todos los activos, no por trabajo.
 
 ## `opencode_list`
 
