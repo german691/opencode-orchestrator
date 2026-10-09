@@ -8,6 +8,8 @@ import { crearServidorPanel, hostPermitido, concurrenciaDeEntorno, CONCURRENCIA_
 import { PAGINA, paginaAuditoria } from '../src/panel/pagina.js';
 import { CLIENTE } from '../src/panel/cliente.js';
 import { PIZARRON_CLIENTE } from '../src/panel/pizarron-cliente.js';
+import { svgIcono } from '../src/panel/iconos.js';
+import { contraste } from '../src/panel/cliente-lib.js';
 import { crearRegistroEventos } from '../src/core/eventos.js';
 
 const AHORA = 1_800_000_000_000;
@@ -70,7 +72,9 @@ test('estáticos: MIME correcto, ETag y 304 al revalidar', async () => {
     ['/static/app.css', /^text\/css/],
     ['/static/app.js', /^text\/javascript/],
     ['/static/lib.js', /^text\/javascript/],
+    ['/static/iconos.js', /^text\/javascript/],
     ['/static/pizarron.js', /^text\/javascript/],
+    ['/static/favicon.svg', /^image\/svg\+xml/],
   ];
   await conServidor(async (url) => {
     for (const [ruta, tipo] of esperados) {
@@ -263,7 +267,7 @@ test('UI: layout de aplicación (grid, scroll por columna, divisor ARIA y maestr
   // El divisor es una manija accesible con atributos ARIA y foco de teclado.
   assert.match(PAGINA, /id="divisor" class="divisor" role="separator" aria-orientation="vertical"/);
   assert.match(PAGINA, /aria-valuenow="380" aria-valuemin="280" aria-valuemax="560" tabindex="0"/);
-  assert.match(PAGINA, /id="volver"[^>]*>← Trabajos</);
+  assert.match(PAGINA, /id="volver"[^>]*>[\s\S]*Trabajos</);
 });
 
 test('UI: navegación por history.pushState/popstate y carga del detalle por ?job', () => {
@@ -404,7 +408,7 @@ test('estilos: layout de páginas secundarias con tokens, cabecera fija y foco v
     assert.match(css, /\.tabla-envoltorio\{/);
     assert.match(css, /position:sticky/);
     assert.match(css, /\.boton-primario\{/);
-    assert.match(css, /:focus-visible\{outline:3px solid var\(--foco\)/);
+    assert.match(css, /:focus-visible\{outline:2px solid var\(--foco\)/);
     assert.match(css, /prefers-reduced-motion:reduce/);
     assert.match(css, /\.badge-historico\{/);
   });
@@ -492,7 +496,8 @@ test('pestañas: contadores en la etiqueta, alcance solo si hay fuera, pestaña 
   assert.match(CLIENTE, /function actualizarEtiquetasTabs\(/);
   assert.match(CLIENTE, /'Diff ' \+ cache\.nDiff/);
   assert.match(CLIENTE, /'Eventos ' \+ cache\.nEventos/);
-  assert.match(CLIENTE, /'Alcance ⚠'/);
+  assert.match(CLIENTE, /texto = 'Alcance';/);
+  assert.match(CLIENTE, /aviso = true/);
   // El aviso de alcance NO aparece si no hay archivos fuera.
   assert.match(CLIENTE, /else if \(tab === 'alcance' && cache\.nFuera\)/);
   // Texto accesible para lectores de pantalla conviviendo con el contador.
@@ -521,8 +526,8 @@ test('consola: barra sticky con fuente, pausa, wrap, tamaño, copiar/descargar y
   assert.match(CLIENTE, /' de ' \+/);
   // Auto-seguimiento: pausa al subir, botón flotante con contador y reanudación.
   assert.match(CLIENTE, /debePausarSeguimiento\(/);
-  assert.match(CLIENTE, /'Ir al final ↓'/);
-  assert.match(CLIENTE, /'⏸ En pausa'/);
+  assert.match(CLIENTE, /'Ir al final'/);
+  assert.match(CLIENTE, /'En pausa'/);
   // Coloreo con refuerzo (clase por línea) y pie con el recorte.
   assert.match(CLIENTE, /claseDeLinea\(/);
   assert.match(CLIENTE, /se muestran las últimas ' \+ MAX_LINEAS/);
@@ -564,4 +569,94 @@ test('estilos ronda 2: consola a toda altura, esqueletos, scrollbars y sticky de
     assert.match(css, /\.tarjetas-resumen\{/);
     assert.match(css, /\.caja\{/);
   });
+});
+
+test('íconos: hay un SVG por estado, en 24x24, con currentColor y accesible', () => {
+  const estados = ['queued', 'provisioning', 'running', 'verifying', 'succeeded', 'merged', 'failed', 'rejected', 'cancelled', 'lost'];
+  for (const estado of estados) {
+    const svg = svgIcono(estado);
+    assert.match(svg, /^<svg /, estado);
+    assert.match(svg, /viewBox="0 0 24 24"/, estado);
+    assert.match(svg, /stroke="currentColor"/, estado);
+    assert.match(svg, /aria-hidden="true"/, estado);
+    assert.match(svg, /<(path|circle|rect) /, estado);
+  }
+  // Con etiqueta, el ícono es accesible (role=img + aria-label) en vez de oculto.
+  assert.match(svgIcono('logo', { etiqueta: 'opencode-orchestrator' }), /role="img" aria-label="opencode-orchestrator"/);
+  // El shell trae el monograma, el favicon SVG y el theme-color de ambos temas.
+  assert.match(PAGINA, /marca-logo/);
+  assert.match(PAGINA, /rel="icon" href="\/static\/favicon\.svg" type="image\/svg\+xml"/);
+  assert.match(PAGINA, /name="theme-color" content="#f7f8fa" media="\(prefers-color-scheme: light\)"/);
+  assert.match(PAGINA, /name="theme-color" content="#0e1116" media="\(prefers-color-scheme: dark\)"/);
+  assert.match(PAGINA, /<svg class="icono-svg"/);
+});
+
+test('panel: sin glifos Unicode antiguos en el JS/HTML/CSS servidos', async () => {
+  // Los íconos son SVG; ningún emoji/símbolo del diseño viejo debe quedar.
+  const prohibidos = ['⏳', '▶', '✗', '⛔', '✔', '⚠', '⊘', '✖', '⚙', '🔎', '⏸'];
+  await conServidor(async (url) => {
+    const rutas = ['/', '/auditoria', '/pizarron', '/static/app.js', '/static/lib.js', '/static/iconos.js', '/static/app.css'];
+    for (const ruta of rutas) {
+      const texto = await (await fetch(`${url}${ruta}`)).text();
+      for (const glifo of prohibidos) {
+        assert.ok(!texto.includes(glifo), `${ruta} no debe contener el glifo ${glifo}`);
+      }
+    }
+  });
+});
+
+/** Extrae los tokens hex del bloque claro y del oscuro del CSS servido. */
+function tokensDe(css) {
+  const claro = /:root\{([\s\S]*?)\}/.exec(css);
+  const oscuro = /prefers-color-scheme:dark\)\{\s*:root\{([\s\S]*?)\}\}/.exec(css);
+  const parsear = (bloque) => {
+    const mapa = {};
+    for (const coincidencia of bloque.matchAll(/--([a-z0-9-]+):(#[0-9a-fA-F]{3,6});/g)) {
+      mapa[coincidencia[1]] = coincidencia[2];
+    }
+    return mapa;
+  };
+  return { claro: parsear(claro[1]), oscuro: parsear(oscuro[1]) };
+}
+
+test('tokens: contraste AA (>=4.5 texto, >=3 UI) en tema claro y oscuro', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    const { claro, oscuro } = tokensDe(css);
+    const textos = ['texto', 'texto-2', 'texto-3'];
+    const semanticos = ['exito', 'aviso', 'error', 'en-curso', 'integrado', 'cancelado'];
+    for (const [tema, tokens] of [['claro', claro], ['oscuro', oscuro]]) {
+      for (const nombre of textos) {
+        for (const superficie of ['sup', 'sup-elev']) {
+          assert.ok(
+            contraste(tokens[nombre], tokens[superficie]) >= 4.5,
+            `${tema}: --${nombre} sobre --${superficie} debe dar >= 4.5`,
+          );
+        }
+      }
+      for (const nombre of semanticos) {
+        assert.ok(
+          contraste(tokens[nombre], tokens['sup-elev']) >= 4.5,
+          `${tema}: --${nombre} sobre --sup-elev debe dar >= 4.5`,
+        );
+      }
+      assert.ok(contraste(tokens.acento, tokens.sup) >= 3, `${tema}: --acento sobre --sup debe dar >= 3`);
+      assert.ok(contraste(tokens.foco, tokens.sup) >= 3, `${tema}: --foco sobre --sup debe dar >= 3`);
+    }
+    // Bordes/UI: el borde fuerte delimita controles y supera 3:1 sobre la base.
+    assert.ok(contraste(claro['borde-fuerte'], claro['sup-elev']) >= 3, 'claro: --borde-fuerte');
+    assert.ok(contraste(oscuro['borde-fuerte'], oscuro['sup']) >= 3, 'oscuro: --borde-fuerte');
+  });
+});
+
+test('auditoría: chips de tipo de evento coloreados por categoría', () => {
+  const eventos = [
+    { ts: 1, tipo: 'job.creado', jobId: 'abc12345', estado: 'queued', actor: 'sistema' },
+    { ts: 2, tipo: 'merge', jobId: 'abc12345', estado: 'merged', actor: 'sistema' },
+    { ts: 3, tipo: 'pizarron.post', jobId: null, estado: undefined, actor: 'agente' },
+  ];
+  const html = paginaAuditoria({ eventos });
+  assert.match(html, /class="chip-evento chip-job"[^>]*title="job\.creado">Trabajo creado/);
+  assert.match(html, /class="chip-evento chip-merge"[^>]*title="merge">Integrado/);
+  assert.match(html, /class="chip-evento chip-pizarron"/);
 });

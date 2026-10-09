@@ -10,7 +10,8 @@
  * lectura con filtros por query string; no necesita JavaScript y así funciona
  * aun con el cliente bloqueado. La paginación es un enlace «Cargar más».
  */
-import { etiquetaTipo, etiquetaTransicion, formatearHoraEvento, horaIsoEvento, motivoLegible } from './cliente-lib.js';
+import { etiquetaTipo, etiquetaTransicion, categoriaTipo, formatearHoraEvento, horaIsoEvento, motivoLegible } from './cliente-lib.js';
+import { svgIcono } from './iconos.js';
 
 /** Paso de la paginación de la auditoría (y límite por defecto). */
 export const PASO_EVENTOS = 200;
@@ -44,7 +45,7 @@ function navSecciones(actual, extra = '') {
 function cabeceraHtml({ titulo, marca, actual, extra = '' }) {
   return `<a class="saltar" href="#contenido">Saltar al contenido</a>
 <header class="cabecera">
-  <span class="cabecera-titulo"><h1>${escaparHtml(titulo)}</h1><span class="marca">${escaparHtml(marca)}</span></span>
+  <span class="cabecera-titulo"><span class="marca-logo" aria-hidden="true">${svgIcono('logo', { clase: 'icono-svg', tamano: 18 })}</span><h1>${escaparHtml(titulo)}</h1><span class="marca">${escaparHtml(marca)}</span></span>
   ${navSecciones(actual, extra)}
 </header>`;
 }
@@ -61,7 +62,10 @@ function armazonHtml({ titulo, cabecera, cuerpo, scripts = '', claseCuerpo = '' 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1116" media="(prefers-color-scheme: dark)">
 <title>${escaparHtml(titulo)}</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body${clase}>
@@ -95,8 +99,9 @@ const CUERPO_PRINCIPAL = `<div class="cuerpo" id="cuerpo">
       <form class="busqueda" role="search">
         <div class="busqueda-caja">
           <label class="oculto" for="filtro-texto">Buscar trabajo</label>
+          ${svgIcono('buscar', { clase: 'icono-svg', tamano: 15 })}
           <input id="filtro-texto" type="search" placeholder="Buscar por título, id, rama o modelo" autocomplete="off">
-          <button type="button" id="limpiar-busqueda" class="boton-limpiar" aria-label="Limpiar búsqueda" hidden>×</button>
+          <button type="button" id="limpiar-busqueda" class="boton-limpiar" aria-label="Limpiar búsqueda" hidden>${svgIcono('limpiar', { tamano: 14 })}</button>
         </div>
       </form>
       <div id="chips" class="segmentado" role="group" aria-label="Filtrar por estado"></div>
@@ -113,11 +118,11 @@ const CUERPO_PRINCIPAL = `<div class="cuerpo" id="cuerpo">
       </div>
     </div>
     <ul id="trabajos" class="trabajos" aria-label="Lista de trabajos"></ul>
-    <p id="lista-vacia" class="vacia" hidden>No hay trabajos que coincidan.</p>
+    <p id="lista-vacia" class="vacia" hidden>${svgIcono('buscar', { clase: 'icono-svg', tamano: 32 })}<span>No hay trabajos que coincidan. Probá limpiar la búsqueda o el filtro.</span></p>
   </nav>
   <div id="divisor" class="divisor" role="separator" aria-orientation="vertical" aria-label="Ajustar ancho de la lista" aria-valuenow="380" aria-valuemin="280" aria-valuemax="560" tabindex="0"></div>
   <main id="contenido" class="detalle" tabindex="-1">
-    <button type="button" id="volver" class="boton volver" hidden>← Trabajos</button>
+    <button type="button" id="volver" class="boton volver" hidden>${svgIcono('atras', { tamano: 15 })}<span>Trabajos</span></button>
     <p id="sin-seleccion" class="cargando">Elegí un trabajo de la lista.</p>
     <section id="detalle-trabajo" aria-labelledby="titulo-trabajo" hidden>
       <div class="detalle-cabecera">
@@ -188,7 +193,7 @@ function filaAuditoria(evento, titulos) {
   const transicion = etiquetaTransicion(evento);
   return (
     `<tr><td><time datetime="${escaparHtml(iso)}" title="${escaparHtml(iso)}">${escaparHtml(hora)}</time></td>` +
-    `<td><span title="${escaparHtml(evento.tipo)}">${escaparHtml(etiquetaTipo(evento.tipo))}</span>${historico}</td>` +
+    `<td><span class="chip-evento chip-${categoriaTipo(evento.tipo)}" title="${escaparHtml(evento.tipo)}">${escaparHtml(etiquetaTipo(evento.tipo))}</span>${historico}</td>` +
     `<td>${trabajo}</td>` +
     `<td>${escaparHtml(transicion)}</td>` +
     `<td>${escaparHtml(motivoLegible(evento.motivo))}</td>` +
@@ -237,9 +242,9 @@ export function paginaAuditoria({
 </div>`
       : '';
   const vacio = !disponible
-    ? '<p class="vacia" role="status">Auditoría no disponible: el panel no tiene acceso al registro de eventos.</p>'
+    ? `<p class="vacia" role="status">${svgIcono('advertencia', { clase: 'icono-svg', tamano: 32 })}<span>Auditoría no disponible: el panel no tiene acceso al registro de eventos.</span></p>`
     : eventos.length === 0
-      ? '<p class="vacia" role="status">Todavía no hay eventos. Acá se registran los cambios de estado de los trabajos, los merges, las limpiezas y los aportes al pizarrón.</p>'
+      ? `<p class="vacia" role="status">${svgIcono('archivo', { clase: 'icono-svg', tamano: 32 })}<span>Todavía no hay eventos. Acá se registran los cambios de estado de los trabajos, los merges, las limpiezas y los aportes al pizarrón.</span></p>`
       : '';
   // En el tope del límite «Cargar más» no puede avanzar (el tope lo frenaría): se oculta
   // el enlace y se explica cómo seguir, para que lo viejo no quede inalcanzable en silencio.

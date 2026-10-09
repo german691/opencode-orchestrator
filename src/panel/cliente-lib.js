@@ -19,18 +19,22 @@ const FALLIDOS = new Set(['failed', 'rejected', 'cancelled', 'lost']);
 /** Estados que se agrupan en "Terminados" (salida exitosa). */
 const TERMINADOS = new Set(['succeeded', 'merged']);
 
-/** Texto, ícono y clase por estado. El ícono y el texto evitan depender del color. */
+/**
+ * Texto, ícono y clase por estado. `icono` es el NOMBRE del ícono SVG (ver
+ * `iconos.js`), no un glifo: el cliente lo resuelve a un SVG que hereda el color
+ * y el texto sigue siendo la fuente principal de información.
+ */
 const ETIQUETAS = {
-  queued: { texto: 'En cola', icono: '⏳', clase: 'estado-cola' },
-  provisioning: { texto: 'Preparando', icono: '⚙', clase: 'estado-activo' },
-  running: { texto: 'Corriendo', icono: '▶', clase: 'estado-activo' },
-  verifying: { texto: 'Verificando', icono: '🔎', clase: 'estado-activo' },
-  succeeded: { texto: 'Terminado', icono: '✔', clase: 'estado-ok' },
-  merged: { texto: 'Integrado', icono: '✔', clase: 'estado-ok' },
-  failed: { texto: 'Falló', icono: '✖', clase: 'estado-mal' },
-  rejected: { texto: 'Rechazado', icono: '⛔', clase: 'estado-mal' },
-  cancelled: { texto: 'Cancelado', icono: '⊘', clase: 'estado-neutro' },
-  lost: { texto: 'Perdido', icono: '⚠', clase: 'estado-mal' },
+  queued: { texto: 'En cola', icono: 'queued', clase: 'estado-cola' },
+  provisioning: { texto: 'Preparando', icono: 'provisioning', clase: 'estado-activo' },
+  running: { texto: 'Corriendo', icono: 'running', clase: 'estado-activo' },
+  verifying: { texto: 'Verificando', icono: 'verifying', clase: 'estado-activo' },
+  succeeded: { texto: 'Terminado', icono: 'succeeded', clase: 'estado-ok' },
+  merged: { texto: 'Integrado', icono: 'merged', clase: 'estado-ok' },
+  failed: { texto: 'Falló', icono: 'failed', clase: 'estado-mal' },
+  rejected: { texto: 'Rechazado', icono: 'rejected', clase: 'estado-mal' },
+  cancelled: { texto: 'Cancelado', icono: 'cancelled', clase: 'estado-neutro' },
+  lost: { texto: 'Perdido', icono: 'lost', clase: 'estado-mal' },
 };
 
 /** Motivos crudos del orquestador traducidos a lenguaje claro. */
@@ -96,8 +100,9 @@ export function etiquetaTipo(tipo) {
 }
 
 /**
- * Transición legible de un evento: `ícono anterior → ícono nuevo`. Usa ícono y
- * texto juntos para no depender del color; con un solo estado devuelve ese estado.
+ * Transición legible de un evento: `estado anterior → estado nuevo`. Va solo
+ * texto (el color/ícono lo aporta el chip en la UI); con un solo estado devuelve
+ * ese estado. Nunca vacío si el evento trae estado.
  * @param {{ anterior?: string, estado?: string }|null|undefined} evento
  * @returns {string}
  */
@@ -105,12 +110,27 @@ export function etiquetaTransicion(evento) {
   const datos = evento ?? {};
   const { estado } = datos;
   if (estado === undefined || estado === null || estado === '') return '';
-  const base = ETIQUETAS[estado] ?? { texto: String(estado), icono: '•' };
-  const destino = `${base.icono} ${base.texto}`;
+  const destino = (ETIQUETAS[estado] ?? { texto: String(estado) }).texto;
   const { anterior } = datos;
   if (anterior === undefined || anterior === null || anterior === '') return destino;
-  const previo = ETIQUETAS[anterior] ?? { texto: String(anterior), icono: '•' };
-  return `${previo.icono} ${previo.texto} → ${destino}`;
+  const previo = (ETIQUETAS[anterior] ?? { texto: String(anterior) }).texto;
+  return `${previo} → ${destino}`;
+}
+
+/**
+ * Categoría de un tipo de evento para colorear el chip de la auditoría. Agrupa
+ * por prefijo; lo desconocido cae en `otro` (sin color semántico, para no mentir).
+ * @param {string|null|undefined} tipo
+ * @returns {'servidor'|'job'|'merge'|'pizarron'|'cleanup'|'otro'}
+ */
+export function categoriaTipo(tipo) {
+  const valor = String(tipo ?? '');
+  if (valor.startsWith('servidor.')) return 'servidor';
+  if (valor.startsWith('pizarron.')) return 'pizarron';
+  if (valor === 'merge' || valor === 'avanzar_base') return 'merge';
+  if (valor === 'cleanup') return 'cleanup';
+  if (valor.startsWith('job.')) return 'job';
+  return 'otro';
 }
 
 /**
@@ -197,7 +217,7 @@ export function motivoLegible(motivo) {
  * @returns {{ texto: string, icono: string, clase: string }}
  */
 export function etiquetaEstado(estado, motivo) {
-  const base = ETIQUETAS[estado] ?? { texto: String(estado ?? 'desconocido'), icono: '•', clase: 'estado-neutro' };
+  const base = ETIQUETAS[estado] ?? { texto: String(estado ?? 'desconocido'), icono: 'neutro', clase: 'estado-neutro' };
   const razon = motivoLegible(motivo);
   return {
     texto: razon ? `${base.texto} · ${razon}` : base.texto,
@@ -591,8 +611,8 @@ export function estadisticasDeParche(archivos) {
 }
 
 /** Patrones de la consola: primero el error para que un «failed» no quede en verde. */
-const RE_LINEA_ERROR = /error|fail|✗|✖|FAIL/i;
-const RE_LINEA_OK = /✔|ok |pass/i;
+const RE_LINEA_ERROR = /error|fail|FAIL/i;
+const RE_LINEA_OK = /ok |pass/i;
 
 /**
  * Clase decorativa de una línea de consola. El color REFUERZA la señal; el texto
@@ -645,4 +665,34 @@ export function resumenAlcance(alcance) {
       ? `${tocados.length} archivo(s) tocado(s), todos dentro del alcance`
       : `${fuera.length} archivo(s) fuera del alcance de ${tocados.length}`,
   };
+}
+
+/** Componente lineal (sRGB) de un canal 0..255, según WCAG. */
+function canalLineal(valor) {
+  const c = valor / 255;
+  return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+}
+
+/** Luminancia relativa WCAG de un color `#rrggbb` o `#rgb`. */
+function luminanciaRelativa(hex) {
+  const limpio = String(hex ?? '').replace('#', '').trim();
+  const completo = limpio.length === 3 ? limpio.split('').map((c) => c + c).join('') : limpio;
+  const num = (desde) => parseInt(completo.slice(desde, desde + 2), 16) || 0;
+  return 0.2126 * canalLineal(num(0)) + 0.7152 * canalLineal(num(2)) + 0.0722 * canalLineal(num(4));
+}
+
+/**
+ * Razón de contraste WCAG entre dos colores hex. Pura y sin dependencias: la usan
+ * los tests para exigir AA (≥ 4.5 en texto, ≥ 3 en bordes/UI) sobre los tokens,
+ * así el diseño no puede degradar el contraste sin que falle la suite.
+ * @param {string} hexA
+ * @param {string} hexB
+ * @returns {number}
+ */
+export function contraste(hexA, hexB) {
+  const a = luminanciaRelativa(hexA);
+  const b = luminanciaRelativa(hexB);
+  const claro = Math.max(a, b);
+  const oscuro = Math.min(a, b);
+  return (claro + 0.05) / (oscuro + 0.05);
 }
