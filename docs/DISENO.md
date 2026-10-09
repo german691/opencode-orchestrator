@@ -518,13 +518,15 @@ archivos del estado (`job.json`, logs, `eventos.jsonl`, `pizarron.json`); nunca 
 y no comparte proceso con el MCP. Atiende solo `GET`/`HEAD`, con CSP estricta sin código en línea.
 
 Rutas: `/` (lista + detalle con pestañas Resumen, Consola, Diff, Alcance, Eventos),
-`/auditoria` (tabla de `eventos.jsonl` con filtros), `/pizarron`, y la API `/api/trabajos`,
+`/auditoria` (tabla de `eventos.jsonl` —más los eventos reconstruidos desde `job.json` para
+trabajos viejos, marcados «histórico»— con filtros), `/pizarron`, y la API `/api/trabajos`,
 `/api/trabajos/:id`, `/api/eventos`, `/api/estado`, `/api/trabajos/:id/{log,diff,alcance,eventos}`,
 `/api/pizarron`, `/api/stream` (SSE). El `log` se lee por rangos de bytes (`fuente=agente|aceptacion|stderr`
 y `desde`/`limite`); el `diff` usa `git diff` sin shell y con `safe.directory` acotado al trabajo; el
 `alcance` resume `writes`, archivos tocados y cuáles quedaron fuera.
 
 Atajos: `j`/`k` (siguiente/anterior), `/` (buscar), `1`–`5` (pestañas), `f` (seguir/pausar consola),
-`?` (ayuda). Accesibilidad: enlace «Saltar al contenido», `role="tablist"`/`tabpanel`, regiones
-`aria-live`, y estados con texto + ícono (nunca solo color). No tiene autenticación: escucha en loopback
+`Esc`/`Alt`+`←` (volver a la lista), `←`/`→` (ancho de la lista) y `?` (ayuda). Accesibilidad: enlace
+«Saltar al contenido», `role="tablist"`/`tabpanel`, regiones `aria-live`, y estados con texto + ícono
+(nunca solo color). No tiene autenticación: escucha en loopback
 y se niega a salir de él salvo `ORQ_PANEL_ALLOW_REMOTE=1`.
