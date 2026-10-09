@@ -1,6 +1,7 @@
 /**
- * Pizarrón compartido conectado al Gestor: symlink en el worktree, fusión de aportes
- * de trabajos concurrentes, tolerancia a aportes corruptos y perfil deshabilitado.
+ * Pizarrón compartido conectado al Gestor: copia de solo contenido en el worktree,
+ * refresco durante la corrida, fusión de aportes de trabajos concurrentes, tolerancia
+ * a aportes corruptos y perfil deshabilitado.
  *
  * Se usa el opencode falso y repos git reales (helpers de gestor-comun.js). El Gestor
  * se construye a mano porque `crearGestor` no recibe el pizarrón (y ese archivo no se
@@ -14,7 +15,7 @@ import path from 'node:path';
 
 import { Gestor } from '../src/core/gestor.js';
 import { crearPizarron } from '../src/core/pizarron.js';
-import { entornoFalso, leerEventos, montar, NODE } from './gestor-comun.js';
+import { entornoFalso, esperar, leerEventos, montar, NODE } from './gestor-comun.js';
 
 /**
  * Construye un Gestor con el pizarrón dado y el opencode falso.
@@ -35,7 +36,7 @@ function crearGestorConPizarron(almacen, { entorno, pizarron, home, fake, concur
   });
 }
 
-test('pizarrón: el worktree enlaza `.orq/pizarron.json` al archivo vivo y ve la última versión', async (t) => {
+test('pizarrón: el worktree recibe una COPIA (archivo regular) del documento vivo al crear', async (t) => {
   const m = await montar(t, { perfil: { pizarron: { habilitado: true } } });
   const pizarron = crearPizarron({ dir: path.join(m.base, 'pizarron') });
   const gestor = crearGestorConPizarron(m.almacen, {
@@ -49,16 +50,75 @@ test('pizarrón: el worktree enlaza `.orq/pizarron.json` al archivo vivo y ve la
   const fin = await gestor.esperar(trabajo.id, 15000);
   assert.equal(fin.estado, 'succeeded');
 
-  const enlace = path.join(fin.worktree, '.orq', 'pizarron.json');
-  assert.ok(fs.lstatSync(enlace).isSymbolicLink(), 'debe ser un symlink');
-  assert.equal(fs.realpathSync(enlace), fs.realpathSync(pizarron.rutaViva()));
+  const copia = path.join(fin.worktree, '.orq', 'pizarron.json');
+  assert.equal(fs.lstatSync(copia).isSymbolicLink(), false, 'debe ser archivo regular, no un symlink');
+  assert.equal(JSON.parse(fs.readFileSync(copia, 'utf8')).version, 0, 'la copia nace con el documento vivo');
 
-  // Leer por el symlink debe ver SIEMPRE la última versión tras el rename atómico.
+  // El documento vivo cambia DESPUÉS: la copia de un trabajo terminado NO se refresca
+  // (el servidor solo reescribe las copias de trabajos activos).
   pizarron.post({ clave: 'contrato.x', valor: { v: 'uno' }, jobId: 'orquestador' });
-  assert.match(fs.readFileSync(enlace, 'utf8'), /"uno"/);
-  pizarron.post({ clave: 'contrato.x', valor: { v: 'dos' }, jobId: 'orquestador' });
-  const leido = JSON.parse(fs.readFileSync(enlace, 'utf8'));
-  assert.deepEqual(leido.claves['contrato.x'].valor, { v: 'dos' });
+  assert.equal(pizarron.leer().version, 1);
+  assert.equal(JSON.parse(fs.readFileSync(copia, 'utf8')).version, 0, 'un terminado no se refresca');
+
+  await gestor.cerrar();
+});
+
+test('pizarrón: la copia de un trabajo ACTIVO se refresca tras un post y editarla no toca el documento vivo', async (t) => {
+  const m = await montar(t, { perfil: { pizarron: { habilitado: true } } });
+  const pizarron = crearPizarron({ dir: path.join(m.base, 'pizarron') });
+  // Agente lento: mantiene el trabajo en `running` mientras publicamos en el pizarrón.
+  const guion = path.join(m.base, 'opencode-lento.mjs');
+  fs.writeFileSync(
+    guion,
+    [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      "fs.mkdirSync(path.resolve(process.cwd(), 'subA'), { recursive: true });",
+      "fs.writeFileSync(path.resolve(process.cwd(), 'subA/x.js'), 'x');",
+      'await new Promise((resolve) => setTimeout(resolve, 4000));',
+      'process.exit(0);',
+      '',
+    ].join('\n'),
+  );
+  const gestor = crearGestorConPizarron(m.almacen, {
+    entorno: entornoFalso({}),
+    pizarron,
+    home: m.home,
+    fake: guion,
+    concurrencia: 1,
+    vigilanciaAlcanceMs: 150,
+  });
+
+  const trabajo = await gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  await esperar(() => {
+    const j = gestor.obtener(trabajo.id);
+    return Boolean(j.worktree) && fs.existsSync(path.join(j.worktree, '.orq', 'pizarron.json'));
+  }, 5000);
+  const copia = path.join(gestor.obtener(trabajo.id).worktree, '.orq', 'pizarron.json');
+  const antes = JSON.parse(fs.readFileSync(copia, 'utf8')).version;
+
+  pizarron.post({ clave: 'contrato.vivo', valor: { v: 2 }, jobId: 'orquestador' });
+  const refrescada = await esperar(() => {
+    try {
+      return JSON.parse(fs.readFileSync(copia, 'utf8')).version === pizarron.leer().version;
+    } catch {
+      return false;
+    }
+  }, 5000);
+  assert.ok(refrescada, 'la copia del trabajo activo debe refrescarse tras el post');
+  assert.deepEqual(JSON.parse(fs.readFileSync(copia, 'utf8')).claves['contrato.vivo'].valor, { v: 2 });
+
+  // Editar la copia no altera el documento vivo (es solo una copia).
+  fs.writeFileSync(copia, '{"version":999,"claves":{},"notas":[]}');
+  assert.equal(pizarron.leer().version, antes + 1, 'el documento vivo queda intacto');
+
+  // Terminado el trabajo, un post posterior ya no toca su copia.
+  const fin = await gestor.esperar(trabajo.id, 15000);
+  assert.equal(fin.estado, 'succeeded');
+  const contenidoAlTerminar = fs.readFileSync(copia, 'utf8');
+  pizarron.post({ clave: 'contrato.post', valor: 1, jobId: 'orquestador' });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(fs.readFileSync(copia, 'utf8'), contenidoAlTerminar, 'terminado: no se refresca');
 
   await gestor.cerrar();
 });

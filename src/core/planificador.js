@@ -22,6 +22,9 @@
  *    Dos `worktree` cuyos `writes` se superponen se serializan (si
  *    `serializarEscrituras`, activo por defecto). Repos distintos no chocan.
  *  - Recursos con capacidad (`recursos`: nombre -> capacidad; ausente = 1, exclusivo).
+ *  - `esperarIntegracion`: un candidato espera a que se integren los `succeeded`
+ *    INTEGRABLES (con commit) del mismo repo que solapan sus writes; uno sin commit no
+ *    frena (no se podría integrar y trabaría la cola para siempre).
  *  - Un trabajo que no puede arrancar no bloquea a los siguientes.
  *  - Anti-inanición: un trabajo listo que lleva más de `esperaMaximaMs` en cola
  *    reserva su lugar; ningún candidato que choque con él (alcance O recursos)
@@ -77,6 +80,14 @@ function normalizarTrabajo(bruto, id) {
     estado: trabajo.estado,
     // Opt-in del perfil: esperar a que se integren los trabajos que solapan sus writes.
     esperarIntegracion: trabajo.esperarIntegracion === true,
+    // ¿Es integrable? Solo un `succeeded` CON commit se puede integrar (`integrar` exige
+    // `resultado.commit`). El gestor pasa el dato explícito; si no viene (p.ej. un job
+    // leído de disco), se deriva de `resultado.commit`. Ver `trabajosSucceededSolapados`.
+    integrable:
+      trabajo.integrable === true ||
+      (trabajo.integrable === undefined &&
+        typeof trabajo.resultado?.commit === 'string' &&
+        trabajo.resultado.commit !== ''),
     // Tope de trabajos simultáneos POR REPO (el `concurrency` del perfil del trabajo).
     // `null` = sin tope por repo: solo rige el tope global.
     concurrenciaRepo: Number.isInteger(trabajo.concurrenciaRepo) && trabajo.concurrenciaRepo > 0 ? trabajo.concurrenciaRepo : null,
@@ -84,13 +95,18 @@ function normalizarTrabajo(bruto, id) {
 }
 
 /**
- * Ids de trabajos `succeeded` (sin integrar) del mismo repo cuyos `writes` se solapan
- * con los del candidato.
+ * Ids de trabajos `succeeded` INTEGRABLES (sin integrar) del mismo repo cuyos `writes`
+ * se solapan con los del candidato.
  *
  * POR QUÉ existe: con `esperarIntegracion` el trabajo no debe partir de una base que
  * quedará obsoleta en cuanto el anterior se integre (hoy arranca apenas el anterior
  * termina y el conflicto aparece recién en el merge). `merged` no cuenta: ya está
  * integrado y no deja la base atrás.
+ *
+ * POR QUÉ sólo integrables: un `succeeded` SIN commit (el agente no escribió nada) o una
+ * compuerta/`soloAceptacion` sin commit NO se puede integrar (`opencode_merge` fallaría
+ * con 'no produjo ningún commit'); si contara como bloqueador, la cola quedaría trabada
+ * para siempre. Se excluyen del freno, no del trabajo.
  *
  * @param {object} trabajo trabajo normalizado
  * @param {Map<string, object>|Record<string, object>|undefined} trabajos
@@ -106,6 +122,7 @@ function trabajosSucceededSolapados(trabajo, trabajos) {
     if (otro.id === trabajo.id) continue;
     if (otro.repo !== trabajo.repo) continue;
     if (otro.estado !== 'succeeded') continue;
+    if (!otro.integrable) continue;
     if (otro.writes.length === 0) continue;
     if (gruposSeSuperponen(trabajo.writes, otro.writes)) ids.push(otro.id);
   }

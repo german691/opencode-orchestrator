@@ -539,7 +539,22 @@ const ESCENARIOS = [
   {
     // `esperarIntegracion`: no partir de una base que quedará obsoleta cuando integren
     // al anterior (hoy arranca y el conflicto aparece recién en el merge).
-    nombre: 'esperarIntegracion: no arranca si otro succeeded del mismo repo solapa writes',
+    nombre: 'esperarIntegracion: no arranca si otro succeeded integrable del mismo repo solapa writes',
+    entrada: {
+      cola: ['a'],
+      corriendo: [],
+      concurrencia: 2,
+      trabajos: {
+        a: job({ writes: ['src/**'], esperarIntegracion: true }),
+        previo: job({ estado: 'succeeded', integrable: true, writes: ['src/a.js'] }),
+      },
+    },
+    esperado: { arrancar: [], bloqueados: [] },
+  },
+  {
+    // Hallazgo real: un `succeeded` SIN commit no se puede integrar; si frenara, la cola
+    // quedaría trabada para siempre ('no produjo ningún commit').
+    nombre: 'esperarIntegracion: un succeeded sin commit NO frena (no es integrable)',
     entrada: {
       cola: ['a'],
       corriendo: [],
@@ -549,20 +564,63 @@ const ESCENARIOS = [
         previo: job({ estado: 'succeeded', writes: ['src/a.js'] }),
       },
     },
-    esperado: { arrancar: [], bloqueados: [] },
+    esperado: { arrancar: ['a'], bloqueados: [] },
   },
   {
-    nombre: 'esperarIntegracion: un merged no frena (ya está integrado)',
+    // También cuando el no-integrable viene dado por `resultado.commit` ausente/null.
+    nombre: 'esperarIntegracion: un succeeded con resultado.commit vacío no frena',
     entrada: {
       cola: ['a'],
       corriendo: [],
       concurrencia: 2,
       trabajos: {
         a: job({ writes: ['src/**'], esperarIntegracion: true }),
-        previo: job({ estado: 'merged', writes: ['src/a.js'] }),
+        previo: job({ estado: 'succeeded', resultado: { commit: null }, writes: ['src/a.js'] }),
       },
     },
     esperado: { arrancar: ['a'], bloqueados: [] },
+  },
+  {
+    // Un `succeeded` con commit se detecta igual aunque no venga el booleano explícito.
+    nombre: 'esperarIntegracion: un succeeded con resultado.commit deriva integrable y frena',
+    entrada: {
+      cola: ['a'],
+      corriendo: [],
+      concurrencia: 2,
+      trabajos: {
+        a: job({ writes: ['src/**'], esperarIntegracion: true }),
+        previo: job({ estado: 'succeeded', resultado: { commit: 'abc123' }, writes: ['src/a.js'] }),
+      },
+    },
+    esperado: { arrancar: [], bloqueados: [] },
+  },
+  {
+    nombre: 'esperarIntegracion: un merged (ya integrado) no frena',
+    entrada: {
+      cola: ['a'],
+      corriendo: [],
+      concurrencia: 2,
+      trabajos: {
+        a: job({ writes: ['src/**'], esperarIntegracion: true }),
+        previo: job({ estado: 'merged', integrable: true, writes: ['src/a.js'] }),
+      },
+    },
+    esperado: { arrancar: ['a'], bloqueados: [] },
+  },
+  {
+    nombre: 'esperarIntegracion: un cancelado o rechazado no frena',
+    entrada: {
+      cola: ['a', 'b'],
+      corriendo: [],
+      concurrencia: 2,
+      trabajos: {
+        a: job({ writes: ['src/**'], esperarIntegracion: true }),
+        b: job({ writes: ['docs/**'], esperarIntegracion: true }),
+        cancelado: job({ estado: 'cancelled', integrable: true, writes: ['src/a.js'] }),
+        rechazado: job({ estado: 'rejected', integrable: true, writes: ['docs/x.md'] }),
+      },
+    },
+    esperado: { arrancar: ['a', 'b'], bloqueados: [] },
   },
   {
     nombre: 'esperarIntegracion: writes disjuntos no frenan',
@@ -709,8 +767,8 @@ test('planificador: esperarIntegracion explica a qué ids espera', () => {
     concurrencia: 3,
     trabajos: {
       a: job({ writes: ['src/**'], esperarIntegracion: true }),
-      previoA: job({ estado: 'succeeded', writes: ['src/a.js'] }),
-      previoB: job({ estado: 'succeeded', writes: ['src/b.js'] }),
+      previoA: job({ estado: 'succeeded', integrable: true, writes: ['src/a.js'] }),
+      previoB: job({ estado: 'succeeded', integrable: true, writes: ['src/b.js'] }),
       libre: job({ writes: ['docs/**'], esperarIntegracion: true }),
     },
   });

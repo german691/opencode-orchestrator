@@ -16,6 +16,7 @@ import {
   eliminarWorktree,
   listarWorktrees,
   conCerrojo,
+  refrescarCopiaPizarron,
 } from '../src/core/workspace.js';
 import { crearPizarron } from '../src/core/pizarron.js';
 
@@ -902,18 +903,25 @@ test('commitearTrabajo: un archivo borrado con git rm (ya fuera del disco y del 
   assert.deepEqual(tocados, ['A\tnuevo.txt', 'D\tdocs/leeme.md', 'D\trenombrar.txt']);
 });
 
-test('crearWorktree con pizarrón enlaza `.orq/pizarron.json` al archivo vivo (vacío al inicio)', async () => {
+test('crearWorktree con pizarrón escribe una COPIA (archivo regular) del documento vivo', async () => {
   const { raiz, rootDir, base } = await montar();
   const pizarron = crearPizarron({ dir: path.join(base, 'pizarron') });
+  pizarron.post({ clave: 'contrato', valor: { v: 1 }, jobId: 'orq' });
 
   const w = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'piz123', rootDir, pizarron });
-  const enlace = path.join(w.ruta, '.orq', 'pizarron.json');
-  assert.ok(fs.lstatSync(enlace).isSymbolicLink(), 'debe ser un symlink, no una copia');
-  assert.equal(fs.realpathSync(enlace), fs.realpathSync(pizarron.rutaViva()));
-  // El archivo vivo se creó vacío para que el primer agente que lea no vea ENOENT.
-  assert.deepEqual(JSON.parse(fs.readFileSync(enlace, 'utf8')).version, 0);
+  const copia = path.join(w.ruta, '.orq', 'pizarron.json');
+  assert.equal(fs.lstatSync(copia).isSymbolicLink(), false, 'debe ser archivo regular, no un symlink');
+  const doc = JSON.parse(fs.readFileSync(copia, 'utf8'));
+  assert.deepEqual(doc.claves.contrato.valor, { v: 1 }, 'la copia refleja el documento vivo al crear');
 
-  // Sin pizarrón no se crea el enlace.
+  // Editar la copia NO altera el documento vivo; el servidor la puede reponer.
+  fs.writeFileSync(copia, '{"version":999,"claves":{},"notas":[]}');
+  assert.equal(pizarron.leer().version, 1, 'el documento vivo no se toca al editar la copia');
+  assert.equal(refrescarCopiaPizarron({ worktree: w.ruta, pizarron }), true);
+  assert.equal(JSON.parse(fs.readFileSync(copia, 'utf8')).version, 1, 'el refresco repone el contenido vivo');
+
+  // Sin pizarrón no se crea ninguna copia.
   const sin = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'nopiz1', rootDir });
   assert.equal(fs.existsSync(path.join(sin.ruta, '.orq', 'pizarron.json')), false);
+  assert.equal(refrescarCopiaPizarron({ worktree: '', pizarron }), false, 'sin worktree no escribe');
 });

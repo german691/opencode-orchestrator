@@ -50,7 +50,7 @@ Especificación de un trabajo (entrada de `opencode_coding`):
 | `isolation` | `worktree`\|`none` | `worktree` (por defecto en `safe`/`auto`): copia aislada en rama `job/<id>`. `none`: trabaja en el árbol real (solo lectura o trabajos que lo exijan; toma bloqueos) |
 | `reads` | string[] | Patrones que puede leer (por defecto `**`). Informativo para el planificador y para el prompt |
 | `writes` | string[] | Patrones que **puede escribir**. Obligatorio si `mode != readonly`. `readonly` fuerza `[]` |
-| `resources` | string[] | Recursos exclusivos del perfil que necesita (por ejemplo `db`) |
+| `resources` | string[] | Recursos del perfil que necesita (por ejemplo `db`; se provisiona una instancia por trabajo) |
 | `accept` | string | Clave o comando de aceptación (del perfil o literal) que se corre al terminar |
 | `after` | string[] | `job_id` previos que deben estar `succeeded` |
 | `timeout_ms` / `idle_timeout_ms` | number | Tope total y tope sin salida (por defecto 25 min / 5 min) |
@@ -85,7 +85,8 @@ log_tail`.
   - `isolation: worktree`: los trabajos no se ven entre sí, pero si sus `writes` se superponen se
     **serializan** (opción `serializeOverlappingWrites`, activa por defecto) para evitar
     conflictos al integrar.
-  - `resources`: cada recurso con nombre es exclusivo, o con capacidad N (ver §7).
+  - `resources`: los recursos son por trabajo (p. ej. una base por trabajo con `{job}`); no
+    serializan por sí solos; la capacidad de cada recurso es el tope de concurrencia (ver §7).
 - Superposición de patrones (conservadora): se reduce cada patrón a su prefijo literal
   (la parte antes del primer comodín); se superponen si un prefijo es prefijo del otro.
   Puede serializar de más, nunca de menos.
@@ -430,15 +431,21 @@ resultado se guarda en `resultado.revision` y como evento `job.revision`.
 **Problema observado.** Varios agentes del mismo repo definían contratos (rutas de API, formatos)
 incompatibles entre sí porque no se veían.
 
-**Decisión.** Un documento vivo `<ORQ_STATE_DIR>/pizarron.json` al que los agentes **leen** por un
-symlink de solo lectura `.orq/pizarron.json` y al que **aportan** escribiendo su propio
-`.orq/aporte.json` (`{ entradas: [{ clave, valor, nota }], notas: [...] }`). El proceso servidor es el
-único que escribe el archivo vivo, de forma síncrona y atómica (tmp + rename); cada worktree recibe el
-symlink con el archivo ya materializado. Una clave nueva se crea, la del **mismo** trabajo se actualiza
+**Decisión.** Un documento vivo `<ORQ_STATE_DIR>/pizarron.json` al que los agentes **leen**
+por una COPIA de solo contenido `.orq/pizarron.json` (archivo regular, nunca un symlink) y
+al que **aportan** escribiendo su propio `.orq/aporte.json`
+(`{ entradas: [{ clave, valor, nota }], notas: [...] }`). El proceso servidor es el
+único que escribe el archivo vivo, de forma síncrona y atómica (tmp + rename); cada worktree
+recibe una copia que el servidor refresca al crearlo y cada vez que cambia la versión del
+documento (vigilancia cada ~30 s y tras cada fusión de aportes), reescribiéndola de forma
+atómica SOLO en los worktrees de trabajos activos (running/verifying). Si el agente edita o
+borra su copia no pasa nada: el servidor la repone; el documento vivo vive solo en el
+directorio de estado. Una clave nueva se crea, la del **mismo** trabajo se actualiza
 con historial, y la de **otro** trabajo NO se pisa: se registra como `conflicto` (salvo `forzar`). El
 aporte se fusiona al vuelo (el vigilante cada 30 s) y al terminar el trabajo, con un tope
 `pizarron.maxEntradasPorTrabajo` (1 a 1000; por defecto 30). El pizarrón es **opt-in**
-(`pizarron.habilitado`, por defecto `false`): activarlo crea el symlink y suma instrucciones al prompt.
+(`pizarron.habilitado`, por defecto `false`): activarlo crea la copia en el worktree y suma
+instrucciones al prompt.
 Las herramientas `opencode_board_get` / `opencode_board_post` lo exponen al orquestador (el orquestador
 publica como `jobId: "orquestador"`).
 

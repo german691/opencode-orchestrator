@@ -58,7 +58,7 @@ const SETUP_TIMEOUT_MS = 600000;
  */
 export const DIR_ORQ = '.orq';
 
-/** Nombre del symlink de SOLO LECTURA al archivo vivo del pizarrón dentro de `.orq/`. */
+/** Nombre de la copia de SOLO CONTENIDO del pizarrón dentro de `.orq/`. */
 export const ARCHIVO_PIZARRON = 'pizarron.json';
 
 /**
@@ -467,23 +467,34 @@ async function limpiarSilencioso(repoRaiz, ruta, rama, rootDir) {
 }
 
 /**
- * Asegura que el archivo vivo del pizarrón exista antes de enlazarlo desde un worktree.
+ * Escribe la copia de SOLO CONTENIDO del pizarrón dentro de `.orq/` de un worktree.
  *
- * POR QUÉ: el primer worktree puede crearse antes de la primera escritura del servidor.
- * Si el symlink apuntara a un archivo inexistente, el agente que lo lea vería ENOENT. Se
- * crea vacío con el modelo del propio pizarrón (`leer()`), y de forma atómica (tmp +
- * rename) para no exponer un JSON a medias si otro proceso lo lee en ese instante.
+ * POR QUÉ una copia (archivo regular) y no un symlink al archivo vivo: `.orq/` se ignora
+ * en alcance y commit, así que un symlink dejaba al agente (o a un comando de setup o de
+ * mutación) ESCRIBIR a través del enlace y corromper el pizarrón compartido o el estado.
+ * Con una copia, lo peor que puede pasar es que el agente la edite o la borre: el servidor
+ * la repone en la próxima vigilancia (o en la próxima fusión de aportes). El documento vivo
+ * sigue viviendo SOLO en el directorio de estado y el aporte del agente es `.orq/aporte.json`.
  *
- * @param {{ rutaViva: () => string, leer: () => object }} pizarron
- * @returns {void}
+ * POR QUÉ atómica (tmp + rename): un lector concurrente nunca debe ver un JSON a medias.
+ * Es best-effort: un fallo de escritura no puede tumbar al trabajo.
+ *
+ * @param {{ worktree: string, pizarron: { leer: () => object } }} opciones
+ * @returns {boolean} `true` si la copia quedó escrita
  */
-function asegurarPizarronVivo(pizarron) {
-  const ruta = pizarron.rutaViva();
-  if (fs.existsSync(ruta)) return;
-  fs.mkdirSync(path.dirname(ruta), { recursive: true });
-  const temporal = `${ruta}.tmp`;
-  fs.writeFileSync(temporal, JSON.stringify(pizarron.leer(), null, 2), 'utf8');
-  fs.renameSync(temporal, ruta);
+export function refrescarCopiaPizarron({ worktree, pizarron } = {}) {
+  if (typeof worktree !== 'string' || worktree === '') return false;
+  if (!pizarron || typeof pizarron.leer !== 'function') return false;
+  try {
+    const destino = path.join(worktree, DIR_ORQ, ARCHIVO_PIZARRON);
+    fs.mkdirSync(path.dirname(destino), { recursive: true });
+    const temporal = `${destino}.tmp`;
+    fs.writeFileSync(temporal, JSON.stringify(pizarron.leer(), null, 2), 'utf8');
+    fs.renameSync(temporal, destino);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -512,8 +523,9 @@ function asegurarPizarronVivo(pizarron) {
  * @param {number} [opciones.setupTimeoutMs=600000] tope total por comando de setup
  * @param {number} [opciones.idleTimeoutMs] tope sin salida por comando de setup
  * @param {AbortSignal} [opciones.signal] cancelación del setup
- * @param {{ rutaViva: () => string, leer: () => object }} [opciones.pizarron] pizarrón
- *   compartido: si se indica, crea el symlink `.orq/pizarron.json` hacia su archivo vivo
+ * @param {{ leer: () => object }} [opciones.pizarron] pizarrón
+ *   compartido: si se indica, escribe la copia de solo contenido `.orq/pizarron.json`
+ *   (archivo regular, nunca un symlink; el servidor la refresca después)
  * @returns {Promise<{ ruta: string, rama: string, baseCommit: string, enlacesCreados: string[], enlacesOmitidos: string[] }>}
  * @throws {ErrorDeWorkspace}
  */
@@ -616,12 +628,12 @@ export async function crearWorktree({
     fs.mkdirSync(path.join(creado.ruta, DIR_ORQ), { recursive: true });
     await agregarExcludeLocal(creado.ruta, [`${DIR_ORQ}/`]);
 
-    // Pizarrón compartido: enlace de SOLO LECTURA al archivo vivo. El servidor es el
-    // único que escribe (atómico con rename); el agente lee por el symlink y deja sus
-    // aportes en su propio `.orq/aporte.json`. Sin pizarrón no se crea nada.
-    if (pizarron && typeof pizarron.rutaViva === 'function') {
-      asegurarPizarronVivo(pizarron);
-      fs.symlinkSync(pizarron.rutaViva(), path.join(creado.ruta, DIR_ORQ, ARCHIVO_PIZARRON), 'file');
+    // Pizarrón compartido: COPIA de solo contenido (archivo regular, nunca un symlink).
+    // El servidor es el único que escribe el documento vivo; el agente lee esta copia y
+    // deja sus aportes en su propio `.orq/aporte.json`. Si edita o borra la copia, el
+    // servidor la repone en la próxima vigilancia. Sin pizarrón no se crea nada.
+    if (pizarron && typeof pizarron.leer === 'function') {
+      refrescarCopiaPizarron({ worktree: creado.ruta, pizarron });
     }
 
     for (let indice = 0; indice < link.length; indice += 1) {

@@ -110,3 +110,27 @@ test('esperarIntegracion: un trabajo solapado no arranca hasta integrar al anter
 
   await gestor.cerrar();
 });
+
+test('esperarIntegracion: un succeeded SIN commit no bloquea a un trabajo solapado', async (t) => {
+  const m = await montar(t, { perfil: { esperarIntegracion: true } });
+  // El agente no escribe nada: el trabajo termina succeeded con commit null (no integrable).
+  const gestor = crearGestor(m.almacen, {
+    fake: m.fake,
+    entorno: entornoFalso({}),
+    home: m.home,
+    concurrencia: 2,
+  });
+
+  const a = await gestor.enviar({ prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  const finA = await gestor.esperar(a.id, 20000);
+  assert.equal(finA.estado, 'succeeded');
+  assert.equal(finA.resultado.commit, null, 'sin escrituras no hay commit que integrar');
+
+  const b = await gestor.enviar({ prompt: 'B', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  // B comparte writes con A, pero A no es integrable: debe arrancar y terminar (antes
+  // quedaba en cola para siempre).
+  const finB = await gestor.esperar(b.id, 20000);
+  assert.equal(finB.estado, 'succeeded');
+
+  await gestor.cerrar();
+});
