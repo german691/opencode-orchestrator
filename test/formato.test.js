@@ -53,3 +53,45 @@ test('describirEspera y el listado dicen por qué un trabajo sigue en cola', asy
   assert.match(describirListado([t], { concurrencia: 1, corriendo: [], enCola: ['q1'] }), /espera: .*\[aaa, bbb\]/);
   assert.match(describirActivo(t, 1000), /En cola porque: .*\[aaa, bbb\]/);
 });
+
+test('salida del agente: por defecto solo las últimas 40 líneas y ofrece recuperar todo con completo', () => {
+  const salida = Array.from({ length: 60 }, (_, i) => `linea ${i}`).join('\n');
+  const porDefecto = describirTerminado({ ...base(null), resultado: {} }, { salida });
+  assert.match(porDefecto, /linea 59/);
+  assert.match(porDefecto, /linea 20/);
+  assert.doesNotMatch(porDefecto, /linea 19\b/);
+  assert.match(porDefecto, /líneas omitidas/);
+  assert.match(porDefecto, /\(salida completa: opencode_logs job_id=abc12345\)/);
+
+  const completo = describirTerminado({ ...base(null), resultado: {} }, { salida }, { completo: true });
+  assert.match(completo, /linea 0\b/);
+  assert.doesNotMatch(completo, /líneas omitidas/);
+  assert.doesNotMatch(completo, /salida completa: opencode_logs/);
+});
+
+test('stderr: por defecto solo las últimas 15 líneas', () => {
+  const errores = Array.from({ length: 30 }, (_, i) => `err ${i}`).join('\n');
+  const texto = describirTerminado({ ...base(null), estado: 'failed', resultado: {} }, { errores });
+  assert.match(texto, /err 29/);
+  assert.match(texto, /err 15/);
+  assert.doesNotMatch(texto, /err 14\b/);
+});
+
+test('log de aceptación fallido: coincidencias primero, sin subtests ok y con tope', () => {
+  const lineas = Array.from({ length: 60 }, (_, i) => `linea ${i}`);
+  lineas.push('ok 1 - subtest que pasó');
+  lineas.push('  duration_ms: 12');
+  lineas.push('FAIL test/x.test.js');
+  lineas.push('AssertionError: boom');
+  const cola = lineas.join('\n');
+
+  const texto = describirTerminado(base({ ejecutada: true, cmd: 'npm test', exit: 1, motivo: 'exit', cola }));
+  assert.match(texto, /FAIL test\/x\.test\.js\nAssertionError: boom/);
+  assert.doesNotMatch(texto, /ok 1 - subtest/);
+  assert.doesNotMatch(texto, /duration_ms/);
+  assert.match(texto, /\(salida completa: opencode_logs job_id=abc12345\)/);
+
+  const completo = describirTerminado(base({ ejecutada: true, cmd: 'npm test', exit: 1, motivo: 'exit', cola }), {}, { completo: true });
+  assert.match(completo, /ok 1 - subtest que pasó/);
+  assert.doesNotMatch(completo, /salida completa: opencode_logs/);
+});

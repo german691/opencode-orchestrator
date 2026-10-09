@@ -349,3 +349,24 @@ test('validarPerfil: sinProgresoMs acepta 0 (sin límite) o 1 min–6 h y por de
   assert.throws(() => validarPerfil({ ...base, sinProgresoMs: 30_000 }), /sinProgresoMs/);
   assert.throws(() => validarPerfil({ ...base, sinProgresoMs: 'x' }), /sinProgresoMs/);
 });
+
+test('validarPerfil: reanudacion opcional usa configReanudacion y por defecto es { habilitado: true, maxRelanzamientos: 1 }', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.deepEqual(validarPerfil(base).reanudacion, { habilitado: true, maxRelanzamientos: 1 });
+  assert.deepEqual(perfilPorDefecto('x').reanudacion, { habilitado: true, maxRelanzamientos: 1 });
+  assert.deepEqual(validarPerfil({ ...base, reanudacion: { habilitado: false } }).reanudacion, { habilitado: false, maxRelanzamientos: 1 });
+  assert.deepEqual(validarPerfil({ ...base, reanudacion: { maxRelanzamientos: 2 } }).reanudacion, { habilitado: true, maxRelanzamientos: 2 });
+});
+
+test('validarPerfil: reanudacion inválida se acumula con la ruta del campo', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.throws(
+    () => validarPerfil({ ...base, reanudacion: { habilitado: 'si' } }),
+    (error) => error instanceof ErrorDePerfil && error.errores.some((e) => /reanudacion\.habilitado/.test(e)),
+  );
+  assert.throws(
+    () => validarPerfil({ ...base, reanudacion: { maxRelanzamientos: 9 } }),
+    (error) => error.errores.some((e) => /reanudacion\.maxRelanzamientos/.test(e)),
+  );
+  assert.throws(() => validarPerfil({ ...base, reanudacion: [] }), /reanudacion/);
+});

@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import { Gestor } from './core/gestor.js';
 import { cargarEntornoDeArchivo } from './entorno.js';
 import { AlmacenDeTrabajos } from './core/store.js';
+import { crearRegistroEventos } from './core/eventos.js';
 import { crearHerramientas } from './mcp/herramientas.js';
 import { crearServidorMcp } from './mcp/protocolo.js';
 
@@ -66,6 +67,9 @@ async function main() {
   if (entornoArchivo.cargadas.length > 0) log(`variables cargadas del archivo de entorno: ${entornoArchivo.cargadas.join(', ')}`);
 
   const almacen = new AlmacenDeTrabajos();
+  // Registro global de eventos (auditoría) en el MISMO directorio de estado del almacén:
+  // lo comparten el gestor y el panel (que lo abre por su cuenta) para /auditoria.
+  const registro = crearRegistroEventos({ dir: almacen.dir });
   const concurrencia = Math.min(16, enteroDeEntorno('ORQ_CONCURRENCY', 3));
   const esperaMs = enteroDeEntorno('ORQ_WAIT_MS', 45000);
 
@@ -86,7 +90,9 @@ async function main() {
       opencode: { cmd: ejecutableDeOpencode() },
       concurrencia,
       modelo: process.env.OPENCODE_MODEL || undefined,
+      registro,
     });
+    gestor.registrarArranque({ recuperados: perdidos });
     herramientas = crearHerramientas(gestor, { esperaMs });
   } catch (error) {
     // No se aborta: el cliente ve las herramientas y recibe el motivo en cada llamada.

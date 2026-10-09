@@ -7,12 +7,62 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { crearGestor, entornoFalso, gitOK, montar } from './gestor-comun.js';
+import { crearGestor, entornoFalso, gitOK, montar, NODE, esperar } from './gestor-comun.js';
+import { Gestor } from '../src/core/gestor.js';
+import { crearRegistroEventos } from '../src/core/eventos.js';
 
 async function correr(gestor, spec) {
   const trabajo = await gestor.enviar(spec);
   await gestor.esperar(trabajo.id, 30000);
   return gestor.obtener(trabajo.id);
+}
+
+/**
+ * Guion de opencode FALSO para simular un corte de transporte: escribe lo pedido,
+ * cuenta sus corridas en un archivo y muere con la firma del socket cerrado + exit
+ * 130 las primeras `ORQ_FAKE_MUERTES` veces; después sale limpio. Se escribe en el
+ * tmp del test en vez de tocar el fixture compartido.
+ */
+const GUION_MUERTE = [
+  "import fs from 'node:fs';",
+  "import path from 'node:path';",
+  "const escribir = String(process.env.ORQ_FAKE_ESCRIBIR || '').split(';').map((s) => s.trim()).filter(Boolean);",
+  'for (const rel of escribir) {',
+  '  const destino = path.resolve(process.cwd(), rel);',
+  '  fs.mkdirSync(path.dirname(destino), { recursive: true });',
+  "  fs.writeFileSync(destino, 'escrito\\n');",
+  '}',
+  'const contador = process.env.ORQ_FAKE_CONTADOR;',
+  'let n = 0;',
+  "if (contador) { try { n = Number(fs.readFileSync(contador, 'utf8')) || 0; } catch {} fs.writeFileSync(contador, String(n + 1)); }",
+  "const muertes = Number(process.env.ORQ_FAKE_MUERTES || '1');",
+  'if (n < muertes) {',
+  "  fs.writeSync(2, 'Error: Transport: The socket connection was closed unexpectedly\\n');",
+  '  process.exit(130);',
+  '}',
+  'process.exit(0);',
+  '',
+].join('\n');
+
+/** Escribe el guion en el tmp del test y devuelve su ruta. */
+function escribirGuion(m, nombre = 'opencode-muere.js') {
+  const ruta = path.join(m.base, nombre);
+  fs.writeFileSync(ruta, GUION_MUERTE);
+  return ruta;
+}
+
+/** Gestor apuntando a un guion propio, con registro opcional para auditar los eventos. */
+function crearGestorGuion(m, guion, { entorno, concurrencia = 2, registro, vigilanciaAlcanceMs } = {}) {
+  return new Gestor({
+    almacen: m.almacen,
+    opencode: { cmd: NODE, argsPrefijo: [guion] },
+    concurrencia,
+    entornoBase: entorno,
+    home: m.home,
+    graceMs: 300,
+    registro,
+    ...(vigilanciaAlcanceMs === undefined ? {} : { vigilanciaAlcanceMs }),
+  });
 }
 
 test('compuerta: solo_aceptacion sobre la integración corre la aceptación sin el agente y ve lo integrado', async (t) => {
@@ -164,4 +214,117 @@ test('sin progreso: un agente que escribe a tiempo NO se corta aunque siga traba
   });
   const ro = await correr(lector, { prompt: 'solo mira', cwd: m.repo, mode: 'readonly' });
   assert.notEqual(ro.motivoFin, 'sin_progreso', 'readonly no escribe: no se corta por eso');
+});
+
+test('reanudación: el agente muere por transporte TRAS escribir → continúa, succeeded y con advertencia', async (t) => {
+  const m = await montar(t);
+  const guion = escribirGuion(m);
+  const registro = crearRegistroEventos({ dir: m.estadoDir });
+  const gestor = crearGestorGuion(m, guion, {
+    entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'subA/x.txt', ORQ_FAKE_MUERTES: '1' }),
+    registro,
+  });
+  const r = await correr(gestor, { prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+
+  assert.equal(r.estado, 'succeeded', JSON.stringify(r.resultado));
+  assert.match(r.resultado.advertencias.join(' '), /REANUDADO/);
+  assert.deepEqual(r.resultado.archivos, ['subA/x.txt']);
+  assert.equal(r.relanzamientos, undefined, 'con cambios no se relanza');
+  assert.ok(registro.listar({ tipo: 'job.reanudado', limite: 20 }).some((e) => e.jobId === r.id), 'falta job.reanudado');
+  assert.equal(registro.listar({ tipo: 'job.reintento', limite: 20 }).length, 0);
+});
+
+test('reanudación: sin cambios relanza UNA vez y el segundo intento puede terminar bien', async (t) => {
+  const m = await montar(t);
+  const guion = escribirGuion(m);
+  const registro = crearRegistroEventos({ dir: m.estadoDir });
+  const contador = path.join(m.base, 'contador.txt');
+  const gestor = crearGestorGuion(m, guion, {
+    entorno: entornoFalso({ ORQ_FAKE_CONTADOR: contador, ORQ_FAKE_MUERTES: '1' }),
+    registro,
+  });
+  const r = await correr(gestor, { prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+
+  assert.equal(r.estado, 'succeeded', JSON.stringify(r.resultado));
+  assert.equal(r.relanzamientos, 1);
+  assert.equal(fs.readFileSync(contador, 'utf8'), '2', 'el agente corrió dos veces');
+  assert.ok(registro.listar({ tipo: 'job.reintento', limite: 20 }).some((e) => e.jobId === r.id), 'falta job.reintento');
+});
+
+test('reanudación: si muere dos veces sin dejar cambios, falla (no hay bucle)', async (t) => {
+  const m = await montar(t);
+  const guion = escribirGuion(m);
+  const contador = path.join(m.base, 'contador.txt');
+  const gestor = crearGestorGuion(m, guion, {
+    entorno: entornoFalso({ ORQ_FAKE_CONTADOR: contador, ORQ_FAKE_MUERTES: '2' }),
+  });
+  const r = await correr(gestor, { prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+
+  assert.equal(r.estado, 'failed');
+  assert.equal(r.motivoFin, 'exit_distinto_de_cero');
+  assert.equal(r.relanzamientos, 1, 'solo se permite un relanzamiento');
+  assert.equal(fs.readFileSync(contador, 'utf8'), '2');
+});
+
+test('reanudación: un corte deliberado por ALCANCE no reanuda', async (t) => {
+  const m = await montar(t);
+  const registro = crearRegistroEventos({ dir: m.estadoDir });
+  const gestor = crearGestorGuion(m, m.fake, {
+    entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'fuera.txt', ORQ_FAKE_DORMIR: '60000' }),
+    registro,
+    vigilanciaAlcanceMs: 150,
+  });
+  const r = await correr(gestor, { prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+
+  assert.equal(r.estado, 'rejected');
+  assert.equal(r.motivoFin, 'alcance');
+  assert.equal(registro.listar({ tipo: 'job.reintento', limite: 50 }).length, 0);
+  assert.equal(registro.listar({ tipo: 'job.reanudado', limite: 50 }).length, 0);
+});
+
+test('reanudación: un corte por TIMEOUT no reanuda', async (t) => {
+  const m = await montar(t);
+  const registro = crearRegistroEventos({ dir: m.estadoDir });
+  const gestor = crearGestorGuion(m, m.fake, {
+    entorno: entornoFalso({ ORQ_FAKE_DORMIR: '60000' }),
+    registro,
+  });
+  const r = await correr(gestor, { prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'], timeout_ms: 300 });
+
+  assert.equal(r.estado, 'failed');
+  assert.equal(r.motivoFin, 'timeout');
+  assert.equal(registro.listar({ tipo: 'job.reintento', limite: 50 }).length, 0);
+  assert.equal(registro.listar({ tipo: 'job.reanudado', limite: 50 }).length, 0);
+});
+
+test('reanudación: un corte por CANCELACIÓN no reanuda', async (t) => {
+  const m = await montar(t);
+  const registro = crearRegistroEventos({ dir: m.estadoDir });
+  const gestor = crearGestorGuion(m, m.fake, {
+    entorno: entornoFalso({ ORQ_FAKE_DORMIR: '60000' }),
+    registro,
+  });
+  const trabajo = await gestor.enviar({ prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  await esperar(() => gestor.obtener(trabajo.id).estado === 'running', 8000);
+  await gestor.cancelar(trabajo.id);
+  assert.equal(gestor.obtener(trabajo.id).estado, 'cancelled');
+  assert.equal(registro.listar({ tipo: 'job.reintento', limite: 50 }).length, 0);
+  assert.equal(registro.listar({ tipo: 'job.reanudado', limite: 50 }).length, 0);
+});
+
+test('reanudación: con reanudacion.habilitado=false el corte de transporte falla como antes', async (t) => {
+  const m = await montar(t, { perfil: { reanudacion: { habilitado: false } } });
+  const guion = escribirGuion(m);
+  const registro = crearRegistroEventos({ dir: m.estadoDir });
+  const gestor = crearGestorGuion(m, guion, {
+    entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'subA/x.txt', ORQ_FAKE_MUERTES: '1' }),
+    registro,
+  });
+  const r = await correr(gestor, { prompt: 'A', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+
+  assert.equal(r.estado, 'failed');
+  assert.equal(r.motivoFin, 'exit_distinto_de_cero');
+  assert.doesNotMatch((r.resultado.advertencias ?? []).join(' '), /REANUDADO/);
+  assert.equal(registro.listar({ tipo: 'job.reintento', limite: 50 }).length, 0);
+  assert.equal(registro.listar({ tipo: 'job.reanudado', limite: 50 }).length, 0);
 });

@@ -37,6 +37,7 @@ import {
 import { resumirFallos } from './fallos.js';
 import { elegibles } from './planificador.js';
 import { cargarPerfil, perfilPorDefecto, resolverRaizWorktrees } from './profile.js';
+import { decidirReanudacion, esFalloDeTransporte, textoAdvertencia } from './reanudacion.js';
 import { crearProveedor } from './recursos.js';
 import { ejecutar } from './runner.js';
 import { verificarCambios, escriturasEnRutaProtegida } from './scope.js';
@@ -138,6 +139,7 @@ export class Gestor {
    * @param {number} [opciones.esperaMaximaMs] umbral anti-inanición del planificador
    * @param {Function} [opciones.ejecutarPsql] psql inyectable (tests)
    * @param {string} [opciones.autor] autor de los commits de los trabajos
+   * @param {{ registrar: (ev: object) => boolean, listar: (f?: object) => object[] }} [opciones.registro] registro global de eventos (auditoría)
    */
   constructor({
     almacen,
@@ -152,6 +154,7 @@ export class Gestor {
     sinProgresoMs,
     ejecutarPsql,
     autor = DEFECTOS.autor,
+    registro = null,
   } = {}) {
     if (!almacen) throw new ErrorDeGestor('El gestor necesita un almacén de trabajos');
     if (!opencode || typeof opencode.cmd !== 'string' || opencode.cmd === '') {
@@ -171,6 +174,8 @@ export class Gestor {
     this.ejecutarPsql = ejecutarPsql;
     this.autor = autor;
     this.vigilanciaAlcanceMs = vigilanciaAlcanceMs;
+    // Registro global de auditoría (opcional): si falta, registrar es un no-op.
+    this.registro = registro;
     // undefined = rige el del perfil (o el por defecto); los tests lo acortan.
     this.sinProgresoMs = sinProgresoMs;
 
@@ -182,6 +187,8 @@ export class Gestor {
     this.corriendo = new Set();
     /** @type {Map<string, AbortController>} cancelación por trabajo */
     this.controles = new Map();
+    /** @type {Map<string, string>} actor que pidió la cancelación de un trabajo en curso */
+    this.actores = new Map();
     /** @type {Map<string, Set<() => void>>} esperadores de fin de trabajo */
     this.esperadores = new Map();
     /** @type {Map<string, Promise<void>>} ejecuciones en curso (para cerrar limpiamente) */
@@ -197,17 +204,46 @@ export class Gestor {
   // Utilidades internas
   // ---------------------------------------------------------------------------
 
-  /** Persiste un parche y mantiene la copia en memoria. */
-  #guardar(id, parche) {
+  /**
+   * Persiste un parche y mantiene la copia en memoria. Si el parche CAMBIA el
+   * estado, deja constancia en el registro global de auditoría (`job.estado`):
+   * centralizarlo acá cubre todas las transiciones sin repetir la llamada.
+   */
+  #guardar(id, parche, actor = 'servidor') {
+    const previo = this.trabajos.get(id);
     const actualizado = this.almacen.actualizar(id, parche);
     this.trabajos.set(id, actualizado);
+    if (parche && parche.estado !== undefined && parche.estado !== previo?.estado) {
+      this.#evento({
+        tipo: 'job.estado',
+        jobId: id,
+        estado: actualizado.estado,
+        anterior: previo?.estado ?? null,
+        actor,
+      });
+    }
     return actualizado;
   }
 
   /** Registra un evento del trabajo (best-effort: un log roto no tumba el trabajo). */
-  #evento(id, evento) {
+  #eventoDeTrabajo(id, evento) {
     try {
       this.almacen.agregarEvento(id, evento);
+    } catch {
+      /* ignora */
+    }
+  }
+
+  /**
+   * Registra un evento en el registro global de auditoría. Best-effort: la
+   * observabilidad NUNCA debe frenar la operación que se intenta registrar (el
+   * registro devuelve `false` ante un fallo de E/S; un tipo inválido no debería
+   * llegar acá, pero tampoco puede tumbar el trabajo).
+   */
+  #evento(evento) {
+    if (!this.registro) return;
+    try {
+      this.registro.registrar(evento);
     } catch {
       /* ignora */
     }
@@ -277,10 +313,11 @@ export class Gestor {
    * Valida y encola un trabajo.
    *
    * @param {object} spec especificación (§3)
+   * @param {{ actor?: string }} [opciones] `actor` del evento de auditoría (p. ej. `herramienta:coding`)
    * @returns {Promise<object>} el trabajo creado (estado `queued`)
    * @throws {ErrorDeGestor} si la entrada es inválida
    */
-  async enviar(spec = {}) {
+  async enviar(spec = {}, { actor = 'servidor' } = {}) {
     if (this.cerrado) throw new ErrorDeGestor('El servidor se está cerrando: no acepta trabajos nuevos');
     // `solo_aceptacion`: no corre al agente, solo la aceptación sobre un worktree (compuerta sobre la
     // integración, o re-verificación de un trabajo rechazado ya arreglado). No necesita prompt.
@@ -449,9 +486,24 @@ export class Gestor {
     this.trabajos.set(trabajo.id, trabajo);
     this.cola.push(trabajo.id);
     this.almacen.auditar({ accion: 'enviar', id: trabajo.id, mode: modo, isolation, writes, cwd: cwdReal, prompt: spec.prompt });
-    this.#evento(trabajo.id, { tipo: 'encolado' });
+    this.#evento({ tipo: 'job.creado', jobId: trabajo.id, actor, detalle: { titulo: trabajo.titulo, modo, writes } });
+    this.#eventoDeTrabajo(trabajo.id, { tipo: 'encolado' });
     this.#bombear();
     return trabajo;
+  }
+
+  /**
+   * Registra en la auditoría global el arranque del servidor y la recuperación de
+   * trabajos huérfanos de una ejecución anterior (`almacen.marcarPerdidos`). Es
+   * best-effort: nunca lanza.
+   *
+   * @param {{ recuperados?: string[] }} [opciones] ids reconciliados al arrancar
+   */
+  registrarArranque({ recuperados = [] } = {}) {
+    this.#evento({ tipo: 'servidor.arranque', detalle: { concurrencia: this.concurrencia, modelo: this.modelo } });
+    if (Array.isArray(recuperados) && recuperados.length > 0) {
+      this.#evento({ tipo: 'servidor.recuperacion', detalle: { recuperados } });
+    }
   }
 
   /** Lanza los trabajos que el planificador declara elegibles. */
@@ -477,13 +529,19 @@ export class Gestor {
     for (const id of this.cola) {
       const espera = esperas.get(id) ?? null;
       const actual = this.trabajos.get(id)?.espera ?? null;
-      if (JSON.stringify(espera) !== JSON.stringify(actual)) this.#guardar(id, { espera });
+      if (JSON.stringify(espera) !== JSON.stringify(actual)) {
+        this.#guardar(id, { espera });
+        // El motivo de espera del planificador se registra solo cuando cambia, para
+        // no inundar la auditoría con la misma causa en cada pasada.
+        if (espera) this.#evento({ tipo: 'job.espera', jobId: id, motivo: espera.motivo, detalle: espera });
+      }
     }
 
     for (const { id, motivo } of bloqueados) {
       this.cola = this.cola.filter((x) => x !== id);
       this.#guardar(id, { estado: 'cancelled', motivoFin: 'dependencia_fallida', detalleFin: motivo });
-      this.#evento(id, { tipo: 'cancelado', motivo: 'dependencia_fallida' });
+      this.#evento({ tipo: 'job.cancelado', jobId: id, motivo: 'dependencia_fallida' });
+      this.#eventoDeTrabajo(id, { tipo: 'cancelado', motivo: 'dependencia_fallida' });
       this.#notificar(id);
     }
     for (const id of arrancar) {
@@ -523,9 +581,9 @@ export class Gestor {
         rootDirIntegracion,
       });
       if (sync.ok) return perfil.integrationBranch;
-      this.#evento(id, { tipo: 'base_integracion_no_sincronizable', conflictos: sync.conflictos });
+      this.#eventoDeTrabajo(id, { tipo: 'base_integracion_no_sincronizable', conflictos: sync.conflictos });
     } catch (error) {
-      this.#evento(id, { tipo: 'base_integracion_no_sincronizable', error: String(error?.message ?? error) });
+      this.#eventoDeTrabajo(id, { tipo: 'base_integracion_no_sincronizable', error: String(error?.message ?? error) });
     }
     return perfil.baseBranch;
   }
@@ -540,8 +598,8 @@ export class Gestor {
       // Primero la transición: desde 'queued' solo se puede ir a provisioning o cancelled,
       // así que cualquier error posterior (p. ej. un perfil inválido) puede terminar en failed.
       this.#guardar(id, { estado: 'provisioning' });
-      this.#evento(id, { tipo: 'provisionando' });
-      const job = this.trabajos.get(id);
+      this.#eventoDeTrabajo(id, { tipo: 'provisionando' });
+      let job = this.trabajos.get(id);
       const perfil = await this.#perfilDe(job.repo);
       const { rootDir } = this.#raices(perfil);
       const rutas = this.almacen.rutasDeLogs(id);
@@ -577,7 +635,7 @@ export class Gestor {
             baseCommit: origen.baseCommit,
             ignorar: origen.enlacesCreados ?? [],
           });
-          this.#evento(id, { tipo: 'cambios_trasladados', desde: origen.id, ...traslado });
+          this.#eventoDeTrabajo(id, { tipo: 'cambios_trasladados', desde: origen.id, ...traslado });
         }
       } else {
         baseCommit = await git(['rev-parse', 'HEAD'], job.repo);
@@ -647,159 +705,204 @@ export class Gestor {
         agente: NOMBRE_AGENTE,
       });
 
-      // 4) Ejecución de opencode
+      // 4) Ejecución de opencode. El agente puede morir por corte de transporte (socket
+      // cerrado) DESPUÉS de escribir; según lo que haya dejado conviene CONTINUAR con el
+      // pipeline normal (verificación + aceptación) o RELANZAR una vez. Por eso la corrida
+      // se encapsula y puede repetirse con el MISMO prompt en el MISMO worktree.
       this.#guardar(id, { estado: 'running' });
-      this.#evento(id, { tipo: 'ejecutando' });
+      this.#eventoDeTrabajo(id, { tipo: 'ejecutando' });
 
-      // Vigilancia de alcance DURANTE la ejecución: si el agente toca algo fuera de `writes` (o
-      // protegido) y sigue ahí en dos revisiones seguidas, se lo detiene en vez de dejarlo
-      // trabajar una hora para rechazarlo al final. Dos revisiones evitan cortar a un agente que
-      // creó un archivo de paso y lo borra enseguida.
-      const senalAgente = new AbortController();
-      const reenviarAborto = () => senalAgente.abort();
-      ctl.signal.addEventListener('abort', reenviarAborto, { once: true });
-      let violacionTemprana = null;
-      let sinProgreso = null;
-      let vigilante = null;
-      // Falta de PROGRESO: un agente que solo explora (lee, busca) y no escribe nada durante mucho
-      // tiempo no está avanzando (visto en vivo: 21 minutos sin una sola escritura). Se lo corta para
-      // relanzar la tarea con instrucciones precisas. 0 = sin límite. No aplica a readonly (no escribe).
-      const limiteSinProgreso = this.sinProgresoMs ?? perfil.sinProgresoMs ?? DEFECTOS.sinProgresoMs;
-      const iniciadoEn = Date.now();
-      let huboEscrituras = false;
-      if (!job.soloAceptacion && this.vigilanciaAlcanceMs > 0) {
-        let firmaPrevia = '';
-        let revisando = false;
-        vigilante = setInterval(async () => {
-          if (revisando || violacionTemprana || sinProgreso) return;
-          revisando = true;
-          try {
-            const { archivos } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
-            const propios = archivos.filter((archivo) => {
-              if (!previos.has(archivo)) return true;
-              return hashDeArchivo(path.join(raizTrabajo, archivo)) !== previos.get(archivo);
-            });
-            if (propios.length > 0) huboEscrituras = true;
-            const transcurrido = Date.now() - iniciadoEn;
-            if (!huboEscrituras && job.mode !== 'readonly' && limiteSinProgreso > 0 && transcurrido > limiteSinProgreso) {
-              sinProgreso = { transcurridoMs: transcurrido, limiteMs: limiteSinProgreso };
-              this.#evento(id, { tipo: 'sin_progreso', ...sinProgreso });
-              senalAgente.abort();
-              return;
-            }
-            const v = verificarCambios({ archivosCambiados: propios, writes: job.writes, protegidos, modo: job.mode });
-            const firma = v.ok ? '' : JSON.stringify(v.violaciones);
-            if (firma !== '' && firma === firmaPrevia) {
-              violacionTemprana = v.violaciones;
-              this.#evento(id, { tipo: 'alcance_temprano', violaciones: v.violaciones });
-              senalAgente.abort();
-            }
-            firmaPrevia = firma;
-          } catch {
-            /* una revisión fallida no tumba el trabajo: la verificación final sigue siendo la garantía */
-          } finally {
-            revisando = false;
-          }
-        }, this.vigilanciaAlcanceMs);
-        vigilante.unref?.();
-      }
+      // Advertencias acumuladas antes de la verificación final: la reanudación por corte
+      // de transporte agrega la suya acá y el pipeline normal la reexpone.
+      const advertencias = [];
 
-      let resultadoProceso;
-      try {
-        resultadoProceso = job.soloAceptacion
-          ? { motivo: 'exit', code: 0, signal: null, duracionMs: 0 }
-          : await ejecutar({
-        cmd: this.opencode.cmd,
-        args: [...this.opencode.argsPrefijo, ...args],
-        cwd: cwdTrabajo,
-        env: entorno,
-        stdoutPath: rutas.stdout,
-        stderrPath: rutas.stderr,
-        timeoutMs: job.timeoutMs,
-        idleTimeoutMs: job.idleTimeoutMs,
-        graceMs: this.graceMs,
-        signal: senalAgente.signal,
-        // Persistir el grupo y su identidad SIN ventana de pérdida (S1).
-        onLanzado: ({ pid, pgid }) => {
-          try {
-            this.#guardar(id, { pid, pgid, identidad: identidadDeProceso(pgid) });
-          } catch {
-            /* el trabajo sigue; el reinicio lo marcará perdido */
-          }
-        },
-      });
-      } finally {
-        if (vigilante) clearInterval(vigilante);
-        ctl.signal.removeEventListener('abort', reenviarAborto);
-      }
-      if (sinProgreso && !ctl.signal.aborted) {
-        const proceso = { motivo: 'detenido_por_falta_de_progreso', exit: null, senal: null, duracionMs: resultadoProceso.duracionMs };
-        this.#evento(id, { tipo: 'proceso_terminado', ...proceso });
-        const minutos = Math.round(sinProgreso.transcurridoMs / 60000);
-        return this.#terminar(id, 'failed', {
-          proceso,
-          archivos: [],
-          advertencias: [
-            `Detenido: el agente no escribió NINGÚN archivo en ${minutos} min (solo exploró). No hay nada que retomar con ` +
-              '`desde_job`. Relanzá la tarea con un prompt ACOTADO: indicá los archivos y las líneas exactas donde cambiar ' +
-              '(buscalos vos antes con grep) y pedile que empiece a escribir enseguida.',
-          ],
-          motivoFin: 'sin_progreso',
-        });
-      }
-      if (violacionTemprana && !ctl.signal.aborted) {
-        const proceso = { motivo: 'detenido_por_alcance', exit: null, senal: null, duracionMs: resultadoProceso.duracionMs };
-        this.#evento(id, { tipo: 'proceso_terminado', ...proceso });
-        // La máquina de estados exige pasar por `verifying` antes de rechazar.
-        this.#guardar(id, { estado: 'verifying' });
-        this.#evento(id, { tipo: 'verificando' });
-        const { archivos, resumen } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
-        return this.#terminar(id, 'rejected', {
-          proceso,
-          archivos,
-          resumen,
-          violaciones: violacionTemprana,
-          advertencias: [
-            'Detenido TEMPRANO: el agente tocó archivos fuera de `writes` (o protegidos) y persistió en ello. ' +
-              'Ajustá `writes` o la tarea; con `desde_job` podés retomar lo que dejó sin repetir todo.',
-          ],
-          motivoFin: 'alcance',
-        });
-      }
-      const proceso = {
-        motivo: resultadoProceso.motivo,
-        exit: resultadoProceso.code,
-        senal: resultadoProceso.signal,
-        duracionMs: resultadoProceso.duracionMs,
+      /** Corre el agente UNA vez, con su vigilante de alcance/progreso. */
+      const correrAgente = async () => {
+        // Vigilancia de alcance DURANTE la ejecución: si el agente toca algo fuera de `writes` (o
+        // protegido) y sigue ahí en dos revisiones seguidas, se lo detiene en vez de dejarlo
+        // trabajar una hora para rechazarlo al final. Dos revisiones evitan cortar a un agente que
+        // creó un archivo de paso y lo borra enseguida.
+        const senalAgente = new AbortController();
+        const reenviarAborto = () => senalAgente.abort();
+        ctl.signal.addEventListener('abort', reenviarAborto, { once: true });
+        let violacionTemprana = null;
+        let sinProgreso = null;
+        let vigilante = null;
+        // Falta de PROGRESO: un agente que solo explora (lee, busca) y no escribe nada durante mucho
+        // tiempo no está avanzando (visto en vivo: 21 minutos sin una sola escritura). Se lo corta para
+        // relanzar la tarea con instrucciones precisas. 0 = sin límite. No aplica a readonly (no escribe).
+        const limiteSinProgreso = this.sinProgresoMs ?? perfil.sinProgresoMs ?? DEFECTOS.sinProgresoMs;
+        const iniciadoEn = Date.now();
+        let huboEscrituras = false;
+        if (!job.soloAceptacion && this.vigilanciaAlcanceMs > 0) {
+          let firmaPrevia = '';
+          let revisando = false;
+          vigilante = setInterval(async () => {
+            if (revisando || violacionTemprana || sinProgreso) return;
+            revisando = true;
+            try {
+              const { archivos } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
+              const propios = archivos.filter((archivo) => {
+                if (!previos.has(archivo)) return true;
+                return hashDeArchivo(path.join(raizTrabajo, archivo)) !== previos.get(archivo);
+              });
+              if (propios.length > 0) huboEscrituras = true;
+              const transcurrido = Date.now() - iniciadoEn;
+              if (!huboEscrituras && job.mode !== 'readonly' && limiteSinProgreso > 0 && transcurrido > limiteSinProgreso) {
+                sinProgreso = { transcurridoMs: transcurrido, limiteMs: limiteSinProgreso };
+                this.#eventoDeTrabajo(id, { tipo: 'sin_progreso', ...sinProgreso });
+                senalAgente.abort();
+                return;
+              }
+              const v = verificarCambios({ archivosCambiados: propios, writes: job.writes, protegidos, modo: job.mode });
+              const firma = v.ok ? '' : JSON.stringify(v.violaciones);
+              if (firma !== '' && firma === firmaPrevia) {
+                violacionTemprana = v.violaciones;
+                this.#eventoDeTrabajo(id, { tipo: 'alcance_temprano', violaciones: v.violaciones });
+                senalAgente.abort();
+              }
+              firmaPrevia = firma;
+            } catch {
+              /* una revisión fallida no tumba el trabajo: la verificación final sigue siendo la garantía */
+            } finally {
+              revisando = false;
+            }
+          }, this.vigilanciaAlcanceMs);
+          vigilante.unref?.();
+        }
+
+        let resultadoProceso;
+        try {
+          resultadoProceso = job.soloAceptacion
+            ? { motivo: 'exit', code: 0, signal: null, duracionMs: 0 }
+            : await ejecutar({
+                cmd: this.opencode.cmd,
+                args: [...this.opencode.argsPrefijo, ...args],
+                cwd: cwdTrabajo,
+                env: entorno,
+                stdoutPath: rutas.stdout,
+                stderrPath: rutas.stderr,
+                timeoutMs: job.timeoutMs,
+                idleTimeoutMs: job.idleTimeoutMs,
+                graceMs: this.graceMs,
+                signal: senalAgente.signal,
+                // Persistir el grupo y su identidad SIN ventana de pérdida (S1).
+                onLanzado: ({ pid, pgid }) => {
+                  try {
+                    this.#guardar(id, { pid, pgid, identidad: identidadDeProceso(pgid) });
+                  } catch {
+                    /* el trabajo sigue; el reinicio lo marcará perdido */
+                  }
+                },
+              });
+        } finally {
+          if (vigilante) clearInterval(vigilante);
+          ctl.signal.removeEventListener('abort', reenviarAborto);
+        }
+        return { resultadoProceso, sinProgreso, violacionTemprana };
       };
-      this.#evento(id, { tipo: 'proceso_terminado', ...proceso });
 
-      if (resultadoProceso.motivo === 'cancelado') return this.#terminar(id, 'cancelled', { proceso, motivoFin: 'cancelado' });
-      if (resultadoProceso.motivo === 'timeout' || resultadoProceso.motivo === 'idle') {
-        return this.#terminar(id, 'failed', { proceso, motivoFin: resultadoProceso.motivo });
-      }
-      if (resultadoProceso.motivo === 'error_al_lanzar') {
-        return this.#terminar(id, 'failed', { proceso, motivoFin: 'error_al_lanzar', error: resultadoProceso.mensaje });
-      }
-      if (resultadoProceso.code !== 0) {
+      let proceso;
+      for (;;) {
+        const { resultadoProceso, sinProgreso, violacionTemprana } = await correrAgente();
+        if (sinProgreso && !ctl.signal.aborted) {
+          proceso = { motivo: 'detenido_por_falta_de_progreso', exit: null, senal: null, duracionMs: resultadoProceso.duracionMs };
+          this.#eventoDeTrabajo(id, { tipo: 'proceso_terminado', ...proceso });
+          const minutos = Math.round(sinProgreso.transcurridoMs / 60000);
+          return this.#terminar(id, 'failed', {
+            proceso,
+            archivos: [],
+            advertencias: [
+              `Detenido: el agente no escribió NINGÚN archivo en ${minutos} min (solo exploró). No hay nada que retomar con ` +
+                '`desde_job`. Relanzá la tarea con un prompt ACOTADO: indicá los archivos y las líneas exactas donde cambiar ' +
+                '(buscalos vos antes con grep) y pedile que empiece a escribir enseguida.',
+            ],
+            motivoFin: 'sin_progreso',
+          });
+        }
+        if (violacionTemprana && !ctl.signal.aborted) {
+          proceso = { motivo: 'detenido_por_alcance', exit: null, senal: null, duracionMs: resultadoProceso.duracionMs };
+          this.#eventoDeTrabajo(id, { tipo: 'proceso_terminado', ...proceso });
+          // La máquina de estados exige pasar por `verifying` antes de rechazar.
+          this.#guardar(id, { estado: 'verifying' });
+          this.#eventoDeTrabajo(id, { tipo: 'verificando' });
+          const { archivos, resumen } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
+          return this.#terminar(id, 'rejected', {
+            proceso,
+            archivos,
+            resumen,
+            violaciones: violacionTemprana,
+            advertencias: [
+              'Detenido TEMPRANO: el agente tocó archivos fuera de `writes` (o protegidos) y persistió en ello. ' +
+                'Ajustá `writes` o la tarea; con `desde_job` podés retomar lo que dejó sin repetir todo.',
+            ],
+            motivoFin: 'alcance',
+          });
+        }
+        proceso = {
+          motivo: resultadoProceso.motivo,
+          exit: resultadoProceso.code,
+          senal: resultadoProceso.signal,
+          duracionMs: resultadoProceso.duracionMs,
+        };
+        this.#eventoDeTrabajo(id, { tipo: 'proceso_terminado', ...proceso });
+
+        if (resultadoProceso.motivo === 'cancelado') return this.#terminar(id, 'cancelled', { proceso, motivoFin: 'cancelado' });
+        if (resultadoProceso.motivo === 'timeout' || resultadoProceso.motivo === 'idle') {
+          return this.#terminar(id, 'failed', { proceso, motivoFin: resultadoProceso.motivo });
+        }
+        if (resultadoProceso.motivo === 'error_al_lanzar') {
+          return this.#terminar(id, 'failed', { proceso, motivoFin: 'error_al_lanzar', error: resultadoProceso.mensaje });
+        }
+        if (resultadoProceso.code === 0) break; // salida limpia: sigue el pipeline normal
+
+        // Fallo del agente: ¿fue un corte de transporte tras el que conviene CONTINUAR (ya
+        // dejó cambios en alcance) o RELANZAR (no dejó nada)? Los cortes deliberados del
+        // servidor (timeout, cancelado, alcance, sin progreso) ya salieron por los returns.
+        const fallo = {
+          codigo: resultadoProceso.code,
+          motivo: resultadoProceso.motivo,
+          stderr: leerColaArchivo(rutas.stderr, 8192),
+          stdout: leerColaArchivo(rutas.stdout, 8192),
+          duracionMs: resultadoProceso.duracionMs,
+        };
+        const actual = await this.#alcanceDeTrabajo({
+          raizTrabajo,
+          baseCommit,
+          enlaces,
+          previos,
+          writes: job.writes,
+          protegidos,
+          modo: job.mode,
+        });
+        const decision = decidirReanudacion({
+          fallo,
+          hayCambiosEnAlcance: actual.alcance.ok && actual.archivos.length > 0,
+          relanzamientosPrevios: job.relanzamientos ?? 0,
+          config: perfil.reanudacion,
+        });
+        if (decision.accion === 'continuar') {
+          advertencias.push(textoAdvertencia(decision, fallo));
+          this.#evento({ tipo: 'job.reanudado', jobId: id, motivo: decision.motivo });
+          break;
+        }
+        if (decision.accion === 'relanzar') {
+          const relanzamientos = (job.relanzamientos ?? 0) + 1;
+          job = this.#guardar(id, { relanzamientos });
+          this.#evento({ tipo: 'job.reintento', jobId: id, motivo: decision.motivo, detalle: { relanzamientos } });
+          continue; // mismo worktree, mismo prompt, mismo entorno
+        }
         return this.#terminar(id, 'failed', { proceso, motivoFin: 'exit_distinto_de_cero' });
       }
 
       // 5) Verificación de alcance (la garantía real, §4)
       this.#guardar(id, { estado: 'verifying' });
-      this.#evento(id, { tipo: 'verificando' });
-      const { archivos, resumen } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
-      const archivosTrabajo = archivos.filter((archivo) => {
-        if (!previos.has(archivo)) return true;
-        return hashDeArchivo(path.join(raizTrabajo, archivo)) !== previos.get(archivo);
-      });
-      const alcance = verificarCambios({
-        archivosCambiados: archivosTrabajo,
-        writes: job.writes,
-        protegidos,
-        modo: job.mode,
-      });
-      const advertencias = [];
+      this.#eventoDeTrabajo(id, { tipo: 'verificando' });
+      const {
+        archivos: archivosTrabajo,
+        resumen,
+        alcance,
+      } = await this.#alcanceDeTrabajo({ raizTrabajo, baseCommit, enlaces, previos, writes: job.writes, protegidos, modo: job.mode });
       if (arbolRealAntes) {
         const tocados = await this.#cambiosEnElArbolReal(job.repo, arbolRealAntes);
         if (tocados.length > 0) {
@@ -900,10 +1003,28 @@ export class Gestor {
         try {
           await liberar();
         } catch (error) {
-          this.#evento(id, { tipo: 'error_al_liberar_recurso', error: String(error?.message ?? error) });
+          this.#eventoDeTrabajo(id, { tipo: 'error_al_liberar_recurso', error: String(error?.message ?? error) });
         }
       }
     }
+  }
+
+  /**
+   * Archivos modificados por el trabajo (descontando los que ya estaban antes) y el
+   * resultado de verificar ese cambio contra `writes`/`protected`. Se usa tanto en la
+   * decisión de reanudación como en la verificación final, para no divergir.
+   *
+   * @param {object} opciones
+   * @returns {Promise<{ archivos: string[], resumen: object, alcance: object }>}
+   */
+  async #alcanceDeTrabajo({ raizTrabajo, baseCommit, enlaces, previos, writes, protegidos, modo }) {
+    const { archivos, resumen } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
+    const archivosTrabajo = archivos.filter((archivo) => {
+      if (!previos.has(archivo)) return true;
+      return hashDeArchivo(path.join(raizTrabajo, archivo)) !== previos.get(archivo);
+    });
+    const alcance = verificarCambios({ archivosCambiados: archivosTrabajo, writes, protegidos, modo });
+    return { archivos: archivosTrabajo, resumen, alcance };
   }
 
   /** Foto del árbol REAL (archivos modificados y su hash) para detectar escapes del worktree. */
@@ -934,8 +1055,16 @@ export class Gestor {
   #terminar(id, estado, datos = {}) {
     const actual = this.trabajos.get(id);
     if (!actual || esTerminal(actual.estado)) return;
-    this.#guardar(id, { estado, resultado: datos, motivoFin: datos.motivoFin ?? null, error: datos.error ?? null });
-    this.#evento(id, { tipo: 'fin', estado, motivo: datos.motivoFin ?? null });
+    // El actor puede venir de una cancelación pedida por una herramienta MCP.
+    const actor = this.actores.get(id) ?? 'servidor';
+    this.actores.delete(id);
+    const guardado = this.#guardar(id, { estado, resultado: datos, motivoFin: datos.motivoFin ?? null, error: datos.error ?? null }, actor);
+    const duracionMs = (guardado.finEn ?? Date.now()) - (guardado.inicioEn ?? guardado.creadoEn ?? 0);
+    this.#eventoDeTrabajo(id, { tipo: 'fin', estado, motivo: datos.motivoFin ?? null });
+    this.#evento({ tipo: 'job.fin', jobId: id, estado, motivo: datos.motivoFin ?? null, actor, detalle: { duracionMs } });
+    if (estado === 'cancelled') {
+      this.#evento({ tipo: 'job.cancelado', jobId: id, motivo: datos.motivoFin ?? null, actor });
+    }
     this.almacen.auditar({ accion: 'fin', id, estado, motivo: datos.motivoFin ?? null });
   }
 
@@ -1001,19 +1130,24 @@ export class Gestor {
   /**
    * Cancela un trabajo: en cola se descarta; en ejecución mata el grupo de procesos.
    * @param {string} id
+   * @param {{ actor?: string }} [opciones] actor del evento de auditoría
    * @returns {Promise<object>} el trabajo tras cancelarlo (o tal cual si ya terminó)
    */
-  async cancelar(id) {
+  async cancelar(id, { actor = 'servidor' } = {}) {
     const trabajo = this.obtener(id);
     if (esTerminal(trabajo.estado)) return trabajo;
     if (trabajo.estado === 'queued' && this.cola.includes(id)) {
       this.cola = this.cola.filter((x) => x !== id);
-      this.#guardar(id, { estado: 'cancelled', motivoFin: 'cancelado_en_cola' });
-      this.#evento(id, { tipo: 'cancelado', motivo: 'cancelado_en_cola' });
+      this.#guardar(id, { estado: 'cancelled', motivoFin: 'cancelado_en_cola' }, actor);
+      this.#evento({ tipo: 'job.cancelado', jobId: id, motivo: 'cancelado_en_cola', actor });
+      this.#eventoDeTrabajo(id, { tipo: 'cancelado', motivo: 'cancelado_en_cola' });
       this.#notificar(id);
       this.#bombear();
       return this.trabajos.get(id);
     }
+    // La cancelación de un trabajo en curso la cierra #terminar; el actor viaja en el
+    // mapa para que el job.estado/job.cancelado queden atribuidos a la herramienta.
+    this.actores.set(id, actor);
     this.controles.get(id)?.abort();
     const fin = await this.esperar(id, 15000);
     return fin ?? this.trabajos.get(id);
@@ -1050,9 +1184,10 @@ export class Gestor {
   /**
    * Integra un trabajo `succeeded` en la rama de integración del perfil (§9).
    * @param {string} id
+   * @param {{ avanzarBase?: boolean, actor?: string }} [opciones]
    * @returns {Promise<{ ok: boolean, sha?: string, conflictos?: string[], motivo?: string }>}
    */
-  async integrar(id, { avanzarBase: avanzar = false } = {}) {
+  async integrar(id, { avanzarBase: avanzar = false, actor = 'servidor' } = {}) {
     const trabajo = this.obtener(id);
     if (trabajo.estado !== 'succeeded') {
       throw new ErrorDeGestor(`Solo se integran trabajos succeeded (este está ${trabajo.estado})`);
@@ -1076,8 +1211,9 @@ export class Gestor {
       rootDirIntegracion,
     });
     if (resultado.ok) {
-      this.#guardar(id, { estado: 'merged', integradoSha: resultado.sha, integradoEn: perfil.integrationBranch });
-      this.#evento(id, { tipo: 'integrado', sha: resultado.sha, rama: perfil.integrationBranch });
+      this.#guardar(id, { estado: 'merged', integradoSha: resultado.sha, integradoEn: perfil.integrationBranch }, actor);
+      this.#eventoDeTrabajo(id, { tipo: 'integrado', sha: resultado.sha, rama: perfil.integrationBranch });
+      this.#evento({ tipo: 'merge', jobId: id, actor, detalle: { rama: perfil.integrationBranch, sha: resultado.sha } });
       this.almacen.auditar({ accion: 'integrar', id, sha: resultado.sha, rama: perfil.integrationBranch });
       // Opt-in: avanzar la base con fast-forward. Un fallo acá NO deshace la integración (ya está
       // hecha en la rama de integración): se informa el motivo y el usuario avanza a mano.
@@ -1089,19 +1225,20 @@ export class Gestor {
           integrationBranch: perfil.integrationBranch,
         }).catch((error) => ({ ok: false, motivo: String(error?.message ?? error) }));
         this.almacen.auditar({ accion: 'avanzar_base', id, ok: base.ok, sha: base.sha, motivo: base.motivo });
+        this.#evento({ tipo: 'avanzar_base', jobId: id, actor, detalle: { ok: base.ok, sha: base.sha, motivo: base.motivo } });
       }
       return { ok: true, sha: resultado.sha, rama: perfil.integrationBranch, baseAvanzada: base, base: perfil.baseBranch };
     }
-    this.#evento(id, { tipo: 'integracion_con_conflictos', conflictos: resultado.conflictos });
+    this.#eventoDeTrabajo(id, { tipo: 'integracion_con_conflictos', conflictos: resultado.conflictos });
     return { ok: false, conflictos: resultado.conflictos, motivo: resultado.motivo };
   }
 
   /**
    * Elimina worktrees y ramas de trabajos terminados.
-   * @param {{ ids?: string[], antiguedadMs?: number }} [opciones]
+   * @param {{ ids?: string[], antiguedadMs?: number, actor?: string }} [opciones]
    * @returns {Promise<string[]>} ids limpiados
    */
-  async limpiar({ ids, antiguedadMs = 0 } = {}) {
+  async limpiar({ ids, antiguedadMs = 0, actor = 'servidor' } = {}) {
     const limpiados = [];
     const ahora = Date.now();
     for (const trabajo of [...this.trabajos.values()]) {
@@ -1115,9 +1252,10 @@ export class Gestor {
         this.#guardar(trabajo.id, { limpiado: true });
         limpiados.push(trabajo.id);
       } catch (error) {
-        this.#evento(trabajo.id, { tipo: 'error_al_limpiar', error: String(error?.message ?? error) });
+        this.#eventoDeTrabajo(trabajo.id, { tipo: 'error_al_limpiar', error: String(error?.message ?? error) });
       }
     }
+    this.#evento({ tipo: 'cleanup', actor, detalle: { ids: limpiados, cantidad: limpiados.length } });
     return limpiados;
   }
 
@@ -1166,6 +1304,7 @@ export class Gestor {
     this.cerrado = true;
     for (const id of [...this.cola]) {
       this.#guardar(id, { estado: 'cancelled', motivoFin: 'servidor_cerrado' });
+      this.#evento({ tipo: 'job.cancelado', jobId: id, motivo: 'servidor_cerrado' });
       this.#notificar(id);
     }
     this.cola = [];

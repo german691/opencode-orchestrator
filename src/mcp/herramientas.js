@@ -26,18 +26,22 @@ const ESQUEMA_JOB = { type: 'string', description: 'job_id devuelto por opencode
  */
 export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now } = {}) {
   /** Resultado de esperar a un trabajo: terminado (detalle) o sigue activo. */
-  async function respuestaDe(id, ms) {
+  async function respuestaDe(id, ms, completo = false) {
     const trabajo = await gestor.esperar(id, ms);
     if (!trabajo || !esTerminal(trabajo.estado)) {
       return { text: describirActivo(gestor.obtener(id), ahora()), isError: false };
     }
     const colas = {
-      salida: gestor.logs(id, 'stdout', 4000),
-      errores: trabajo.estado === 'failed' || trabajo.estado === 'rejected' ? gestor.logs(id, 'stderr', 1500) : '',
+      // `completo` trae una ventana mucho mayor para que el cliente recupere todo el log.
+      salida: gestor.logs(id, 'stdout', completo ? 100000 : 4000),
+      errores: trabajo.estado === 'failed' || trabajo.estado === 'rejected' ? gestor.logs(id, 'stderr', completo ? 100000 : 1500) : '',
     };
     const malo = trabajo.estado === 'failed' || trabajo.estado === 'rejected' || trabajo.estado === 'lost';
-    return { text: describirTerminado(trabajo, colas), isError: malo };
+    return { text: describirTerminado(trabajo, colas, { completo }), isError: malo };
   }
+
+  /** `completo` llega como booleano o como texto "true" (clientes con el esquema en caché). */
+  const esCompleto = (args) => args?.completo === true || args?.completo === 'true';
 
   const exigirId = (args) => {
     if (typeof args.job_id !== 'string' || args.job_id === '') throw new ErrorDeGestor('`job_id` es obligatorio');
@@ -76,20 +80,29 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
           base: { type: 'string', enum: ['base', 'integracion'], description: 'De qué rama parte el worktree: la base del perfil o la rama de integración (con lo ya integrado). Por defecto el `jobBase` del perfil.' },
           solo_aceptacion: { type: 'boolean', description: 'No corre al agente: solo ejecuta `accept` sobre un worktree. Úsalo como COMPUERTA sobre la integración (con base: "integracion" y accept: la suite completa) o para re-verificar un trabajo ya arreglado (con desde_job). No requiere `prompt` ni `writes`.' },
           desde_job: { type: 'string', description: 'Retoma un trabajo terminado (rechazado, fallido o caído) que conserve su worktree: el nuevo parte del mismo commit y recibe los archivos que dejó, y hereda su writes, resources y accept. Con solo_aceptacion solo repite la aceptación; sin ella el agente continúa con el nuevo `prompt`.' },
+          completo: { type: 'boolean', description: 'Opcional: devuelve TODA la salida del agente y de la aceptación, sin recortar a las últimas líneas (por defecto se recorta para ahorrar contexto). Acepta true o "true".' },
         },
         required: ['cwd'],
         additionalProperties: false,
       },
       manejar: async (args) => {
-        const trabajo = await gestor.enviar(args);
-        return respuestaDe(trabajo.id, esperaMs);
+        const trabajo = await gestor.enviar(args, { actor: 'herramienta:coding' });
+        return respuestaDe(trabajo.id, esperaMs, esCompleto(args));
       },
     },
     {
       name: 'opencode_wait',
       description: 'Espera hasta ~45 s a un trabajo iniciado con opencode_coding. Devuelve el resultado si terminó o `STILL RUNNING` otra vez: repetí hasta que termine.',
-      inputSchema: { type: 'object', properties: { job_id: ESQUEMA_JOB }, required: ['job_id'], additionalProperties: false },
-      manejar: async (args) => respuestaDe(exigirId(args), esperaMs),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          job_id: ESQUEMA_JOB,
+          completo: { type: 'boolean', description: 'Opcional: devuelve toda la salida sin recortar (por defecto se recorta). Acepta true o "true".' },
+        },
+        required: ['job_id'],
+        additionalProperties: false,
+      },
+      manejar: async (args) => respuestaDe(exigirId(args), esperaMs, esCompleto(args)),
     },
     {
       name: 'opencode_wait_any',
@@ -98,7 +111,10 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
         '(con su detalle) y el estado de los que siguen activos. Evita sondear uno por uno: repetí hasta que no quede ninguno activo.',
       inputSchema: {
         type: 'object',
-        properties: { job_ids: { type: 'array', items: ESQUEMA_JOB, minItems: 1, description: 'job_id a esperar.' } },
+        properties: {
+          job_ids: { type: 'array', items: ESQUEMA_JOB, minItems: 1, description: 'job_id a esperar.' },
+          completo: { type: 'boolean', description: 'Opcional: devuelve toda la salida sin recortar (por defecto se recorta). Acepta true o "true".' },
+        },
         required: ['job_ids'],
         additionalProperties: false,
       },
@@ -106,10 +122,11 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
         const ids = Array.isArray(args.job_ids) ? args.job_ids.filter((id) => typeof id === 'string' && id !== '') : [];
         if (ids.length === 0) throw new ErrorDeGestor('`job_ids` debe ser una lista no vacía de job_id');
         const { terminados, activos } = await gestor.esperarAlguno(ids, esperaMs);
+        const completo = esCompleto(args);
         const partes = [];
         let malo = false;
         for (const id of terminados) {
-          const r = await respuestaDe(id, 0);
+          const r = await respuestaDe(id, 0, completo);
           malo = malo || r.isError;
           partes.push(r.text);
         }
@@ -161,7 +178,7 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
       description: 'Cancela un trabajo: si está en cola lo descarta; si corre, mata su grupo de procesos completo (incluidos los comandos que lanzó).',
       inputSchema: { type: 'object', properties: { job_id: ESQUEMA_JOB }, required: ['job_id'], additionalProperties: false },
       manejar: async (args) => {
-        const trabajo = await gestor.cancelar(exigirId(args));
+        const trabajo = await gestor.cancelar(exigirId(args), { actor: 'herramienta:cancel' });
         return { text: describirTerminado(trabajo, {}), isError: false };
       },
     },
@@ -178,7 +195,7 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
         additionalProperties: false,
       },
       manejar: async (args) => {
-        const resultado = await gestor.integrar(exigirId(args), { avanzarBase: args?.avanzar_base === true || args?.avanzar_base === 'true' });
+        const resultado = await gestor.integrar(exigirId(args), { avanzarBase: args?.avanzar_base === true || args?.avanzar_base === 'true', actor: 'herramienta:merge' });
         if (resultado.ok) {
           let texto = `Integrado en ${resultado.rama} (sha ${resultado.sha}). Revisá: git diff <base>..${resultado.rama}`;
           if (resultado.baseAvanzada) {
@@ -205,7 +222,7 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
       },
       manejar: async (args) => {
         const antiguedadMs = Number.isFinite(args.mas_viejos_que_minutos) ? args.mas_viejos_que_minutos * 60000 : 0;
-        const limpiados = await gestor.limpiar({ ids: args.job_ids, antiguedadMs });
+        const limpiados = await gestor.limpiar({ ids: args.job_ids, antiguedadMs, actor: 'herramienta:cleanup' });
         return { text: limpiados.length ? `Limpiados (${limpiados.length}): ${limpiados.join(', ')}` : 'No había nada que limpiar.', isError: false };
       },
     },
