@@ -15,6 +15,9 @@ const NODE = process.execPath;
 // para no ejecutarse como prueba. Al lanzarlo como proceso real lo quitamos.
 const ENTORNO = { ...process.env };
 delete ENTORNO.NODE_TEST_CONTEXT;
+// Si los tests corren DENTRO de un trabajo del propio orquestador, el servidor exporta
+// OPENCODE_CONFIG del trabajo: no debe filtrarse a los procesos de prueba.
+delete ENTORNO.OPENCODE_CONFIG;
 
 /** Igual que `ejecutar`, pero sin el marcador del runner de tests en el entorno. */
 const correr = (opciones) => ejecutar({ env: ENTORNO, ...opciones });
