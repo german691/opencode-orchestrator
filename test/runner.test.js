@@ -615,3 +615,173 @@ test('runner: el log se acota conservando cabeza, cola y una línea marcadora', 
     await asegurarLimpio(resultado.pgid, [resultado.pid]);
   }
 });
+
+test('runner: la compactación asíncrona conserva el orden con escritura concurrente', async () => {
+  const dir = dirTemporal();
+  const out = path.join(dir, 'stdout.log');
+  const totalLineas = 30000;
+  // Cada línea es un número de 9 dígitos + salto: sirve para detectar tanto pérdidas como
+  // reordenamientos cuando el log se compacta mientras el proceso sigue escribiendo.
+  const script = `
+    const total = ${totalLineas};
+    const lineas = [];
+    for (let i = 1; i <= total; i += 1) lineas.push(String(i).padStart(9, '0') + '\\n');
+    process.stdout.write(lineas.join(''));
+  `;
+
+  const resultado = await correr({
+    cmd: NODE,
+    args: ['-e', script],
+    cwd: dir,
+    stdoutPath: out,
+    timeoutMs: 30000,
+    idleTimeoutMs: 30000,
+    graceMs: 300,
+    maxLogBytes: 200_000,
+    logHeadBytes: 40_000,
+    logTailBytes: 40_000,
+  });
+
+  try {
+    assert.equal(resultado.motivo, 'exit');
+    assert.equal(resultado.code, 0);
+    const texto = fs.readFileSync(out, 'utf8');
+    assert.match(texto, /\[… \d+ bytes omitidos …\]/, 'debe haber compactado');
+    const [cabeza, cola] = texto.split(/\[… \d+ bytes omitidos …\]/);
+    const numeros = (parte) => (parte.match(/\d+/g) || []).map(Number);
+    // Los tokens que tocan el corte pueden quedar partidos: se descartan.
+    const secuencia = [...numeros(cabeza).slice(0, -1), ...numeros(cola).slice(1)];
+    assert.equal(secuencia[0], 1, 'la cabeza arranca en la primera línea');
+    assert.equal(secuencia[secuencia.length - 1], totalLineas, 'la cola termina en la última línea');
+    for (let i = 1; i < secuencia.length; i += 1) {
+      assert.ok(secuencia[i] > secuencia[i - 1], `orden roto en ${i}: ${secuencia[i - 1]} -> ${secuencia[i]}`);
+    }
+  } finally {
+    await asegurarLimpio(resultado.pgid, [resultado.pid]);
+  }
+});
+
+test('runner: compactar un archivo grande no bloquea el event loop', async () => {
+  const dir = dirTemporal();
+  const out = path.join(dir, 'stdout.log');
+  const MB = 1024 * 1024;
+  const tamanioInicial = 384 * MB;
+  // Se pre-crea un log ENORME (disperso, sin ocupar disco) para que la primera escritura
+  // dispare la compactación sobre un archivo que la implementación vieja leería entero.
+  const fd = fs.openSync(out, 'w');
+  fs.ftruncateSync(fd, tamanioInicial);
+  fs.closeSync(fd);
+
+  let maxRetraso = 0;
+  let ultimo = Date.now();
+  const timer = setInterval(() => {
+    const ahora = Date.now();
+    const retraso = ahora - ultimo - 10;
+    if (retraso > maxRetraso) maxRetraso = retraso;
+    ultimo = ahora;
+  }, 10);
+
+  let resultado;
+  try {
+    resultado = await correr({
+      cmd: NODE,
+      args: [fixture('eco.js'), '0'],
+      cwd: dir,
+      stdoutPath: out,
+      timeoutMs: 15000,
+      idleTimeoutMs: 15000,
+      graceMs: 300,
+      maxLogBytes: tamanioInicial,
+      logHeadBytes: 1 * MB,
+      logTailBytes: 1 * MB,
+    });
+  } finally {
+    clearInterval(timer);
+  }
+
+  try {
+    assert.equal(resultado.motivo, 'exit');
+    assert.ok(maxRetraso < 200, `el event loop se bloqueó ${maxRetraso} ms al compactar`);
+    const tamanoFinal = fs.statSync(out).size;
+    assert.ok(tamanoFinal < 4 * MB, `el log debería quedar acotado a cabeza+cola (${tamanoFinal})`);
+    assert.match(fs.readFileSync(out, 'utf8'), /\[… \d+ bytes omitidos …\]/);
+  } finally {
+    await asegurarLimpio(resultado.pgid, [resultado.pid]);
+  }
+});
+
+test('runner: la cola de la compactación respeta su tope y cuenta lo descartado', async () => {
+  const dir = dirTemporal();
+  const out = path.join(dir, 'stdout.log');
+  const MB = 1024 * 1024;
+  const S = 280 * MB;
+  const W = 8 * MB;
+  const fd = fs.openSync(out, 'w');
+  fs.ftruncateSync(fd, S);
+  fs.closeSync(fd);
+
+  // Una sola ráfaga de W bytes: buena parte llega mientras la compactación lee la cabeza,
+  // así que excede el tope de cola (una cola de 16 KB) y lo viejo se descarta.
+  const script = `
+    const b = Buffer.alloc(${W}, 0x79);
+    if (process.stdout.write(b)) process.exit(0);
+    else process.stdout.on('drain', () => process.exit(0));
+  `;
+
+  const resultado = await correr({
+    cmd: NODE,
+    args: ['-e', script],
+    cwd: dir,
+    stdoutPath: out,
+    timeoutMs: 20000,
+    idleTimeoutMs: 20000,
+    graceMs: 300,
+    maxLogBytes: 280 * MB,
+    logHeadBytes: 64 * MB,
+    logTailBytes: 16 * 1024,
+  });
+
+  try {
+    assert.equal(resultado.motivo, 'exit');
+    const buffer = fs.readFileSync(out);
+    const texto = buffer.toString('utf8');
+    const coincidencia = texto.match(/\[… (\d+) bytes omitidos …\]/);
+    assert.ok(coincidencia, 'debe haber marcador');
+    const omitidos = Number(coincidencia[1]);
+    const marcadorBytes = Buffer.byteLength(coincidencia[0], 'utf8') + 2; // los dos '\n'
+    // El marcador debe ser exacto: todo lo que no sobrevivió (medio del archivo + cola
+    // descartada) tiene que estar contado.
+    const esperado = S + W - (buffer.length - marcadorBytes);
+    assert.equal(omitidos, esperado, 'el marcador debe contar los bytes realmente omitidos');
+    // Sin descartar la cola, el log retendría también los W bytes de la ráfaga.
+    assert.ok(buffer.length < 66 * MB, `el tope de cola debió acotar el archivo (${buffer.length})`);
+  } finally {
+    await asegurarLimpio(resultado.pgid, [resultado.pid]);
+  }
+});
+
+test('runner: la compactación no deja el temporal', async () => {
+  const dir = dirTemporal();
+  const out = path.join(dir, 'stdout.log');
+  const resultado = await correr({
+    cmd: NODE,
+    args: [fixture('volumen.js'), '1'],
+    cwd: dir,
+    stdoutPath: out,
+    timeoutMs: 30000,
+    idleTimeoutMs: 30000,
+    graceMs: 300,
+    maxLogBytes: 200_000,
+    logHeadBytes: 50_000,
+    logTailBytes: 80_000,
+  });
+
+  try {
+    assert.equal(resultado.motivo, 'exit');
+    assert.match(fs.readFileSync(out, 'utf8'), /\[… \d+ bytes omitidos …\]/);
+    const restos = fs.readdirSync(dir).filter((nombre) => nombre.includes('.tmp'));
+    assert.deepEqual(restos, [], 'no debe quedar el temporal de compactación');
+  } finally {
+    await asegurarLimpio(resultado.pgid, [resultado.pid]);
+  }
+});

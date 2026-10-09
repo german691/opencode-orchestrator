@@ -236,10 +236,10 @@ export function ejecutar(opciones = {}) {
     programarIdle();
   };
 
-  /** Cierra un archivo de log (la escritura es síncrona: no hay nada que esperar). */
+  /** Cierra un archivo de log; espera a que termine la compactación que esté en curso. */
   const cerrarArchivo = (archivo) => {
-    if (archivo) archivo.cerrar();
-    return Promise.resolve();
+    if (!archivo) return Promise.resolve();
+    return Promise.resolve(archivo.cerrar());
   };
 
   /**
@@ -371,19 +371,59 @@ export function ejecutar(opciones = {}) {
   }
 
   /**
+   * Lee `longitud` bytes del descriptor `descriptor` desde `posicion`, sin traer el
+   * resto del archivo. POR QUÉ `fs.read` por rangos: nunca se materializa el log
+   * entero en memoria, que es justo lo que desbordaba el event loop.
+   *
+   * @param {number} descriptor
+   * @param {number} posicion
+   * @param {number} longitud
+   * @returns {Promise<Buffer>}
+   */
+  const leerRango = (descriptor, posicion, longitud) =>
+    new Promise((resolver, rechazar) => {
+      if (longitud <= 0) {
+        resolver(Buffer.alloc(0));
+        return;
+      }
+      const buffer = Buffer.allocUnsafe(longitud);
+      let leido = 0;
+      const paso = (error, n) => {
+        if (error) {
+          rechazar(error);
+          return;
+        }
+        leido += n;
+        if (n === 0 || leido >= longitud) {
+          resolver(buffer.subarray(0, leido));
+          return;
+        }
+        fs.read(descriptor, buffer, leido, longitud - leido, posicion + leido, paso);
+      };
+      fs.read(descriptor, buffer, 0, longitud, posicion, paso);
+    });
+
+  /**
    * Abre (creando el directorio) un log en modo append con tope: al superar
    * `maxLogBytes` conserva la cabeza (`logHeadBytes`) y la cola (`logTailBytes`)
-   * separadas por una línea marcadora. POR QUÉ escritura síncrona: además de dar
-   * contrapresión real al proceso (bloquea cuando el disco no da abasto), permite
-   * truncar el archivo sin pelear con el buffer de un WriteStream. El descriptor
-   * conserva la bandera O_APPEND, así que sigue siendo válido tras reescribir.
+   * separadas por una línea marcadora.
+   *
+   * POR QUÉ YA NO se lee el archivo entero: con `maxLogBytes` de hasta 200 MB, leerlo
+   * y reescribirlo con I/O síncrona dentro del manejador `data` bloqueaba el event loop
+   * y frenaba todos los trabajos y el servidor MCP. Ahora la compactación lee solo
+   * cabeza y cola por rangos (asíncrono), se agenda con `setImmediate` —fuera del
+   * manejador— y escribe a un temporal del mismo directorio para renombrarlo
+   * atómicamente. Mientras compacta, los fragmentos que llegan se ENCOLAN (con tope) y
+   * se escriben en orden al terminar. La escritura directa al fd sigue siendo síncrona:
+   * da contrapresión real al proceso y evita pelear con el buffer de un WriteStream.
    */
   const abrirLog = (ruta) => {
     if (!ruta) return null;
+    /** @type {number|null} */
     let fd;
     try {
       fs.mkdirSync(path.dirname(ruta), { recursive: true });
-      fd = fs.openSync(ruta, 'a');
+      fd = fs.openSync(ruta, 'a+');
     } catch {
       return null;
     }
@@ -391,67 +431,188 @@ export function ejecutar(opciones = {}) {
     try {
       bytes = fs.fstatSync(fd).size;
     } catch {
-      /* tamaño desconocido: se recalcula al truncar */
+      /* tamaño desconocido: se recalcula al compactar */
     }
-    const head = Number.isFinite(logHeadBytes) && logHeadBytes > 0 ? logHeadBytes : 0;
-    const tail = Number.isFinite(logTailBytes) && logTailBytes > 0 ? logTailBytes : 0;
-    return {
-      escribir(fragmento) {
-        if (fd === null) return;
+    let cabeza = Number.isFinite(logHeadBytes) && logHeadBytes > 0 ? logHeadBytes : 0;
+    let cola = Number.isFinite(logTailBytes) && logTailBytes > 0 ? logTailBytes : 0;
+    // Si la configuración pide más cabeza+cola que el propio tope, se escala para que el
+    // archivo quede por debajo del tope y no se compacte en cada byte.
+    if (cabeza + cola >= maxLogBytes) {
+      cabeza = Math.floor(maxLogBytes * 0.1);
+      cola = Math.floor(maxLogBytes * 0.4);
+    }
+    // Tope de la cola en memoria: lo que sobrevive es la cola del log, así que encolar
+    // más que eso no aporta y sí arriesga la memoria mientras compacta.
+    const topeCola = cola > 0 ? cola : 1024 * 1024;
+
+    let compactando = false;
+    /** @type {NodeJS.Immediate|null} */
+    let inmediato = null;
+    /** @type {Promise<void>|null} */
+    let promesaCompacta = null;
+    let cerrando = false;
+    /** Fragmentos llegados durante la compactación; se escriben en orden al terminar. */
+    let colaPendiente = [];
+    let colaBytes = 0;
+    /** Bytes descartados de la cola por exceder el tope; se suman al marcador. */
+    let omitidosCola = 0;
+
+    const encolar = (fragmento) => {
+      colaPendiente.push(fragmento);
+      colaBytes += fragmento.length;
+      // Descartar lo más viejo: lo nuevo es lo que el usuario quiere ver. Se conserva al
+      // menos un fragmento para no perder la salida viva por completo.
+      while (colaBytes > topeCola && colaPendiente.length > 1) {
+        const viejo = colaPendiente.shift();
+        colaBytes -= viejo.length;
+        omitidosCola += viejo.length;
+      }
+    };
+
+    /** Escribe en orden, al fd actual, lo que llegó mientras se compactaba. */
+    const drenarCola = () => {
+      const pendientes = colaPendiente;
+      colaPendiente = [];
+      colaBytes = 0;
+      for (const fragmento of pendientes) {
+        if (fd === null) break;
         try {
           fs.writeSync(fd, fragmento);
           bytes += fragmento.length;
         } catch {
-          return; // un log que falla no debe tumbar la corrida
+          /* un log que falla no debe tumbar la corrida */
         }
-        if (bytes > maxLogBytes) this.compactar();
-      },
-      /** Conserva cabeza + marcador + cola; el fd sigue válido con O_APPEND. */
-      compactar() {
-        if (fd === null) return;
-        let contenido;
-        try {
-          contenido = fs.readFileSync(ruta);
-        } catch {
+      }
+    };
+
+    /** Ejecuta la compactación en curso (ya agendada); nunca rechaza. */
+    const compactar = async () => {
+      if (fd === null) return;
+      compactando = true;
+      try {
+        const actual = fs.fstatSync(fd).size;
+        if (actual <= maxLogBytes || actual <= cabeza + cola) {
+          bytes = actual;
+          drenarCola();
           return;
         }
-        if (contenido.length <= maxLogBytes) {
-          bytes = contenido.length;
-          return;
-        }
-        let cabeza = head;
-        let cola = tail;
-        // Si la configuración pide más cabeza+cola que el propio tope, se escala para
-        // que el archivo quede por debajo del tope y no se compacte en cada byte.
-        if (cabeza + cola >= maxLogBytes) {
-          cabeza = Math.floor(maxLogBytes * 0.1);
-          cola = Math.floor(maxLogBytes * 0.4);
-        }
-        if (contenido.length <= cabeza + cola) {
-          bytes = contenido.length;
-          return;
-        }
-        let inicioCola = contenido.length - cola;
+        const [bufferCabeza, bufferColaBruto] = await Promise.all([
+          leerRango(fd, 0, Math.min(cabeza, actual)),
+          leerRango(fd, actual - cola, cola),
+        ]);
         // No cortar un carácter multibyte: avanzar hasta el inicio del siguiente.
-        while (inicioCola < contenido.length && (contenido[inicioCola] & 0xc0) === 0x80) inicioCola += 1;
-        const omitidos = inicioCola - cabeza;
+        let desfase = 0;
+        while (desfase < bufferColaBruto.length && (bufferColaBruto[desfase] & 0xc0) === 0x80) desfase += 1;
+        const bufferCola = bufferColaBruto.subarray(desfase);
+        const inicioCola = actual - cola + desfase;
+        const omitidosMedio = inicioCola - bufferCabeza.length;
+        // La cola pudo descartar datos mientras leíamos: el marcador debe reflejarlos.
+        const omitidos = omitidosMedio + omitidosCola;
+        omitidosCola = 0;
         const marcador = Buffer.from(`\n[… ${omitidos} bytes omitidos …]\n`, 'utf8');
-        const compactado = Buffer.concat([contenido.subarray(0, cabeza), marcador, contenido.subarray(inicioCola)]);
+
+        // Volcado síncrono del temporal: su tamaño está acotado por cabeza+cola (nunca el
+        // archivo entero) y no hay `await` entre calcular el marcador y drenar la cola, con
+        // lo que los bytes omitidos quedan exactos.
+        const temporal = `${ruta}.${process.pid}.${Date.now()}.tmp`;
         try {
-          fs.writeFileSync(ruta, compactado);
-        } catch {
-          return;
+          const fdTemporal = fs.openSync(temporal, 'w');
+          try {
+            fs.writeSync(fdTemporal, bufferCabeza);
+            fs.writeSync(fdTemporal, marcador);
+            fs.writeSync(fdTemporal, bufferCola);
+          } finally {
+            fs.closeSync(fdTemporal);
+          }
+          fs.renameSync(temporal, ruta);
+        } catch (error) {
+          try {
+            fs.unlinkSync(temporal);
+          } catch {
+            /* el temporal pudo no llegar a crearse */
+          }
+          throw error;
         }
-        bytes = compactado.length;
-      },
-      cerrar() {
-        if (fd === null) return;
+
+        // El fd viejo apunta al inodo reemplazado: hay que reabrir el archivo compactado.
         try {
           fs.closeSync(fd);
         } catch {
           /* ignora */
         }
         fd = null;
+        fd = fs.openSync(ruta, 'a+');
+        bytes = bufferCabeza.length + marcador.length + bufferCola.length;
+
+        // Drenar en orden lo que llegó mientras compactábamos.
+        drenarCola();
+      } catch {
+        /* la compactación es best-effort: nunca tumba la corrida */
+      } finally {
+        compactando = false;
+        // Si todavía supera el tope, otra vuelta (siempre agendada, nunca en línea).
+        if (!cerrando && fd !== null && bytes > maxLogBytes) agendarCompactacion();
+      }
+    };
+
+    const agendarCompactacion = () => {
+      if (fd === null || compactando || inmediato || cerrando) return;
+      compactando = true; // se bloquea la escritura directa ya: el archivo debe quedar quieto
+      inmediato = setImmediate(() => {
+        inmediato = null;
+        promesaCompacta = compactar();
+      });
+    };
+
+    return {
+      escribir(fragmento) {
+        if (fd === null) return;
+        if (compactando) {
+          encolar(fragmento);
+          return;
+        }
+        try {
+          fs.writeSync(fd, fragmento);
+          bytes += fragmento.length;
+        } catch {
+          return; // un log que falla no debe tumbar la corrida
+        }
+        if (bytes > maxLogBytes) agendarCompactacion();
+      },
+      async cerrar() {
+        cerrando = true;
+        if (inmediato) {
+          clearImmediate(inmediato);
+          inmediato = null;
+          compactando = false;
+        }
+        if (promesaCompacta) {
+          try {
+            await promesaCompacta;
+          } catch {
+            /* best-effort */
+          }
+          promesaCompacta = null;
+        }
+        // Si quedó por encima del tope (p. ej. una compactación agendada que cancelamos),
+        // una última pasada acotada antes de cerrar para respetar el tope observable.
+        let guardas = 0;
+        while (fd !== null && bytes > maxLogBytes && guardas < 4) {
+          guardas += 1;
+          try {
+            await compactar();
+          } catch {
+            break;
+          }
+        }
+        if (fd !== null) {
+          try {
+            fs.closeSync(fd);
+          } catch {
+            /* ignora */
+          }
+          fd = null;
+        }
       },
     };
   };
