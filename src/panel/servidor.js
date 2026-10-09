@@ -44,11 +44,15 @@ import { crearHistorial } from './historial.js';
 import { PIZARRON_CLIENTE } from './pizarron-cliente.js';
 import { ESTILOS } from './estilos.js';
 import { CLIENTE } from './cliente.js';
+import { FAVICON } from './iconos.js';
 import { TIPOS } from '../core/eventos.js';
 
 // El cliente importa la librería pura como módulo ES desde `/static/lib.js`; se
 // sirve el mismo archivo que importan los tests, leído tal cual para no duplicarlo.
 const LIB = readFileSync(new URL('./cliente-lib.js', import.meta.url), 'utf8');
+// Los íconos también son un módulo ES del navegador (`/static/iconos.js`), servido
+// tal cual para no duplicar las definiciones entre servidor y cliente.
+const ICONOS = readFileSync(new URL('./iconos.js', import.meta.url), 'utf8');
 
 /**
  * CSP restrictiva del panel: sin recursos ni código en línea (todo sale de
@@ -307,6 +311,14 @@ export function crearServidorPanel({
       }
       if (pathname === '/static/lib.js') {
         servirEstatico(req, res, LIB, 'text/javascript; charset=utf-8');
+        return;
+      }
+      if (pathname === '/static/iconos.js') {
+        servirEstatico(req, res, ICONOS, 'text/javascript; charset=utf-8');
+        return;
+      }
+      if (pathname === '/static/favicon.svg') {
+        servirEstatico(req, res, FAVICON, 'image/svg+xml; charset=utf-8');
         return;
       }
       if (pathname === '/api/pizarron') {

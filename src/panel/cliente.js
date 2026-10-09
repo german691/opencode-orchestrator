@@ -13,6 +13,7 @@
  * para el divisor arrastrable.
  */
 export const CLIENTE = String.raw`import { formatearDuracion, etiquetaEstado, motivoLegible, filtrarTrabajos, contarEstados, contarPorRepo, parsearParche, resumenAlcance, resumenTarea, limitarAnchoLista, anchoListaInicial, agruparTrabajos, tiempoRelativo, ordenarPor, segmentosDeLinea, coincidenciasEnLineas, estadisticasDeParche, claseDeLinea, debePausarSeguimiento, ANCHO_LISTA_MIN, ANCHO_LISTA_MAX } from '/static/lib.js';
+import { nodoIcono } from '/static/iconos.js';
 
 const porId = function (id) { return document.getElementById(id); };
 // Lectura TOLERANTE del DOM: un elemento ausente (p. ej. una cabecera recortada o
@@ -27,6 +28,18 @@ const crear = function (etiqueta, clase, texto) {
   if (clase) nodo.className = clase;
   if (texto !== undefined && texto !== null) nodo.textContent = String(texto);
   return nodo;
+};
+// El ícono es un SVG que hereda el color del estado; el texto va siempre al lado,
+// así el estado nunca depende del color ni del ícono por separado.
+const crearIcono = function (nombre, tamano) {
+  return nodoIcono(nombre, { clase: 'icono-svg icono-estado', tamano: tamano || 16 });
+};
+// Botón con ícono + texto visible: el ícono decora, la etiqueta informa.
+const botonConIcono = function (nombre, etiqueta, clase) {
+  const boton = crear('button', clase || 'boton');
+  boton.type = 'button';
+  boton.append(nodoIcono(nombre, { clase: 'icono-svg', tamano: 14 }), crear('span', '', etiqueta));
+  return boton;
 };
 
 const TABS = ['resumen', 'consola', 'diff', 'alcance', 'eventos'];
@@ -249,7 +262,7 @@ function pintarFila(boton, trabajo) {
   boton.setAttribute('aria-current', trabajo.id === app.seleccionado ? 'true' : 'false');
   const etiqueta = etiquetaEstado(trabajo.estado, trabajo.motivoFin);
   const estado = crear('span', 'trabajo-estado ' + etiqueta.clase);
-  estado.append(crear('span', 'icono', etiqueta.icono), crear('span', 'texto-estado', etiqueta.texto));
+  estado.append(crearIcono(etiqueta.icono), crear('span', 'texto-estado', etiqueta.texto));
   const titulo = crear('span', 'trabajo-titulo', trabajo.titulo || trabajo.id);
   titulo.title = trabajo.titulo || trabajo.id;
   const meta = crear('span', 'trabajo-meta');
@@ -268,7 +281,11 @@ function pintarFila(boton, trabajo) {
     meta.append(crear('span', 'trabajo-semaforo semaforo-' + trabajo.semaforo, 'sin salida hace ' + formatearDuracion(trabajo.segundosSinSalida)));
   }
   if (trabajo.espera) meta.append(crear('span', 'trabajo-espera', textoEspera(trabajo.espera)));
-  if (trabajo.tieneAdvertencias) meta.append(crear('span', 'trabajo-aviso', '⚠ con advertencias'));
+  if (trabajo.tieneAdvertencias) {
+    const aviso = crear('span', 'trabajo-aviso');
+    aviso.append(crearIcono('advertencia', 13), crear('span', '', 'con advertencias'));
+    meta.append(aviso);
+  }
   boton.replaceChildren(estado, titulo, meta);
 }
 
@@ -458,6 +475,8 @@ function mostrarDetalle() {
 // Copia texto al portapapeles con fallback y restaura la etiqueta del botón.
 async function copiarTexto(texto, boton, etiqueta) {
   const original = etiqueta || boton.textContent || 'Copiar';
+  // Se conservan los hijos (ícono incluido) para restaurar el botón tal cual.
+  const previo = Array.from(boton.childNodes).map(function (nodo) { return nodo.cloneNode(true); });
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(String(texto));
     else {
@@ -472,7 +491,10 @@ async function copiarTexto(texto, boton, etiqueta) {
   } catch (error) {
     boton.textContent = 'No se pudo copiar';
   }
-  setTimeout(function () { boton.textContent = original; }, 1200);
+  setTimeout(function () {
+    if (previo.length > 1) boton.replaceChildren.apply(boton, previo);
+    else boton.textContent = original;
+  }, 1200);
 }
 
 function copiarId(boton) {
@@ -513,6 +535,7 @@ function actualizarEtiquetasTabs(id) {
     if (!boton) return;
     let texto = TAB_BASE[tab];
     let aria = null;
+    let aviso = false;
     if (tab === 'diff' && typeof cache.nDiff === 'number') {
       texto = 'Diff ' + cache.nDiff;
       aria = 'Diff, ' + cache.nDiff + ' archivo(s)';
@@ -521,10 +544,13 @@ function actualizarEtiquetasTabs(id) {
       aria = 'Eventos, ' + cache.nEventos + ' evento(s)';
     } else if (tab === 'alcance' && cache.nFuera) {
       // El aviso de alcance solo aparece cuando HAY archivos fuera; sin ruido.
-      texto = 'Alcance ⚠';
+      texto = 'Alcance';
+      aviso = true;
       aria = 'Alcance, ' + cache.nFuera + ' archivo(s) fuera de alcance';
     }
-    boton.textContent = texto;
+    boton.replaceChildren();
+    if (aviso) boton.append(crearIcono('advertencia', 14), document.createTextNode(texto));
+    else boton.textContent = texto;
     if (aria) boton.setAttribute('aria-label', aria);
     else boton.removeAttribute('aria-label');
   });
@@ -591,8 +617,9 @@ function cajaConTitulo(titulo, clase, contenido) {
 
 // Botón de copiar genérico, con la etiqueta original para restaurarla.
 function botonCopiar(texto, etiqueta) {
-  const boton = crear('button', 'boton boton-mini', etiqueta);
+  const boton = crear('button', 'boton boton-mini');
   boton.type = 'button';
+  boton.append(nodoIcono('copiar', { clase: 'icono-svg', tamano: 13 }), crear('span', '', etiqueta));
   boton.addEventListener('click', function () { copiarTexto(texto, boton, etiqueta); });
   return boton;
 }
@@ -622,7 +649,7 @@ function pintarResumen(panel, trabajo, alcance) {
   panel.replaceChildren();
   const etiqueta = etiquetaEstado(trabajo.estado, trabajo.motivoFin);
   const estado = crear('span', 'trabajo-estado ' + etiqueta.clase);
-  estado.append(crear('span', 'icono', etiqueta.icono), crear('span', 'texto-estado', etiqueta.texto));
+  estado.append(crearIcono(etiqueta.icono), crear('span', 'texto-estado', etiqueta.texto));
 
   // Franja de datos clave como tarjetas compactas: primero lo esencial.
   const franja = crear('div', 'tarjetas-resumen');
@@ -793,11 +820,9 @@ function iniciarConsola(id) {
   const tamano = crear('span', 'consola-tamano');
   tamano.id = 'consola-tamano';
 
-  const copiar = crear('button', 'boton', 'Copiar');
-  copiar.type = 'button';
+  const copiar = botonConIcono('copiar', 'Copiar');
   copiar.addEventListener('click', function () { copiarConsola(copiar); });
-  const descargar = crear('button', 'boton', 'Descargar .log');
-  descargar.type = 'button';
+  const descargar = botonConIcono('descargar', 'Descargar .log');
   descargar.addEventListener('click', function () { descargarConsola(id); });
 
   const buscar = crear('input', 'consola-buscar');
@@ -834,7 +859,7 @@ function iniciarConsola(id) {
   const pausa = crear('span', 'consola-pausa');
   pausa.id = 'consola-pausa';
   pausa.hidden = true;
-  pausa.textContent = '⏸ En pausa';
+  pausa.append(nodoIcono('pausa', { clase: 'icono-svg', tamano: 13 }), crear('span', '', 'En pausa'));
   const irFinal = crear('button', 'boton consola-ir-final');
   irFinal.type = 'button';
   irFinal.id = 'consola-final';
@@ -895,7 +920,8 @@ function actualizarIrAlFinal() {
     return;
   }
   boton.hidden = false;
-  boton.textContent = app.consola.nuevas > 0 ? 'Ir al final ↓ (' + app.consola.nuevas + ')' : 'Ir al final ↓';
+  const etiqueta = app.consola.nuevas > 0 ? 'Ir al final (' + app.consola.nuevas + ')' : 'Ir al final';
+  boton.replaceChildren(nodoIcono('abajo', { clase: 'icono-svg', tamano: 14 }), document.createTextNode(etiqueta));
 }
 
 function irAlFinal() {
@@ -1070,7 +1096,7 @@ function descargarConsola(id) {
 
 // --- Pestaña Diff -----------------------------------------------------------
 
-const MARCA_ARCHIVO = { add: ['+', 'estado-add'], del: ['−', 'estado-del'], mod: ['~', 'estado-mod'], rename: ['→', 'estado-ren'] };
+const MARCA_ARCHIVO = { add: ['mas', 'estado-add'], del: ['menos', 'estado-del'], mod: ['modificado', 'estado-mod'], rename: ['atras', 'estado-ren'] };
 const MARCA_GIT = { A: 'add', M: 'mod', D: 'del', R: 'rename', C: 'add' };
 
 function lineasDeArchivo(archivo) {
@@ -1125,7 +1151,7 @@ function detalleDeArchivo(archivo, ajustes) {
   const detalle = crear('details', 'archivo');
   const resumen = crear('summary');
   const marca = MARCA_ARCHIVO[archivo.estado] || MARCA_ARCHIVO.mod;
-  resumen.append(crear('span', 'archivo-estado ' + marca[1], marca[0]));
+  resumen.append(nodoIcono(marca[0], { clase: 'icono-svg archivo-estado ' + marca[1], tamano: 14 }));
   resumen.append(crear('span', 'archivo-ruta', rutaDeArchivo(archivo)));
   resumen.append(crear('span', 'archivo-cambios', '+' + (archivo.adiciones || 0) + ' −' + (archivo.eliminaciones || 0)));
   resumen.append(barraProporcional(archivo, ajustes.maximo));
@@ -1190,12 +1216,9 @@ function pintarDiff(panel, diff) {
     opcion.value = String(indice);
     salto.append(opcion);
   });
-  const expandir = crear('button', 'boton boton-mini', 'Expandir todo');
-  expandir.type = 'button';
-  const plegar = crear('button', 'boton boton-mini', 'Plegar todo');
-  plegar.type = 'button';
-  const copiar = crear('button', 'boton boton-mini', 'Copiar parche');
-  copiar.type = 'button';
+  const expandir = botonConIcono('expandir', 'Expandir todo', 'boton boton-mini');
+  const plegar = botonConIcono('plegar', 'Plegar todo', 'boton boton-mini');
+  const copiar = botonConIcono('copiar', 'Copiar parche', 'boton boton-mini');
   cabecera.append(resumen, salto, expandir, plegar, copiar);
   panel.append(cabecera);
 

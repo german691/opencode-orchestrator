@@ -26,6 +26,8 @@ import {
   estadisticasDeParche,
   claseDeLinea,
   debePausarSeguimiento,
+  contraste,
+  categoriaTipo,
 } from '../src/panel/cliente-lib.js';
 import { sintetizarEventos, reconstruirFaltantes, mezclarEventos } from '../src/panel/historial.js';
 
@@ -45,23 +47,24 @@ test('formatearDuracion: segundos, minutos, horas y días', () => {
 test('etiquetaEstado: texto + ícono + clase, nunca solo color', () => {
   const corre = etiquetaEstado('running');
   assert.equal(corre.texto, 'Corriendo');
-  assert.equal(corre.icono, '▶');
+  // `icono` es el NOMBRE del ícono SVG (iconos.js), no un glifo Unicode.
+  assert.equal(corre.icono, 'running');
   assert.equal(corre.clase, 'estado-activo');
 
   const rech = etiquetaEstado('rejected', 'alcance');
   assert.match(rech.texto, /Rechazado/);
   assert.match(rech.texto, /fuera del alcance/);
-  assert.equal(rech.icono, '⛔');
+  assert.equal(rech.icono, 'rejected');
 
   const raro = etiquetaEstado('marciano');
   assert.equal(raro.texto, 'marciano');
   assert.equal(raro.clase, 'estado-neutro');
-  assert.ok(raro.icono.length > 0);
+  assert.equal(raro.icono, 'neutro');
   // Toda etiqueta trae texto e ícono: el estado no depende del color.
   for (const estado of ['queued', 'provisioning', 'running', 'verifying', 'succeeded', 'merged', 'failed', 'cancelled', 'lost']) {
     const etiqueta = etiquetaEstado(estado);
     assert.ok(etiqueta.texto.length > 0, estado);
-    assert.ok(etiqueta.icono.length > 0, estado);
+    assert.match(etiqueta.icono, /^[a-z][a-z-]*$/, estado);
     assert.match(etiqueta.clase, /^estado-/);
   }
   assert.equal(esTerminal('succeeded'), true);
@@ -333,13 +336,13 @@ test('etiquetaTipo: tipos de evento traducidos a español y crudo si no se conoc
   assert.equal(etiquetaTipo(undefined), '');
 });
 
-test('etiquetaTransicion: ícono+texto y anterior → nuevo, nunca solo color', () => {
-  assert.equal(etiquetaTransicion({ estado: 'running' }), '▶ Corriendo');
-  assert.equal(etiquetaTransicion({ anterior: 'queued', estado: 'running' }), '⏳ En cola → ▶ Corriendo');
+test('etiquetaTransicion: texto anterior → nuevo, nunca solo color', () => {
+  assert.equal(etiquetaTransicion({ estado: 'running' }), 'Corriendo');
+  assert.equal(etiquetaTransicion({ anterior: 'queued', estado: 'running' }), 'En cola → Corriendo');
   assert.equal(etiquetaTransicion({}), '');
   assert.equal(etiquetaTransicion(null), '');
-  // Un estado desconocido se muestra crudo pero junto al ícono.
-  assert.equal(etiquetaTransicion({ anterior: 'raro', estado: 'running' }), '• raro → ▶ Corriendo');
+  // Un estado desconocido se muestra crudo, pero con texto legible al lado.
+  assert.equal(etiquetaTransicion({ anterior: 'raro', estado: 'running' }), 'raro → Corriendo');
 });
 
 test('formatearHoraEvento: dd/mm hh:mm:ss local y vacío sin timestamp', () => {
@@ -478,4 +481,27 @@ test('debePausarSeguimiento: pausa al alejarse del final y tolera el umbral', ()
   // Unos pocos píxeles de diferencia no pausan (ruido de subpíxel/trackpad).
   assert.equal(debePausarSeguimiento({ scrollTop: 100, scrollHeight: 410, clientHeight: 300 }), false);
   assert.equal(debePausarSeguimiento({}, 0), false);
+});
+
+test('contraste: razón WCAG entre colores hex (y bordes con el mismo valor)', () => {
+  // Extremos conocidos: blanco contra negro da 21:1.
+  assert.equal(Math.round(contraste('#ffffff', '#000000')), 21);
+  // Simétrico y con equivalencia de hex corto.
+  assert.equal(contraste('#fff', '#000'), contraste('#ffffff', '#000000'));
+  // Un gris claro sobre blanco queda por debajo de AA de texto (4.5).
+  assert.ok(contraste('#cccccc', '#ffffff') < 4.5);
+  // El texto principal del token claro supera AA de sobra.
+  assert.ok(contraste('#171a20', '#ffffff') >= 4.5);
+});
+
+test('categoriaTipo: agrupa los tipos de evento por familia', () => {
+  assert.equal(categoriaTipo('job.creado'), 'job');
+  assert.equal(categoriaTipo('job.fin'), 'job');
+  assert.equal(categoriaTipo('merge'), 'merge');
+  assert.equal(categoriaTipo('avanzar_base'), 'merge');
+  assert.equal(categoriaTipo('cleanup'), 'cleanup');
+  assert.equal(categoriaTipo('servidor.arranque'), 'servidor');
+  assert.equal(categoriaTipo('pizarron.post'), 'pizarron');
+  assert.equal(categoriaTipo('cualquiera'), 'otro');
+  assert.equal(categoriaTipo(undefined), 'otro');
 });
