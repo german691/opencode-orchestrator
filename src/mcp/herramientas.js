@@ -3,6 +3,11 @@
  * el gestor. Los manejadores devuelven `{ text, isError }`; los errores de uso
  * (`ErrorDeGestor`) los convierte el protocolo en un resultado de error legible.
  *
+ * POR QUÉ las descripciones son tan cortas: el cliente recibe TODO `tools/list` en cada
+ * sesión y esos tokens salen del contexto del orquestador. El detalle de cada herramienta
+ * (ejemplos, `desde_job`, `solo_aceptacion`, recetas, lotes, pizarrón, etc.) vive en
+ * `docs/HERRAMIENTAS.md`, referenciado desde `opencode_coding`.
+ *
  * POR QUÉ ninguna herramienta bloquea más de `esperaMs` (~45 s): los clientes de
  * escritorio cancelan una petición a los ~60 s. Lo que tarda más es asíncrono: se
  * devuelve un `job_id` y se retoma con `opencode_wait`.
@@ -11,6 +16,7 @@
 import { ErrorDeGestor } from '../core/gestor.js';
 import { esTerminal } from '../core/estados.js';
 import {
+  EXPLICACION_ACTIVO,
   describirActivo,
   describirEspera,
   describirEstado,
@@ -24,7 +30,7 @@ import {
 const CANALES = ['stdout', 'stderr', 'events', 'aceptacion'];
 
 /** Esquema común de un `job_id`. */
-const ESQUEMA_JOB = { type: 'string', description: 'job_id devuelto por opencode_coding.' };
+const ESQUEMA_JOB = { type: 'string', description: 'job_id de coding.' };
 
 /**
  * Crea las herramientas ligadas a un gestor.
@@ -41,8 +47,9 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
       return { text: describirActivo(gestor.obtener(id), ahora()), isError: false };
     }
     const colas = {
-      // `completo` trae una ventana mucho mayor para que el cliente recupere todo el log.
-      salida: gestor.logs(id, 'stdout', completo ? 100000 : 4000),
+      // `completo` trae una ventana mucho mayor para que el cliente recupere todo el log;
+      // por defecto la cola de stdout se acota a 1500 bytes para ahorrar contexto.
+      salida: gestor.logs(id, 'stdout', completo ? 100000 : 1500),
       errores: trabajo.estado === 'failed' || trabajo.estado === 'rejected' ? gestor.logs(id, 'stderr', completo ? 100000 : 1500) : '',
     };
     const malo = trabajo.estado === 'failed' || trabajo.estado === 'rejected' || trabajo.estado === 'lost';
@@ -60,38 +67,31 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
   return [
     {
       name: 'opencode_coding',
-      description:
-        'Delega una tarea de código a una instancia de opencode (DeepSeek). Admite VARIAS en paralelo (tope de ' +
-        'concurrencia del perfil): cada trabajo escribe en su propio git worktree y rama job/<id>, con alcance ' +
-        'declarado (`writes`) que el servidor VERIFICA con el git diff al terminar (lo que toque fuera, o en rutas ' +
-        'protegidas del perfil, lo rechaza). `mode`: readonly (no escribe), safe (por defecto; exige `writes`), auto ' +
-        '(solo si el usuario lo pide). Espera hasta ~45 s: si la tarea es más larga responde `STILL RUNNING` con un ' +
-        'job_id; seguí con opencode_wait. Un trabajo succeeded queda en su rama: integralo con opencode_merge y revisá ' +
-        'el diff. No hace push ni escribe en la rama base.',
+      description: 'Delega una tarea a opencode en paralelo (worktree, writes verificado). Si no termina devuelve job_id. Ver docs/HERRAMIENTAS.md.',
       inputSchema: {
         type: 'object',
         properties: {
-          prompt: { type: 'string', description: 'Instrucciones completas y autocontenidas (opencode no tiene memoria de esta conversación).' },
-          cwd: { type: 'string', description: 'Ruta del repositorio (o de una subcarpeta). Define el perfil y la raíz del worktree.' },
-          mode: { type: 'string', enum: ['readonly', 'safe', 'auto'], description: 'readonly = no modifica nada; safe = edita solo dentro de `writes` y sin shell destructivo (por defecto); auto = sin restricciones (opt-in explícito del usuario).' },
-          writes: { type: 'array', items: { type: 'string' }, description: 'Patrones glob (relativos a la RAÍZ del repo) que el trabajo puede modificar, p. ej. ["backend/test-integracion/**"]. Obligatorio en safe. Lo que modifique fuera se rechaza.' },
-          reads: { type: 'array', items: { type: 'string' }, description: 'Patrones que va a leer (informativo para el planificador). Por defecto todo.' },
-          isolation: { type: 'string', enum: ['worktree', 'none'], description: 'worktree (por defecto en safe/auto): copia aislada. none (por defecto en readonly): trabaja en el árbol real.' },
-          resources: { type: 'array', items: { type: 'string' }, description: 'Recursos del perfil que necesita (p. ej. ["db"] = una base de datos propia por trabajo).' },
-          accept: { type: 'string', description: 'Comando de aceptación (o clave del perfil) que se corre al terminar; si falla, el trabajo queda rechazado.' },
-          after: { type: 'array', items: { type: 'string' }, description: 'job_id previos que deben estar succeeded antes de empezar.' },
-          timeout_ms: { type: 'number', description: 'Tope total en ms (por defecto 30 min).' },
-          idle_timeout_ms: { type: 'number', description: 'Tope sin salida en ms (por defecto 10 min).' },
-          files: { type: 'array', items: { type: 'string' }, description: 'Archivos a adjuntar al prompt.' },
-          title: { type: 'string', description: 'Etiqueta corta para los listados.' },
-          model: { type: 'string', description: 'Modelo proveedor/modelo (por defecto el del servidor).' },
-          prioridad: { type: 'number', description: 'Mayor = antes en la cola.' },
-          base: { type: 'string', enum: ['base', 'integracion'], description: 'De qué rama parte el worktree: la base del perfil o la rama de integración (con lo ya integrado). Por defecto el `jobBase` del perfil.' },
-          solo_aceptacion: { type: 'boolean', description: 'No corre al agente: solo ejecuta `accept` sobre un worktree. Úsalo como COMPUERTA sobre la integración (con base: "integracion" y accept: la suite completa) o para re-verificar un trabajo ya arreglado (con desde_job). No requiere `prompt` ni `writes`.' },
-          desde_job: { type: 'string', description: 'Retoma un trabajo terminado (rechazado, fallido o caído) que conserve su worktree: el nuevo parte del mismo commit y recibe los archivos que dejó, y hereda su writes, resources y accept. Con solo_aceptacion solo repite la aceptación; sin ella el agente continúa con el nuevo `prompt`.' },
-          completo: { type: 'boolean', description: 'Opcional: devuelve TODA la salida del agente y de la aceptación, sin recortar a las últimas líneas (por defecto se recorta para ahorrar contexto). Acepta true o "true".' },
-          receta: { type: 'string', description: 'Opcional: nombre de una receta del perfil. Su `prompt` (con {param}) y sus campos (writes, mode, accept, resources, reads) se expanden con `params`. Lo que pases explícito en la llamada pisa a la receta y `prompt` se agrega como "Notas adicionales".' },
-          params: { type: 'object', description: 'Opcional: valores de los {param} de la receta. Cada valor es un texto; los que se usan en `writes` no admiten saltos de línea, ".." ni rutas absolutas.' },
+          prompt: { type: 'string', description: 'Instrucciones completas y autocontenidas.' },
+          cwd: { type: 'string', description: 'Ruta del repositorio.' },
+          mode: { type: 'string', enum: ['readonly', 'safe', 'auto'], description: 'readonly no escribe; safe limita a writes; auto libre.' },
+          writes: { type: 'array', items: { type: 'string' }, description: 'Globs (raíz) que puede modificar; obligatorio en safe.' },
+          reads: { type: 'array', items: { type: 'string' }, description: 'Globs que leerá (por defecto todo).' },
+          isolation: { type: 'string', enum: ['worktree', 'none'], description: 'worktree aísla; none usa el árbol real.' },
+          resources: { type: 'array', items: { type: 'string' }, description: 'Recursos del perfil (p. ej. db).' },
+          accept: { type: 'string', description: 'Comando o clave de aceptación.' },
+          after: { type: 'array', items: { type: 'string' }, description: 'job_id que deben estar succeeded.' },
+          timeout_ms: { type: 'number', description: 'Tope total en ms (30 min).' },
+          idle_timeout_ms: { type: 'number', description: 'Tope sin salida en ms (10 min).' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Archivos a adjuntar.' },
+          title: { type: 'string', description: 'Etiqueta corta.' },
+          model: { type: 'string', description: 'Modelo proveedor/modelo.' },
+          prioridad: { type: 'number', description: 'Mayor = antes.' },
+          base: { type: 'string', enum: ['base', 'integracion'], description: 'Parte de la base o de integración.' },
+          solo_aceptacion: { type: 'boolean', description: 'Solo accept, sin agente.' },
+          desde_job: { type: 'string', description: 'Retoma un job con su worktree.' },
+          completo: { type: 'boolean', description: 'Toda la salida sin recortar.' },
+          receta: { type: 'string', description: 'Receta del perfil (con params).' },
+          params: { type: 'object', description: 'Valores de los {param}.' },
         },
         required: ['cwd'],
         additionalProperties: false,
@@ -103,10 +103,7 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_batch',
-      description:
-        'Encola VARIAS tareas (1 a 12) en UNA sola llamada, cada una con los mismos campos que opencode_coding (incluidos `receta` y `params`). ' +
-        'NO espera: devuelve una línea por trabajo (`<id> | <título> | <estado> | <motivo de espera>`). Si una tarea es inválida, su error va en su ' +
-        'propia línea sin impedir las demás. Después seguí con opencode_wait/opencode_wait_any.',
+      description: 'Encola 1 a 12 tareas (campos de coding), sin esperar; una línea por trabajo.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -114,7 +111,7 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
             type: 'array',
             minItems: 1,
             maxItems: 12,
-            items: { type: 'object', description: 'Especificación de un trabajo: los mismos campos que opencode_coding.' },
+            items: { type: 'object', description: 'Un trabajo (campos de coding).' },
             description: 'Tareas a encolar (1 a 12).',
           },
         },
@@ -143,9 +140,7 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_status',
-      description:
-        'Tabla compacta del estado del servidor: contadores (corriendo / en cola / verificando) y una línea por trabajo ACTIVO o `succeeded` ' +
-        'sin integrar (`<id> | <estado> | <edad> | <título>`), más la lista de ids "sin integrar" para saber qué falta mergear.',
+      description: 'Contadores y trabajos activos o sin integrar.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       manejar: async () => ({
         text: describirEstado({ trabajos: gestor.listar({ limite: 200 }), resumen: gestor.resumen(), ahora: ahora() }),
@@ -154,12 +149,12 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_wait',
-      description: 'Espera hasta ~45 s a un trabajo iniciado con opencode_coding. Devuelve el resultado si terminó o `STILL RUNNING` otra vez: repetí hasta que termine.',
+      description: 'Espera hasta ~45 s a un trabajo; repetí hasta que termine.',
       inputSchema: {
         type: 'object',
         properties: {
           job_id: ESQUEMA_JOB,
-          completo: { type: 'boolean', description: 'Opcional: devuelve toda la salida sin recortar (por defecto se recorta). Acepta true o "true".' },
+          completo: { type: 'boolean', description: 'Toda la salida sin recortar.' },
         },
         required: ['job_id'],
         additionalProperties: false,
@@ -168,14 +163,12 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_wait_any',
-      description:
-        'Espera hasta ~45 s a que TERMINE alguno de varios trabajos y devuelve el resumen de los que ya terminaron ' +
-        '(con su detalle) y el estado de los que siguen activos. Evita sondear uno por uno: repetí hasta que no quede ninguno activo.',
+      description: 'Espera hasta ~45 s a que termine alguno de varios trabajos.',
       inputSchema: {
         type: 'object',
         properties: {
           job_ids: { type: 'array', items: ESQUEMA_JOB, minItems: 1, description: 'job_id a esperar.' },
-          completo: { type: 'boolean', description: 'Opcional: devuelve toda la salida sin recortar (por defecto se recorta). Acepta true o "true".' },
+          completo: { type: 'boolean', description: 'Toda la salida sin recortar.' },
         },
         required: ['job_ids'],
         additionalProperties: false,
@@ -192,19 +185,21 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
           malo = malo || r.isError;
           partes.push(r.text);
         }
-        for (const id of activos) partes.push(describirActivo(gestor.obtener(id), ahora()));
+        // La explicación de un trabajo activo se imprime UNA sola vez, no por trabajo.
+        for (const id of activos) partes.push(describirActivo(gestor.obtener(id), ahora(), { conExplicacion: false }));
+        if (activos.length > 0) partes.push(EXPLICACION_ACTIVO);
         const cabecera = `terminados=${terminados.length} | activos=${activos.length}`;
         return { text: `${cabecera}\n\n${partes.join('\n\n---\n\n')}`, isError: malo };
       },
     },
     {
       name: 'opencode_list',
-      description: 'Lista los trabajos (estado, edad, modo, alcance) y la carga del servidor (corriendo y en cola). Usala antes de reenviar una tarea que parece no haber producido nada.',
+      description: 'Lista trabajos y la carga del servidor.',
       inputSchema: {
         type: 'object',
         properties: {
-          estado: { type: 'string', description: 'Filtra por estado (queued, provisioning, running, verifying, succeeded, failed, cancelled, rejected, lost, merged).' },
-          limite: { type: 'number', description: 'Máximo de trabajos (por defecto 20).' },
+          estado: { type: 'string', description: 'Filtra por estado.' },
+          limite: { type: 'number', description: 'Máximo (por defecto 20).' },
         },
         additionalProperties: false,
       },
@@ -215,13 +210,13 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_logs',
-      description: 'Final de la salida de un trabajo (stdout, stderr, events o aceptacion) sin esperar a que termine. Sirve para ver el avance de un trabajo largo.',
+      description: 'Final de la salida de un trabajo (stdout, stderr, events o aceptacion).',
       inputSchema: {
         type: 'object',
         properties: {
           job_id: ESQUEMA_JOB,
-          canal: { type: 'string', enum: CANALES, description: 'Canal a leer (por defecto stdout).' },
-          bytes: { type: 'number', description: 'Cuántos bytes del final (por defecto 4000, máximo 100000).' },
+          canal: { type: 'string', enum: CANALES, description: 'Canal (por defecto stdout).' },
+          bytes: { type: 'number', description: 'Bytes del final (por defecto 4000).' },
         },
         required: ['job_id'],
         additionalProperties: false,
@@ -237,7 +232,7 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_cancel',
-      description: 'Cancela un trabajo: si está en cola lo descarta; si corre, mata su grupo de procesos completo (incluidos los comandos que lanzó).',
+      description: 'Cancela un trabajo: lo descarta en cola o mata su grupo.',
       inputSchema: { type: 'object', properties: { job_id: ESQUEMA_JOB }, required: ['job_id'], additionalProperties: false },
       manejar: async (args) => {
         const trabajo = await gestor.cancelar(exigirId(args), { actor: 'herramienta:cancel' });
@@ -246,12 +241,12 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_merge',
-      description: 'Integra un trabajo succeeded en la rama de integración del perfil (git merge --no-ff dentro de un worktree propio). Ante conflicto aborta y lista los archivos; la rama de integración queda intacta. Antes de integrar sincroniza la base DENTRO de la integración (nunca al revés). Por defecto NO toca la rama base ni hace push: revisá el diff base..integración y avanzá la base vos, o pedí `avanzar_base` (opt-in, solo fast-forward).',
+      description: 'Integra un succeeded en la rama de integración (merge --no-ff).',
       inputSchema: {
         type: 'object',
         properties: {
           job_id: ESQUEMA_JOB,
-          avanzar_base: { type: 'boolean', description: 'Opt-in: además avanza la rama base hasta la integración con fast-forward (solo si el árbol real está en la base y sin cambios sin commitear). Si no se puede, la integración igual queda hecha y se explica el motivo.' },
+          avanzar_base: { type: 'boolean', description: 'Avanza la base por fast-forward.' },
         },
         required: ['job_id'],
         additionalProperties: false,
@@ -273,12 +268,12 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_cleanup',
-      description: 'Elimina los worktrees y ramas de trabajos terminados (no toca los activos ni borra su registro).',
+      description: 'Elimina worktrees y ramas de trabajos terminados.',
       inputSchema: {
         type: 'object',
         properties: {
-          job_ids: { type: 'array', items: { type: 'string' }, description: 'Solo estos trabajos (por defecto todos los terminados).' },
-          mas_viejos_que_minutos: { type: 'number', description: 'Solo los terminados hace más de N minutos.' },
+          job_ids: { type: 'array', items: { type: 'string' }, description: 'Solo estos jobs.' },
+          mas_viejos_que_minutos: { type: 'number', description: 'Terminados hace más de N minutos.' },
         },
         additionalProperties: false,
       },
@@ -290,20 +285,17 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_profile',
-      description: 'Muestra (y valida) el perfil resuelto de un repositorio: rama base, rutas protegidas, recursos, comandos de aceptación y concurrencia.',
+      description: 'Muestra y valida el perfil resuelto del repo.',
       inputSchema: { type: 'object', properties: { cwd: { type: 'string', description: 'Ruta del repositorio.' } }, required: ['cwd'], additionalProperties: false },
       manejar: async (args) => ({ text: describirPerfil(await gestor.verPerfil(args.cwd)), isError: false }),
     },
     {
       name: 'opencode_board_get',
-      description:
-        'Lee el PIZARRÓN COMPARTIDO entre agentes (documento de contratos y decisiones). Sin `clave`: devuelve la versión, ' +
-        'la lista corta de claves con su valor vigente (truncado a 200 caracteres) y las últimas 5 notas. Con `clave`: el ' +
-        'valor completo y su historial. El pizarrón es de SOLO LECTURA para los agentes: ellos aportan en `.orq/aporte.json`.',
+      description: 'Pizarrón compartido: sin clave lista; con clave da valor e historial.',
       inputSchema: {
         type: 'object',
         properties: {
-          clave: { type: 'string', description: 'Clave a consultar (opcional). Sin ella se devuelve el resumen del pizarrón.' },
+          clave: { type: 'string', description: 'Clave a consultar (opcional).' },
         },
         additionalProperties: false,
       },
@@ -319,16 +311,14 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
     },
     {
       name: 'opencode_board_post',
-      description:
-        'Publica una clave en el PIZARRÓN COMPARTIDO. El orquestador publica con jobId "orquestador". `valor` es JSON o texto. ' +
-        'Una clave de OTRO trabajo no se pisa por accidente: devuelve conflicto salvo `forzar: true`. `nota` es opcional.',
+      description: 'Publica una clave en el pizarrón; no pisa la de otro salvo forzar.',
       inputSchema: {
         type: 'object',
         properties: {
-          clave: { type: 'string', description: 'Clave corta (1-80) sin espacios, p. ej. "contrato.api".' },
-          valor: { description: 'Valor a publicar: JSON (objeto/array/número/booleano/null) o texto.' },
-          nota: { type: 'string', description: 'Nota breve (hasta 500 caracteres) para los demás agentes.' },
-          forzar: { type: 'boolean', description: 'Opt-in: pisa la clave aunque sea de otro trabajo.' },
+          clave: { type: 'string', description: 'Clave corta (1-80) sin espacios.' },
+          valor: { description: 'JSON o texto.' },
+          nota: { type: 'string', description: 'Nota breve (hasta 500).' },
+          forzar: { type: 'boolean', description: 'Pisa la clave de otro job.' },
         },
         required: ['clave', 'valor'],
         additionalProperties: false,
