@@ -222,8 +222,8 @@ test('UI: repositorio como select, localStorage, ?repo=, aria-busy, Reintentar y
   assert.match(CLIENTE, /'No se pudo cargar: '/);
   assert.match(CLIENTE, /'Reintentar'/);
   assert.match(CLIENTE, /moverSeleccion\(evento\.key === 'j' \? 1 : -1, enBusqueda\)/);
-  // La cabecera muestra 'Corriendo n/máx' con la concurrencia del entorno.
-  assert.match(CLIENTE, /'Corriendo ' \+ usada \+ '\/' \+ maxima/);
+  // La cabecera muestra UNA píldora 'n/máx en curso' con la concurrencia del entorno.
+  assert.match(CLIENTE, /usada \+ '\/' \+ maxima \+ ' en curso'/);
 });
 
 test('UI: toolbar compacta con búsqueda, segmentado, repo, orden y densidad persistidos', () => {
@@ -448,15 +448,18 @@ test('pizarrón cliente: refresca sin perder scroll ni plegables y muestra el es
   assert.match(PIZARRON_CLIENTE, /tabla-envoltorio/);
 });
 
-test('regresión 1: la cabecera principal trae contadores/conexión/concurrencia una sola vez y el JS lee el DOM con tolerancia', async () => {
+test('regresión 1: la cabecera principal trae conexión y UNA píldora de concurrencia, y el JS lee el DOM con tolerancia', async () => {
   await conServidor(async (url) => {
     const html = await (await fetch(`${url}/`)).text();
     // BUG de la ronda previa: NAV_PRINCIPAL no viajaba en `extra`, así que estos
     // ids no existían y renderCabecera lanzaba TypeError al hidratar.
-    for (const id of ['conexion', 'conexion-texto', 'contadores', 'concurrencia']) {
+    for (const id of ['conexion', 'conexion-texto', 'concurrencia', 'cola']) {
       const veces = (html.match(new RegExp(`id="${id}"`, 'g')) || []).length;
       assert.equal(veces, 1, `id="${id}" debe aparecer exactamente una vez`);
     }
+    // UNA sola píldora de concurrencia: ya no existe el `#contadores` que repetía
+    // «Corriendo n/máx» al lado de la barra.
+    assert.doesNotMatch(html, /id="contadores"/);
     // El navegador de secciones no se duplica: un solo <nav> de secciones.
     assert.equal((html.match(/aria-label="Secciones"/g) || []).length, 1);
     assert.doesNotMatch(html, /<nav[^>]*>\s*<nav/);
@@ -465,7 +468,9 @@ test('regresión 1: la cabecera principal trae contadores/conexión/concurrencia
   });
   // El cliente lee el DOM con un helper tolerante a elementos ausentes.
   assert.match(CLIENTE, /const conElemento = function \(id, fn\)/);
-  assert.match(CLIENTE, /conElemento\('contadores', function/);
+  assert.match(CLIENTE, /conElemento\('concurrencia', function/);
+  assert.match(CLIENTE, /conElemento\('cola', function/);
+  assert.doesNotMatch(CLIENTE, /conElemento\('contadores'/);
   // La cabecera se actualiza en su propio try y no frena la carga/selección.
   assert.match(CLIENTE, /async function cargarEstadoCabecera\(\)/);
   assert.match(CLIENTE, /await cargarEstadoCabecera\(\)/);
@@ -482,20 +487,26 @@ test('resumen: franja de tarjetas, cajas con título, plegables con scroll y acc
   assert.match(CLIENTE, /cajaConTitulo\('Advertencias'/);
   assert.match(CLIENTE, /cajaConTitulo\('Mutaciones'/);
   assert.match(CLIENTE, /cajaConTitulo\('Revisión'/);
-  // «Última salida» plegable solo si hay output.
+  // «Última salida» plegable solo si hay output: sin salida no hay título ni caja.
   assert.match(CLIENTE, /if \(texto\.trim\(\) === ''\) return null/);
   assert.match(CLIENTE, /const ultima = bloqueUltimaSalida\(trabajo\.transcript\)/);
-  // Acciones: copiar rama, copiar id y abrir consola.
+  // El plegable ya trae su propio «Última salida»: no se duplica con un <h3>.
+  assert.doesNotMatch(CLIENTE, /crear\('h3', '', 'Última salida'\)/);
+  // Acciones del resumen: solo abrir consola y copiar rama (dentro de la tarjeta).
   assert.match(CLIENTE, /'Copiar rama'/);
-  assert.match(CLIENTE, /'Copiar id'/);
   assert.match(CLIENTE, /'Abrir consola'/);
   assert.match(CLIENTE, /activarTab\('consola'\)/);
+  // «Copiar id» existe UNA sola vez, junto al título: el Resumen ya no lo repite.
+  assert.match(CLIENTE, /'Copiar id'/);
+  assert.doesNotMatch(CLIENTE, /botonCopiar\(trabajo\.id, 'Copiar id'\)/);
+  assert.equal((PAGINA.match(/id="copiar-id"/g) || []).length, 1);
 });
 
 test('pestañas: contadores en la etiqueta, alcance solo si hay fuera, pestaña y scroll recordados', () => {
   assert.match(CLIENTE, /function actualizarEtiquetasTabs\(/);
-  assert.match(CLIENTE, /'Diff ' \+ cache\.nDiff/);
-  assert.match(CLIENTE, /'Eventos ' \+ cache\.nEventos/);
+  // El contador sale de la lib pura y omite el cero: «Diff» sin número si no hay.
+  assert.match(CLIENTE, /etiquetaPestana\('Diff', cache\.nDiff\)/);
+  assert.match(CLIENTE, /etiquetaPestana\('Eventos', cache\.nEventos\)/);
   assert.match(CLIENTE, /texto = 'Alcance';/);
   assert.match(CLIENTE, /aviso = true/);
   // El aviso de alcance NO aparece si no hay archivos fuera.
@@ -659,4 +670,60 @@ test('auditoría: chips de tipo de evento coloreados por categoría', () => {
   assert.match(html, /class="chip-evento chip-job"[^>]*title="job\.creado">Trabajo creado/);
   assert.match(html, /class="chip-evento chip-merge"[^>]*title="merge">Integrado/);
   assert.match(html, /class="chip-evento chip-pizarron"/);
+});
+
+test('lista vacía: el estado vacío solo aparece con 0 filas y `[hidden]` lo oculta de verdad', async () => {
+  // La decisión sale de la lib pura y el cliente la aplica con `hidden`.
+  assert.match(CLIENTE, /debeMostrarVacio\(visibles\.length\)/);
+  assert.match(CLIENTE, /porId\('lista-vacia'\)\.hidden = !debeMostrarVacio\(visibles\.length\)/);
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    // `.vacia{display:flex}` pisaba el `[hidden]` del navegador: la regla explícita
+    // impide que «No hay trabajos que coincidan» quede visible con filas presentes.
+    assert.match(css, /\.vacia\[hidden\]\{display:none\}/);
+  });
+});
+
+test('toolbar angosta: segmentado en 4 columnas y grilla auto-fit de controles sin desborde', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    // Fila 2: el segmentado reparte el ancho en 4 partes iguales.
+    assert.match(css, /\.segmentado\{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
+    // Las etiquetas largas se cambian por cortas cuando la columna es angosta.
+    assert.match(css, /@container \(max-width:520px\)/);
+    assert.match(css, /\.chip-corto\{display:none\}/);
+    // Fila 3: grilla que reencuadra sola, con min-width:0 y elipsis.
+    assert.match(css, /\.toolbar-fila\{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(120px,1fr\)\)/);
+    assert.match(css, /\.toolbar-fila select\{[^}]*min-width:0/);
+  });
+  // Cada chip lleva etiqueta larga y corta, con `title` y aria-label completos.
+  assert.match(CLIENTE, /const ETIQUETA_CORTA_ESTADO/);
+  assert.match(CLIENTE, /crear\('span', 'chip-largo', def\[1\]\)/);
+  assert.match(CLIENTE, /crear\('span', 'chip-corto', ETIQUETA_CORTA_ESTADO/);
+  assert.match(CLIENTE, /boton\.setAttribute\('aria-label', def\[1\]\)/);
+});
+
+test('cabecera: min-width:0, píldoras compactas y sin scroll horizontal de página', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    // Red de seguridad de página + contenedores que pueden encogerse.
+    assert.match(css, /html,body\{[^}]*overflow-x:hidden/);
+    assert.match(css, /\.cabecera\{[^}]*min-width:0/);
+    assert.match(css, /\.cabecera-titulo\{[^}]*min-width:0/);
+    assert.match(css, /\.cabecera-nav\{[^}]*min-width:0/);
+    // Móvil: píldoras compactas y «En vivo» como punto (el texto se oculta).
+    assert.match(css, /@media \(max-width:640px\)/);
+    assert.match(css, /\.pill-corto\{display:inline\}/);
+    assert.match(css, /#conexion-texto\{display:none\}/);
+  });
+  // El aria-label del punto conserva el significado al ocultar el texto.
+  assert.match(CLIENTE, /caja\.setAttribute\('aria-label', vivo \? 'En vivo' : 'Reconectando'\)/);
+  // Una sola píldora de concurrencia y, si hay cola, una sola adicional.
+  assert.equal((CLIENTE.match(/conElemento\('concurrencia'/g) || []).length, 1);
+  assert.equal((CLIENTE.match(/conElemento\('cola'/g) || []).length, 1);
+});
+
+test('autoselección: solo en escritorio (>=900px) y nunca cuando hay ?job', () => {
+  // La guardia por ancho evita abrir el detalle del primero en móvil/tablet.
+  assert.match(CLIENTE, /app\.trabajos\.length && debeAutoseleccionar\(window\.innerWidth, false\)/);
 });

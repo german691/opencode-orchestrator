@@ -77,15 +77,16 @@ ${scripts}
 }
 
 /**
- * Controles EXTRA de la cabecera principal: conexión, contadores, concurrencia y
- * el botón de atajos. POR QUÉ sin `navSecciones`: estos controles van DENTRO del
- * `<nav>` que arma `cabeceraHtml`, así no se duplica el navegador de secciones.
+ * Controles EXTRA de la cabecera principal: conexión, la píldora de concurrencia
+ * (y la de cola, solo si hay) y el botón de atajos. POR QUÉ sin `navSecciones`:
+ * estos controles van DENTRO del `<nav>` que arma `cabeceraHtml`, así no se
+ * duplica el navegador de secciones.
  */
 const CONTROLES_PRINCIPAL = `<span id="conexion" class="conexion reconectando" role="status">
     <span class="punto" aria-hidden="true"></span><span id="conexion-texto">Reconectando…</span>
   </span>
-  <span id="contadores" class="contadores">Corriendo 0/0 · En cola 0</span>
-  <span id="concurrencia" class="concurrencia" hidden></span>
+  <span id="concurrencia" class="concurrencia pill" hidden></span>
+  <span id="cola" class="concurrencia pill pill-cola" hidden></span>
   <button type="button" id="ayuda" class="boton" aria-haspopup="dialog">Atajos (?)</button>`;
 
 /**
