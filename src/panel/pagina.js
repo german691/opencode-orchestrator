@@ -193,9 +193,9 @@ function filaAuditoria(evento, titulos) {
     evento.origen === 'reconstruido' ? ' <span class="badge badge-historico">histórico</span>' : '';
   const transicion = etiquetaTransicion(evento);
   return (
-    `<tr><td><time datetime="${escaparHtml(iso)}" title="${escaparHtml(iso)}">${escaparHtml(hora)}</time></td>` +
-    `<td><span class="chip-evento chip-${categoriaTipo(evento.tipo)}" title="${escaparHtml(evento.tipo)}">${escaparHtml(etiquetaTipo(evento.tipo))}</span>${historico}</td>` +
-    `<td>${trabajo}</td>` +
+    `<tr><td class="celda-hora"><time datetime="${escaparHtml(iso)}" title="${escaparHtml(iso)}">${escaparHtml(hora)}</time></td>` +
+    `<td class="celda-estado"><span class="chip-evento chip-${categoriaTipo(evento.tipo)}" title="${escaparHtml(evento.tipo)}">${escaparHtml(etiquetaTipo(evento.tipo))}</span>${historico}</td>` +
+    `<td class="celda-trabajo">${trabajo}</td>` +
     `<td>${escaparHtml(transicion)}</td>` +
     `<td>${escaparHtml(motivoLegible(evento.motivo))}</td>` +
     `<td>${escaparHtml(evento.actor)}</td></tr>`

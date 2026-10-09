@@ -727,3 +727,83 @@ test('autoselección: solo en escritorio (>=900px) y nunca cuando hay ?job', () 
   // La guardia por ancho evita abrir el detalle del primero en móvil/tablet.
   assert.match(CLIENTE, /app\.trabajos\.length && debeAutoseleccionar\(window\.innerWidth, false\)/);
 });
+
+test('tipografía: define los cuatro tokens de fuente y ninguna familia literal fuera de :root', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    // Los cuatro roles tipográficos existen como tokens en :root.
+    for (const token of ['--fuente-ui:', '--fuente-titulo:', '--fuente-codigo:', '--fuente-numeros:']) {
+      assert.ok(css.includes(token), `falta el token ${token}`);
+    }
+    assert.match(css, /--fuente-ui:ui-sans-serif,/);
+    assert.match(css, /--fuente-titulo:ui-sans-serif,/);
+    assert.match(css, /--fuente-codigo:ui-monospace,/);
+    assert.match(css, /--fuente-numeros:var\(--fuente-ui\)/);
+    // Compatibilidad: los nombres previos apuntan a los tokens nuevos.
+    assert.match(css, /--fuente:var\(--fuente-ui\)/);
+    assert.match(css, /--fuente-mono:var\(--fuente-codigo\)/);
+    // Sin webfonts ni familias literales fuera de los tokens: se quitan los :root.
+    const sinRaiz = css.replace(/:root\{[\s\S]*?\}/g, '');
+    assert.doesNotMatch(sinRaiz, /ui-sans-serif|ui-monospace|sans-serif|monospace|'Segoe UI'|Arial|Menlo|Consolas/i);
+    // Toda declaración font-family de una regla sale de un token (o hereda).
+    for (const coincidencia of sinRaiz.matchAll(/font-family:([^;}]+)/g)) {
+      assert.match(coincidencia[1].trim(), /^(var\(--fuente-|inherit)/, `font-family literal: ${coincidencia[1]}`);
+    }
+  });
+});
+
+test('tipografía: controles nativos heredan la fuente y se les asigna su rol (13px/500)', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    // Sin esto los botones/inputs caen en la fuente del navegador, no en la UI.
+    assert.match(css, /button,input,select,textarea,summary,optgroup\{font:inherit\}/);
+    assert.match(css, /::placeholder\{font-family:inherit/);
+    // Botones y pestañas: 13px con peso 500 (nunca 400).
+    assert.match(css, /\.boton\{[^}]*font-size:13px;font-weight:500/);
+    assert.match(css, /\.tabs \[role=tab\]\{[^}]*font-size:13px;font-weight:500/);
+    // Chips y badges: 600 con tracking liviano.
+    assert.match(css, /\.chip\{[^}]*font-weight:600;letter-spacing:\.01em/);
+    assert.match(css, /\.badge\{[^}]*font-weight:600;letter-spacing:\.01em/);
+    assert.match(css, /\.chip-evento\{[^}]*font-weight:600;letter-spacing:\.01em/);
+    // Renderizado y kerning consistentes en html/body.
+    for (const prop of [
+      'font-synthesis:none',
+      'font-optical-sizing:auto',
+      'text-size-adjust:100%',
+      'font-kerning:normal',
+      '-webkit-font-smoothing:antialiased',
+      'text-rendering:optimizeLegibility',
+    ]) {
+      assert.ok(css.includes(prop), `falta ${prop}`);
+    }
+  });
+});
+
+test('tipografía: código en la monoespaciada, números tabulares y texto en la de UI', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    // Consola, diff, rutas, ids de trabajo, ramas (`.mono`) y JSON del pizarrón.
+    assert.match(css, /code,kbd,samp,pre,\.mono\{font-family:var\(--fuente-codigo\)/);
+    assert.match(css, /\.consola-salida\{[^}]*font-family:var\(--fuente-codigo\)/);
+    assert.match(css, /\.parche\{[^}]*font-family:var\(--fuente-codigo\)/);
+    assert.match(css, /\.archivo-ruta\{font-family:var\(--fuente-codigo\)/);
+    assert.match(css, /\.trabajo-id\{font-family:var\(--fuente-codigo\)/);
+    assert.match(css, /\.valor-pizarron\{font-family:var\(--fuente-codigo\)/);
+    // El código no lleva ligaduras que confundan (calt/liga en 0).
+    assert.match(css, /code,kbd,samp,pre,\.mono\{[^}]*font-variant-ligatures:none/);
+    assert.match(css, /code,kbd,samp,pre,\.mono\{[^}]*font-feature-settings:'calt' 0,'liga' 0/);
+    // Números tabulares en contadores, duraciones y horas.
+    assert.match(css, /\.num,\.tarjeta-valor,[^{]*\{font-variant-numeric:tabular-nums/);
+    assert.match(css, /\.evento-hora\{[^}]*font-family:var\(--fuente-numeros\)/);
+    assert.match(css, /\.tabla-auditoria time\{[^}]*font-family:var\(--fuente-numeros\)/);
+    // Texto no-código (prompt, preview de tarea) en la fuente de UI, nunca mono.
+    assert.match(css, /\.prompt\{[^}]*font-family:var\(--fuente-ui\)/);
+    assert.match(css, /\.plegable-preview\{[^}]*font-family:var\(--fuente-ui\)/);
+    assert.doesNotMatch(css, /\.plegable-preview\{[^}]*fuente-codigo/);
+    // Títulos con la familia de display y la marca de página en el h1.
+    assert.match(css, /h1,h2,h3\{font-family:var\(--fuente-titulo\)/);
+    // En la auditoría la columna «Trabajo» es un enlace de UI.
+    assert.match(css, /\.tabla-auditoria \.celda-trabajo a\{font-family:var\(--fuente-ui\)/);
+  });
+});
+
