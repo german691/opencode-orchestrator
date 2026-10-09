@@ -9,6 +9,7 @@
  */
 
 import { compilar } from './glob.js';
+import { configReanudacion } from './reanudacion.js';
 import { homedir } from 'node:os';
 
 /**
@@ -46,6 +47,7 @@ const CLAVES_PERFIL = new Set([
   'env',
   'resources',
   'accept',
+  'reanudacion',
 ]);
 
 /** Campos permitidos dentro de `worktrees`. */
@@ -334,6 +336,18 @@ export function validarPerfil(objeto) {
     }
   }
 
+  // Sección opcional `reanudacion`: la valida el mismo módulo que decide la política
+  // (src/core/reanudacion.js), así el perfil y el gestor comparten una única definición
+  // de qué es válido y cuáles son los valores por defecto.
+  let reanudacion = { habilitado: true, maxRelanzamientos: 1 };
+  try {
+    reanudacion = configReanudacion(objeto.reanudacion);
+  } catch (error) {
+    for (const mensaje of Array.isArray(error?.errores) ? error.errores : [String(error?.message ?? error)]) {
+      errores.push(mensaje);
+    }
+  }
+
   if (errores.length > 0) throw new ErrorDePerfil(errores);
 
   return {
@@ -363,6 +377,8 @@ export function validarPerfil(objeto) {
       ? Object.fromEntries(Object.entries(objeto.resources).map(([clave, valor]) => [clave, { ...valor }]))
       : {},
     accept: objeto.accept ? { ...objeto.accept } : {},
+    // Política de reanudación ante corte de transporte (socket cerrado) del agente.
+    reanudacion,
   };
 }
 
@@ -422,6 +438,7 @@ export function perfilPorDefecto(nombreRepo) {
     env: {},
     resources: {},
     accept: {},
+    reanudacion: { habilitado: true, maxRelanzamientos: 1 },
   };
 }
 

@@ -11,6 +11,15 @@ import { esTerminal } from '../core/estados.js';
 /** Máximo de archivos que se listan en línea. */
 const MAX_ARCHIVOS = 40;
 
+/** Topes por defecto de la salida compacta (ahorro de contexto del orquestador). */
+const LIMITE_LINEAS_SALIDA = 40;
+const LIMITE_LINEAS_STDERR = 15;
+const LIMITE_LINEAS_ACEPTACION = 40;
+const LIMITE_COINCIDENCIAS = 15;
+
+/** Líneas que delatan un fallo: se muestran primero al recortar un log de aceptación. */
+const RE_FALLO = /✖|✗|not ok|FAIL|Error|AssertionError/;
+
 /** Duración legible: 1h 02m 03s. */
 export function duracion(ms) {
   if (!Number.isFinite(ms) || ms < 0) return '?';
@@ -23,11 +32,69 @@ export function duracion(ms) {
   return `${s}s`;
 }
 
-/** Recorta un texto a su final, avisando de lo omitido. */
-function cola(texto, max) {
-  const t = String(texto ?? '').trim();
-  if (t.length <= max) return t;
-  return `[... ${t.length - max} caracteres omitidos ...]\n${t.slice(-max)}`;
+/**
+ * Últimas `tope` líneas de un texto, con un aviso de lo omitido.
+ * POR QUÉ por líneas y no por caracteres: lo que interesa de un log de agente es su
+ * desenlace (las últimas líneas), y una sola línea kilométrica no debe comerse el cupo.
+ * @param {unknown} texto
+ * @param {number} tope
+ * @returns {string}
+ */
+function ultimasLineas(texto, tope) {
+  const lineas = String(texto ?? '').replace(/\s+$/, '').split(/\r?\n/);
+  if (lineas.length <= tope) return lineas.join('\n');
+  return `[... ${lineas.length - tope} líneas omitidas ...]\n${lineas.slice(-tope).join('\n')}`;
+}
+
+/**
+ * Quita los bloques de subtests que PASARON (`ok N - ...`) junto con sus líneas de
+ * detalle, que solo agregan ruido cuando se resume un log de aceptación fallido.
+ * @param {string[]} lineas
+ * @returns {string[]}
+ */
+function sinSubtestOk(lineas) {
+  const resultado = [];
+  let sangriaOmitida = null;
+  for (const linea of lineas) {
+    const sangria = linea.length - linea.trimStart().length;
+    if (sangriaOmitida !== null) {
+      if (linea.trim() === '' || sangria > sangriaOmitida) continue; // detalle del bloque omitido
+      sangriaOmitida = null;
+    }
+    if (/^\s*ok\b/.test(linea)) {
+      sangriaOmitida = sangria;
+      continue;
+    }
+    resultado.push(linea);
+  }
+  return resultado;
+}
+
+/**
+ * Recorta un log de aceptación fallido: primero las líneas que casan el patrón de
+ * fallo (hasta `topeCoincidencias`) y luego las últimas `topeLineas`, sin repetir.
+ * @param {unknown} texto
+ * @param {{ topeLineas: number, topeCoincidencias: number }} opciones
+ * @returns {string}
+ */
+function lineasPrioritarias(texto, { topeLineas, topeCoincidencias }) {
+  const sinOk = sinSubtestOk(String(texto ?? '').split(/\r?\n/));
+  const indices = [];
+  const yaEsta = new Set();
+  sinOk.forEach((linea, indice) => {
+    if (indices.length >= topeCoincidencias) return;
+    if (RE_FALLO.test(linea)) {
+      indices.push(indice);
+      yaEsta.add(indice);
+    }
+  });
+  for (let indice = Math.max(0, sinOk.length - topeLineas); indice < sinOk.length; indice += 1) {
+    if (!yaEsta.has(indice)) {
+      indices.push(indice);
+      yaEsta.add(indice);
+    }
+  }
+  return indices.map((i) => sinOk[i]).join('\n');
 }
 
 const TEXTO_ESPERA = {
@@ -72,9 +139,11 @@ export function describirActivo(trabajo, ahora = Date.now()) {
  *
  * @param {object} trabajo
  * @param {{ salida?: string, errores?: string }} [colas] final de stdout/stderr
+ * @param {{ completo?: boolean }} [opciones] `completo: true` desactiva los topes de
+ *   líneas (recupera toda la salida); por defecto se recorta para ahorrar contexto
  * @returns {string}
  */
-export function describirTerminado(trabajo, colas = {}) {
+export function describirTerminado(trabajo, colas = {}, { completo = false } = {}) {
   const r = trabajo.resultado ?? {};
   const encabezado = [
     `job_id=${trabajo.id} (finished)`,
@@ -110,11 +179,31 @@ export function describirTerminado(trabajo, colas = {}) {
     const ok = r.aceptacion.exit === 0 && r.aceptacion.motivo === 'exit';
     partes.push(`aceptacion: ${ok ? 'OK' : 'FALLO'} (exit=${r.aceptacion.exit}) $ ${r.aceptacion.cmd}`);
     // Primero QUÉ falló (bloque de fallos extraído); el final del stdout solo si no se reconoció ninguno.
-    if (!ok && r.aceptacion.fallos) partes.push(`--- fallos de la aceptacion ---\n${cola(r.aceptacion.fallos, 2500)}`);
-    else if (!ok && r.aceptacion.cola) partes.push(`--- salida de la aceptacion ---\n${cola(r.aceptacion.cola, 1500)}`);
+    // Por defecto se recorta a las últimas 40 líneas con las coincidencias de fallo primero.
+    if (!ok && r.aceptacion.fallos) {
+      const log = completo
+        ? r.aceptacion.fallos
+        : lineasPrioritarias(r.aceptacion.fallos, { topeLineas: LIMITE_LINEAS_ACEPTACION, topeCoincidencias: LIMITE_COINCIDENCIAS });
+      partes.push(`--- fallos de la aceptacion ---\n${log}`);
+    } else if (!ok && r.aceptacion.cola) {
+      const log = completo
+        ? r.aceptacion.cola
+        : lineasPrioritarias(r.aceptacion.cola, { topeLineas: LIMITE_LINEAS_ACEPTACION, topeCoincidencias: LIMITE_COINCIDENCIAS });
+      partes.push(`--- salida de la aceptacion ---\n${log}`);
+    }
   }
-  if (colas.salida) partes.push(`--- salida de opencode (final) ---\n${cola(colas.salida, 3000)}`);
-  if (colas.errores) partes.push(`--- stderr (final) ---\n${cola(colas.errores, 1000)}`);
+  if (colas.salida) {
+    const salida = completo ? String(colas.salida).trim() : ultimasLineas(colas.salida, LIMITE_LINEAS_SALIDA);
+    partes.push(`--- salida de opencode (final) ---\n${salida}`);
+  }
+  if (colas.errores) {
+    const errores = completo ? String(colas.errores).trim() : ultimasLineas(colas.errores, LIMITE_LINEAS_STDERR);
+    partes.push(`--- stderr (final) ---\n${errores}`);
+  }
+  // Recuperar todo lo recortado con opencode_logs (o con `completo: true`).
+  if (!completo && (colas.salida || colas.errores || r.aceptacion?.ejecutada)) {
+    partes.push(`(salida completa: opencode_logs job_id=${trabajo.id})`);
+  }
   return partes.join('\n');
 }
 

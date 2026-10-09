@@ -349,3 +349,41 @@ test('si el cliente se va con stderr roto el servidor termina solo y no queda gi
   assert.notEqual(resultado, null, 'el servidor debe terminar solo cuando el cliente se va');
   servidoresVivos.delete(hijo);
 });
+
+test('el servidor escribe la auditoría global (arranque, job.creado, job.fin) en eventos.jsonl', async () => {
+  const e = montarEscenario();
+  const s = iniciarServidor({ ...e, env: { ORQ_FAKE_ESCRIBIR: 'src/nuevo.js', ORQ_FAKE_DORMIR: '50' } });
+  const r = await s.llamar('opencode_coding', { prompt: 'x', cwd: e.repo, mode: 'safe', writes: ['src/**'], title: 'auditado' });
+  assert.equal(r.isError, false, texto(r));
+  const id = jobIdDe(texto(r));
+
+  const eventos = fs
+    .readFileSync(path.join(e.estado, 'eventos.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .map((linea) => JSON.parse(linea));
+  assert.ok(eventos.some((ev) => ev.tipo === 'servidor.arranque'), 'falta servidor.arranque');
+  const creado = eventos.find((ev) => ev.tipo === 'job.creado' && ev.jobId === id);
+  assert.ok(creado, 'falta job.creado');
+  assert.equal(creado.detalle.titulo, 'auditado');
+  assert.ok(eventos.some((ev) => ev.tipo === 'job.fin' && ev.jobId === id && ev.estado === 'succeeded'), 'falta job.fin');
+
+  s.proceso.stdin.end();
+  await s.salida;
+});
+
+test('la salida se recorta por defecto y el parámetro completo: true la recupera', async () => {
+  const e = montarEscenario();
+  const s = iniciarServidor({ ...e, env: { ORQ_FAKE_ESCRIBIR: 'src/nuevo.js', ORQ_FAKE_SALIDA_BYTES: '20000', ORQ_FAKE_DORMIR: '50' } });
+
+  const porDefecto = await s.llamar('opencode_coding', { prompt: 'x', cwd: e.repo, mode: 'safe', writes: ['src/**'] });
+  assert.equal(porDefecto.isError, false, texto(porDefecto));
+  assert.match(texto(porDefecto), /\(salida completa: opencode_logs job_id=[0-9a-f]{8}\)/);
+
+  const completo = await s.llamar('opencode_coding', { prompt: 'y', cwd: e.repo, mode: 'safe', writes: ['src/**'], completo: true });
+  assert.equal(completo.isError, false, texto(completo));
+  assert.doesNotMatch(texto(completo), /salida completa: opencode_logs/);
+
+  s.proceso.stdin.end();
+  await s.salida;
+});
