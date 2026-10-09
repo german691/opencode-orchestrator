@@ -56,9 +56,87 @@ const MOTIVOS = {
   bloqueado_por_dependencia: 'bloqueado por una dependencia',
 };
 
+/**
+ * Tipos de evento del registro traducidos a una etiqueta humana. POR QUÉ en la
+ * lib pura: la auditoría se renderiza en el servidor y el pizarrón en el cliente;
+ * ambos deben mostrar el mismo texto sin duplicar la tabla.
+ */
+const TIPOS_LEGIBLES = {
+  'servidor.arranque': 'Servidor iniciado',
+  'servidor.recuperacion': 'Recuperación al iniciar',
+  'job.creado': 'Trabajo creado',
+  'job.estado': 'Cambio de estado',
+  'job.fin': 'Trabajo terminado',
+  'job.espera': 'En cola',
+  'job.reintento': 'Reintento',
+  'job.reanudado': 'Reanudado',
+  'job.cancelado': 'Cancelado',
+  'job.mutaciones': 'Mutaciones',
+  'job.revision': 'Revisión',
+  merge: 'Integrado',
+  avanzar_base: 'Base avanzada',
+  cleanup: 'Limpieza',
+  'pizarron.post': 'Pizarrón: aporte',
+  'pizarron.aporte_invalido': 'Pizarrón: aporte inválido',
+};
+
 /** ¿El estado es terminal (el trabajo ya no corre)? */
 export function esTerminal(estado) {
   return TERMINALES.has(estado);
+}
+
+/**
+ * Etiqueta humana de un tipo de evento; el crudo si no se conoce (nunca vacío si
+ * el tipo existe). El crudo se conserva en el `title` de la UI para depurar.
+ * @param {string|null|undefined} tipo
+ * @returns {string}
+ */
+export function etiquetaTipo(tipo) {
+  return TIPOS_LEGIBLES[tipo] ?? String(tipo ?? '');
+}
+
+/**
+ * Transición legible de un evento: `ícono anterior → ícono nuevo`. Usa ícono y
+ * texto juntos para no depender del color; con un solo estado devuelve ese estado.
+ * @param {{ anterior?: string, estado?: string }|null|undefined} evento
+ * @returns {string}
+ */
+export function etiquetaTransicion(evento) {
+  const datos = evento ?? {};
+  const { estado } = datos;
+  if (estado === undefined || estado === null || estado === '') return '';
+  const base = ETIQUETAS[estado] ?? { texto: String(estado), icono: '•' };
+  const destino = `${base.icono} ${base.texto}`;
+  const { anterior } = datos;
+  if (anterior === undefined || anterior === null || anterior === '') return destino;
+  const previo = ETIQUETAS[anterior] ?? { texto: String(anterior), icono: '•' };
+  return `${previo.icono} ${previo.texto} → ${destino}`;
+}
+
+/**
+ * Hora legible `dd/mm hh:mm:ss` en la zona del navegador; vacío sin timestamp.
+ * @param {number|null|undefined} ts
+ * @returns {string}
+ */
+export function formatearHoraEvento(ts) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const fecha = new Date(n);
+  const dos = (valor) => String(valor).padStart(2, '0');
+  return (
+    `${dos(fecha.getDate())}/${dos(fecha.getMonth() + 1)} ` +
+    `${dos(fecha.getHours())}:${dos(fecha.getMinutes())}:${dos(fecha.getSeconds())}`
+  );
+}
+
+/**
+ * Timestamp en ISO UTC (estable para `title` y para comparar entre máquinas).
+ * @param {number|null|undefined} ts
+ * @returns {string}
+ */
+export function horaIsoEvento(ts) {
+  const n = Number(ts);
+  return Number.isFinite(n) && n > 0 ? new Date(n).toISOString() : '';
 }
 
 /**

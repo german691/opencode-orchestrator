@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import {
   formatearDuracion,
   etiquetaEstado,
+  etiquetaTipo,
+  etiquetaTransicion,
+  formatearHoraEvento,
+  horaIsoEvento,
   motivoLegible,
   esTerminal,
   ordenarTrabajos,
@@ -13,6 +17,7 @@ import {
   resumenAlcance,
   resumenTarea,
 } from '../src/panel/cliente-lib.js';
+import { sintetizarEventos, reconstruirFaltantes, mezclarEventos } from '../src/panel/historial.js';
 
 test('formatearDuracion: segundos, minutos, horas y días', () => {
   assert.equal(formatearDuracion(null), '–');
@@ -235,4 +240,119 @@ test('resumenAlcance: cuenta writes, protegidas, tocados y fuera', () => {
   const vacio = resumenAlcance(null);
   assert.equal(vacio.tocados, 0);
   assert.equal(vacio.limpio, true);
+});
+
+test('etiquetaTipo: tipos de evento traducidos a español y crudo si no se conoce', () => {
+  assert.equal(etiquetaTipo('job.creado'), 'Trabajo creado');
+  assert.equal(etiquetaTipo('job.estado'), 'Cambio de estado');
+  assert.equal(etiquetaTipo('job.fin'), 'Trabajo terminado');
+  assert.equal(etiquetaTipo('job.espera'), 'En cola');
+  assert.equal(etiquetaTipo('job.reintento'), 'Reintento');
+  assert.equal(etiquetaTipo('job.reanudado'), 'Reanudado');
+  assert.equal(etiquetaTipo('job.cancelado'), 'Cancelado');
+  assert.equal(etiquetaTipo('job.mutaciones'), 'Mutaciones');
+  assert.equal(etiquetaTipo('job.revision'), 'Revisión');
+  assert.equal(etiquetaTipo('merge'), 'Integrado');
+  assert.equal(etiquetaTipo('avanzar_base'), 'Base avanzada');
+  assert.equal(etiquetaTipo('cleanup'), 'Limpieza');
+  assert.equal(etiquetaTipo('pizarron.post'), 'Pizarrón: aporte');
+  assert.equal(etiquetaTipo('pizarron.aporte_invalido'), 'Pizarrón: aporte inválido');
+  assert.equal(etiquetaTipo('servidor.arranque'), 'Servidor iniciado');
+  assert.equal(etiquetaTipo('servidor.recuperacion'), 'Recuperación al iniciar');
+  assert.equal(etiquetaTipo('inventado'), 'inventado');
+  assert.equal(etiquetaTipo(undefined), '');
+});
+
+test('etiquetaTransicion: ícono+texto y anterior → nuevo, nunca solo color', () => {
+  assert.equal(etiquetaTransicion({ estado: 'running' }), '▶ Corriendo');
+  assert.equal(etiquetaTransicion({ anterior: 'queued', estado: 'running' }), '⏳ En cola → ▶ Corriendo');
+  assert.equal(etiquetaTransicion({}), '');
+  assert.equal(etiquetaTransicion(null), '');
+  // Un estado desconocido se muestra crudo pero junto al ícono.
+  assert.equal(etiquetaTransicion({ anterior: 'raro', estado: 'running' }), '• raro → ▶ Corriendo');
+});
+
+test('formatearHoraEvento: dd/mm hh:mm:ss local y vacío sin timestamp', () => {
+  const ts = Date.parse('2026-10-09T15:04:05');
+  const fecha = new Date(ts);
+  const dos = (valor) => String(valor).padStart(2, '0');
+  const esperado =
+    `${dos(fecha.getDate())}/${dos(fecha.getMonth() + 1)} ` +
+    `${dos(fecha.getHours())}:${dos(fecha.getMinutes())}:${dos(fecha.getSeconds())}`;
+  assert.equal(formatearHoraEvento(ts), esperado);
+  assert.equal(formatearHoraEvento(null), '');
+  assert.equal(formatearHoraEvento('x'), '');
+  assert.equal(horaIsoEvento(ts), new Date(ts).toISOString());
+  assert.equal(horaIsoEvento(undefined), '');
+});
+
+test('sintetizarEventos: creado, inicio y fin desde job.json (puro)', () => {
+  const completo = sintetizarEventos({
+    id: 'abc12345',
+    estado: 'succeeded',
+    creadoEn: 1000,
+    inicioEn: 2000,
+    finEn: 3000,
+    motivoFin: null,
+  });
+  assert.deepEqual(
+    completo.map((e) => [e.tipo, e.ts, e.origen]),
+    [
+      ['job.creado', 1000, 'reconstruido'],
+      ['job.estado', 2000, 'reconstruido'],
+      ['job.fin', 3000, 'reconstruido'],
+    ],
+  );
+  assert.equal(completo[1].anterior, 'queued');
+  assert.equal(completo[1].estado, 'running');
+  assert.equal(completo[2].estado, 'succeeded');
+
+  // Un trabajo corriendo no tiene fin; uno en cola, ni inicio ni fin.
+  assert.deepEqual(
+    sintetizarEventos({ id: 'x', estado: 'running', creadoEn: 10, inicioEn: 20 }).map((e) => e.tipo),
+    ['job.creado', 'job.estado'],
+  );
+  assert.deepEqual(sintetizarEventos({ id: 'x', estado: 'queued', creadoEn: 5 }).map((e) => e.tipo), ['job.creado']);
+  assert.deepEqual(sintetizarEventos(null), []);
+  assert.deepEqual(sintetizarEventos({ id: 'x', estado: 'queued' }), []);
+});
+
+test('reconstruirFaltantes: no reconstruye un trabajo que ya tiene registro', () => {
+  const trabajos = [
+    { id: 'con', estado: 'succeeded', creadoEn: 1, finEn: 3 },
+    { id: 'sin', estado: 'running', creadoEn: 2 },
+  ];
+  const eventos = reconstruirFaltantes(trabajos, new Set(['con']));
+  assert.deepEqual(eventos.map((e) => e.jobId), ['sin']);
+  assert.ok(eventos.every((e) => e.origen === 'reconstruido'));
+  assert.deepEqual(reconstruirFaltantes([], new Set()), []);
+});
+
+test('mezclarEventos: orden desc mezclando ambos orígenes, filtros y límite (puro)', () => {
+  const reales = [
+    { ts: 5000, tipo: 'job.creado', jobId: 'nuevo' },
+    { ts: 1000, tipo: 'job.fin', jobId: 'nuevo' },
+  ];
+  const reconstruidos = [
+    { ts: 4000, tipo: 'job.fin', jobId: 'viejo', origen: 'reconstruido' },
+    { ts: 3000, tipo: 'job.creado', jobId: 'viejo', origen: 'reconstruido' },
+  ];
+  assert.deepEqual(
+    mezclarEventos(reales, reconstruidos, {}).map((e) => [e.ts, e.origen]),
+    [
+      [5000, 'registro'],
+      [4000, 'reconstruido'],
+      [3000, 'reconstruido'],
+      [1000, 'registro'],
+    ],
+  );
+  assert.deepEqual(mezclarEventos(reales, reconstruidos, { jobId: 'viejo' }).map((e) => e.ts), [4000, 3000]);
+  assert.deepEqual(mezclarEventos(reales, reconstruidos, { tipo: 'job.fin' }).map((e) => e.ts), [4000, 1000]);
+  assert.deepEqual(mezclarEventos(reales, reconstruidos, { desde: 3500 }).map((e) => e.ts), [5000, 4000]);
+  assert.deepEqual(mezclarEventos(reales, reconstruidos, { hasta: 3000 }).map((e) => e.ts), [3000, 1000]);
+  assert.deepEqual(mezclarEventos(reales, reconstruidos, { limite: 2 }).map((e) => e.ts), [5000, 4000]);
+  assert.deepEqual(mezclarEventos(reales, reconstruidos, { limite: 0 }), []);
+  assert.deepEqual(mezclarEventos(reales, reconstruidos, { orden: 'asc' }).map((e) => e.ts), [1000, 3000, 4000, 5000]);
+  // La entrada no se muta.
+  assert.equal(reales[0].origen, undefined);
 });

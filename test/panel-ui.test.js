@@ -8,6 +8,7 @@ import { crearServidorPanel, hostPermitido, concurrenciaDeEntorno, CONCURRENCIA_
 import { PAGINA } from '../src/panel/pagina.js';
 import { CLIENTE } from '../src/panel/cliente.js';
 import { PIZARRON_CLIENTE } from '../src/panel/pizarron-cliente.js';
+import { crearRegistroEventos } from '../src/core/eventos.js';
 
 const AHORA = 1_800_000_000_000;
 
@@ -231,4 +232,108 @@ test('cliente del pizarrón: pasa node --check y refresca por polling', () => {
   assert.match(PIZARRON_CLIENTE, /ver más/);
   assert.match(PIZARRON_CLIENTE, /Todavía ningún agente compartió contexto/);
   assert.doesNotMatch(PIZARRON_CLIENTE, /innerHTML/);
+});
+
+/** Arranca el panel sobre una base propia y ejecuta `fn(url)`. */
+async function conBase(fn, { registro } = {}) {
+  const base = crearBase();
+  const servidor = crearServidorPanel({ baseDir: base, ahora: () => AHORA, registro });
+  await new Promise((r) => servidor.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${servidor.address().port}`;
+  try {
+    await fn(url, base);
+  } finally {
+    await new Promise((r) => servidor.close(r));
+  }
+}
+
+test('auditoría: layout de página, cabecera con aria-current, filtros etiquetados, tabla con caption y vacío role=status', async () => {
+  const base = crearBase();
+  const registro = crearRegistroEventos({ dir: path.join(base, 'auditoria'), ahora: () => AHORA });
+  await conBase(
+    async (url) => {
+      const html = await (await fetch(`${url}/auditoria`)).text();
+      // Layout: <main> de página con ancho cómodo (clase .pagina, CSS aparte).
+      assert.match(html, /<main id="contenido" class="pagina" tabindex="-1">/);
+      // Cabecera consistente con la principal y sección actual marcada.
+      assert.match(html, /<a href="\/">Trabajos<\/a>/);
+      assert.match(html, /<a href="\/auditoria" aria-current="page">Auditoría<\/a>/);
+      assert.match(html, /<a href="\/pizarron">Pizarrón<\/a>/);
+      // Filtros con etiquetas visibles y botones primario/limpiar.
+      assert.match(html, /<label for="filtro-trabajo">Trabajo<\/label>/);
+      assert.match(html, /<label for="filtro-tipo">Tipo<\/label>/);
+      assert.match(html, /<label for="filtro-desde">Desde<\/label>/);
+      assert.match(html, /<label for="filtro-hasta">Hasta<\/label>/);
+      assert.match(html, /class="boton boton-primario">Filtrar<\/button>/);
+      assert.match(html, /class="boton" href="\/auditoria">Limpiar<\/a>/);
+      // Estados vacíos informativos con role=status.
+      assert.match(html, /role="status"/);
+      assert.match(html, /Todavía no hay eventos/);
+      assert.match(html, /cambios de estado de los trabajos/);
+      assert.doesNotMatch(html, /<style/i);
+      assert.doesNotMatch(html, /onclick=/i);
+    },
+    { registro },
+  );
+});
+
+test('auditoría: tabla con caption/aria-label, encabezado fijo y hora legible con ISO', async () => {
+  const base = crearBase();
+  const registro = crearRegistroEventos({ dir: path.join(base, 'auditoria'), ahora: () => AHORA });
+  registro.registrar({ tipo: 'job.creado', jobId: 'abc12345', estado: 'queued', actor: 'herramienta:coding' });
+  await conBase(
+    async (url) => {
+      const html = await (await fetch(`${url}/auditoria`)).text();
+      assert.match(html, /<div class="tabla-envoltorio">/);
+      assert.match(html, /<table class="tabla-auditoria" aria-label="Eventos registrados, más recientes primero">/);
+      assert.match(html, /<caption class="oculto">Eventos registrados, más recientes primero<\/caption>/);
+      assert.match(html, /<th scope="col">Hora<\/th>/);
+      // Hora legible dd/mm hh:mm:ss con el ISO en `datetime`/`title`.
+      assert.match(html, /<time datetime="[^"]+Z" title="[^"]+Z">\d{2}\/\d{2} \d{2}:\d{2}:\d{2}<\/time>/);
+      assert.match(html, /title="job\.creado">Trabajo creado/);
+    },
+    { registro },
+  );
+});
+
+test('pizarrón: layout de página, cabecera con aria-current y shell del cliente', async () => {
+  await conServidor(async (url) => {
+    const html = await (await fetch(`${url}/pizarron`)).text();
+    assert.match(html, /<main id="contenido" class="pagina" tabindex="-1">/);
+    assert.match(html, /<a href="\/">Trabajos<\/a>/);
+    assert.match(html, /<a href="\/pizarron" aria-current="page">Pizarrón<\/a>/);
+    assert.match(html, /<a href="\/auditoria">Auditoría<\/a>/);
+    assert.match(html, /src="\/static\/pizarron\.js"/);
+    assert.match(html, /id="pizarron-estado"[^>]*role="status"/);
+  });
+});
+
+test('estilos: layout de páginas secundarias con tokens, cabecera fija y foco visible', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    assert.match(css, /\.pagina\{/);
+    assert.match(css, /max-width:1100px/);
+    assert.match(css, /padding:calc\(var\(--esp\)\*5\) calc\(var\(--esp\)\*6\)/);
+    assert.match(css, /\.filtros\{/);
+    assert.match(css, /\.filtros label\{/);
+    assert.match(css, /\.tabla-envoltorio\{/);
+    assert.match(css, /position:sticky/);
+    assert.match(css, /\.boton-primario\{/);
+    assert.match(css, /:focus-visible\{outline:3px solid var\(--foco\)/);
+    assert.match(css, /prefers-reduced-motion:reduce/);
+    assert.match(css, /\.badge-historico\{/);
+  });
+});
+
+test('pizarrón cliente: refresca sin perder scroll ni plegables y muestra el estado vacío informativo', () => {
+  assert.match(PIZARRON_CLIENTE, /from '\/static\/lib\.js'/);
+  assert.match(PIZARRON_CLIENTE, /formatearHoraEvento/);
+  assert.match(PIZARRON_CLIENTE, /details\[data-clave\]\[open\]/);
+  assert.match(PIZARRON_CLIENTE, /detalle\.open = true/);
+  assert.match(PIZARRON_CLIENTE, /window\.scrollTo\(0, scrollY\)/);
+  assert.match(PIZARRON_CLIENTE, /serial === ultimoSerial/);
+  assert.match(PIZARRON_CLIENTE, /Todavía ningún agente compartió contexto\. Los agentes lo usan escribiendo \.orq\/aporte\.json/);
+  assert.match(PIZARRON_CLIENTE, /'conflicto'/);
+  assert.match(PIZARRON_CLIENTE, /enlaceTrabajo\(entrada\.jobId/);
+  assert.match(PIZARRON_CLIENTE, /tabla-envoltorio/);
 });
