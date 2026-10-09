@@ -443,3 +443,125 @@ test('pizarrón cliente: refresca sin perder scroll ni plegables y muestra el es
   assert.match(PIZARRON_CLIENTE, /enlaceTrabajo\(entrada\.jobId/);
   assert.match(PIZARRON_CLIENTE, /tabla-envoltorio/);
 });
+
+test('regresión 1: la cabecera principal trae contadores/conexión/concurrencia una sola vez y el JS lee el DOM con tolerancia', async () => {
+  await conServidor(async (url) => {
+    const html = await (await fetch(`${url}/`)).text();
+    // BUG de la ronda previa: NAV_PRINCIPAL no viajaba en `extra`, así que estos
+    // ids no existían y renderCabecera lanzaba TypeError al hidratar.
+    for (const id of ['conexion', 'conexion-texto', 'contadores', 'concurrencia']) {
+      const veces = (html.match(new RegExp(`id="${id}"`, 'g')) || []).length;
+      assert.equal(veces, 1, `id="${id}" debe aparecer exactamente una vez`);
+    }
+    // El navegador de secciones no se duplica: un solo <nav> de secciones.
+    assert.equal((html.match(/aria-label="Secciones"/g) || []).length, 1);
+    assert.doesNotMatch(html, /<nav[^>]*>\s*<nav/);
+    // El botón de atajos sigue dentro del mismo nav.
+    assert.match(html, /id="ayuda"/);
+  });
+  // El cliente lee el DOM con un helper tolerante a elementos ausentes.
+  assert.match(CLIENTE, /const conElemento = function \(id, fn\)/);
+  assert.match(CLIENTE, /conElemento\('contadores', function/);
+  // La cabecera se actualiza en su propio try y no frena la carga/selección.
+  assert.match(CLIENTE, /async function cargarEstadoCabecera\(\)/);
+  assert.match(CLIENTE, /await cargarEstadoCabecera\(\)/);
+  // La selección inicial ya no depende de /api/estado.
+  assert.match(CLIENTE, /const objetivo = app\.seleccionado \|\| app\.seleccionadoInicial/);
+});
+
+test('resumen: franja de tarjetas, cajas con título, plegables con scroll y acciones', () => {
+  assert.match(CLIENTE, /tarjetas-resumen/);
+  assert.match(CLIENTE, /function tarjeta\(/);
+  assert.match(CLIENTE, /function cajaConTitulo\(/);
+  // Una caja por aviso/resultado, sin bloques vacíos.
+  assert.match(CLIENTE, /cajaConTitulo\('Motivo de fin'/);
+  assert.match(CLIENTE, /cajaConTitulo\('Advertencias'/);
+  assert.match(CLIENTE, /cajaConTitulo\('Mutaciones'/);
+  assert.match(CLIENTE, /cajaConTitulo\('Revisión'/);
+  // «Última salida» plegable solo si hay output.
+  assert.match(CLIENTE, /if \(texto\.trim\(\) === ''\) return null/);
+  assert.match(CLIENTE, /const ultima = bloqueUltimaSalida\(trabajo\.transcript\)/);
+  // Acciones: copiar rama, copiar id y abrir consola.
+  assert.match(CLIENTE, /'Copiar rama'/);
+  assert.match(CLIENTE, /'Copiar id'/);
+  assert.match(CLIENTE, /'Abrir consola'/);
+  assert.match(CLIENTE, /activarTab\('consola'\)/);
+});
+
+test('pestañas: contadores en la etiqueta, alcance solo si hay fuera, pestaña y scroll recordados', () => {
+  assert.match(CLIENTE, /function actualizarEtiquetasTabs\(/);
+  assert.match(CLIENTE, /'Diff ' \+ cache\.nDiff/);
+  assert.match(CLIENTE, /'Eventos ' \+ cache\.nEventos/);
+  assert.match(CLIENTE, /'Alcance ⚠'/);
+  // El aviso de alcance NO aparece si no hay archivos fuera.
+  assert.match(CLIENTE, /else if \(tab === 'alcance' && cache\.nFuera\)/);
+  // Texto accesible para lectores de pantalla conviviendo con el contador.
+  assert.match(CLIENTE, /boton\.setAttribute\('aria-label', aria\)/);
+  // Pestaña activa por trabajo y scroll por pestaña+trabajo.
+  assert.match(CLIENTE, /tabsPorTrabajo/);
+  assert.match(CLIENTE, /app\.scrolls/);
+  assert.match(CLIENTE, /function guardarScrollActual\(/);
+  assert.match(CLIENTE, /function restaurarScroll\(/);
+  assert.match(CLIENTE, /Resumen por defecto/);
+});
+
+test('consola: barra sticky con fuente, pausa, wrap, tamaño, copiar/descargar y búsqueda navegable', () => {
+  assert.match(CLIENTE, /id = 'consola-ajustar'/);
+  assert.match(CLIENTE, /id = 'consola-buscar'/);
+  assert.match(CLIENTE, /id = 'consola-final'/);
+  assert.match(CLIENTE, /id = 'consola-pie'/);
+  assert.match(CLIENTE, /'Ajustar líneas'/);
+  assert.match(CLIENTE, /CLAVE_ENVOLVER/);
+  assert.match(CLIENTE, /CLAVE_TAMANO/);
+  assert.match(CLIENTE, /TAMANO_MIN/);
+  assert.match(CLIENTE, /TAMANO_MAX/);
+  // Búsqueda con «n de m», Enter/Shift+Enter y resaltado sin depender del color solo.
+  assert.match(CLIENTE, /coincidenciasEnLineas\(/);
+  assert.match(CLIENTE, /navegarCoincidencia\(evento\.shiftKey \? -1 : 1\)/);
+  assert.match(CLIENTE, /' de ' \+/);
+  // Auto-seguimiento: pausa al subir, botón flotante con contador y reanudación.
+  assert.match(CLIENTE, /debePausarSeguimiento\(/);
+  assert.match(CLIENTE, /'Ir al final ↓'/);
+  assert.match(CLIENTE, /'⏸ En pausa'/);
+  // Coloreo con refuerzo (clase por línea) y pie con el recorte.
+  assert.match(CLIENTE, /claseDeLinea\(/);
+  assert.match(CLIENTE, /se muestran las últimas ' \+ MAX_LINEAS/);
+  // Atajos dentro de la consola.
+  assert.match(CLIENTE, /Ctrl\/Cmd\+F/);
+  assert.match(CLIENTE, /enfocarBusquedaConsola/);
+});
+
+test('diff: cabecera con totales y acciones, archivo abierto por defecto, grandes plegados y salto rápido', () => {
+  assert.match(CLIENTE, /estadisticasDeParche\(/);
+  assert.match(CLIENTE, /' archivos · \+'/);
+  assert.match(CLIENTE, /'Expandir todo'/);
+  assert.match(CLIENTE, /'Plegar todo'/);
+  assert.match(CLIENTE, /'Copiar parche'/);
+  assert.match(CLIENTE, /MAX_LINEAS_ARCHIVO/);
+  assert.match(CLIENTE, /'Mostrar \(' \+ cantidad \+ ' líneas\)'/);
+  assert.match(CLIENTE, /const abierto = archivos\.findIndex/);
+  assert.match(CLIENTE, /diff-salto/);
+  assert.match(CLIENTE, /archivo-barra/);
+});
+
+test('estilos ronda 2: consola a toda altura, esqueletos, scrollbars y sticky del diff', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    // La consola llena la altura y scrollea por dentro.
+    assert.match(css, /#panel-consola\.consola-panel\{[^}]*display:flex[^}]*min-height:0[^}]*overflow:hidden/);
+    assert.match(css, /\.consola-salida\{[^}]*flex:1 1 auto[^}]*min-height:0[^}]*overflow:auto/);
+    // Wrap por defecto y scroll horizontal al desactivarlo.
+    assert.match(css, /\.consola-salida\.sin-ajuste\{[^}]*white-space:pre[^}]*overflow-x:auto/);
+    assert.match(css, /\.consola-barra\{[^}]*position:sticky/);
+    // Estados de carga con esqueleto y errores ya con «Reintentar».
+    assert.match(css, /\.esqueleto-linea\{/);
+    // Barras finas y sticky de encabezados sin tapar contenido.
+    assert.match(css, /scrollbar-width:thin/);
+    assert.match(css, /details\.archivo>summary\{[^}]*position:sticky/);
+    assert.match(css, /\[role=tabpanel\]\{[^}]*scroll-padding-top/);
+    assert.match(css, /details\.archivo\{[^}]*scroll-margin-top/);
+    // Tarjetas y cajas del resumen.
+    assert.match(css, /\.tarjetas-resumen\{/);
+    assert.match(css, /\.caja\{/);
+  });
+});

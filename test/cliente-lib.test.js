@@ -21,6 +21,11 @@ import {
   agruparTrabajos,
   tiempoRelativo,
   ordenarPor,
+  segmentosDeLinea,
+  coincidenciasEnLineas,
+  estadisticasDeParche,
+  claseDeLinea,
+  debePausarSeguimiento,
 } from '../src/panel/cliente-lib.js';
 import { sintetizarEventos, reconstruirFaltantes, mezclarEventos } from '../src/panel/historial.js';
 
@@ -420,4 +425,57 @@ test('mezclarEventos: orden desc mezclando ambos orígenes, filtros y límite (p
   assert.deepEqual(mezclarEventos(reales, reconstruidos, { orden: 'asc' }).map((e) => e.ts), [1000, 3000, 4000, 5000]);
   // La entrada no se muta.
   assert.equal(reales[0].origen, undefined);
+});
+
+test('segmentosDeLinea: separa lo que coincide de lo que no, con consulta vacía', () => {
+  assert.deepEqual(segmentosDeLinea('error total', ''), [{ texto: 'error total', coincide: false }]);
+  assert.deepEqual(segmentosDeLinea('abc', 'b'), [
+    { texto: 'a', coincide: false },
+    { texto: 'b', coincide: true },
+    { texto: 'c', coincide: false },
+  ]);
+  // Todo el texto coincide y la búsqueda ignora mayúsculas.
+  assert.deepEqual(segmentosDeLinea('ERROR', 'error'), [{ texto: 'ERROR', coincide: true }]);
+  assert.deepEqual(segmentosDeLinea('', 'x'), [{ texto: '', coincide: false }]);
+});
+
+test('coincidenciasEnLineas: línea y rango de cada aparición', () => {
+  const lineas = ['hola mundo', 'sin nada', 'mundo y más mundo'];
+  assert.deepEqual(coincidenciasEnLineas(lineas, ''), []);
+  assert.deepEqual(coincidenciasEnLineas(lineas, 'mundo'), [
+    { linea: 0, inicio: 5, fin: 10 },
+    { linea: 2, inicio: 0, fin: 5 },
+    { linea: 2, inicio: 12, fin: 17 },
+  ]);
+  // El conteo de «n de m» sale directo del largo.
+  assert.equal(coincidenciasEnLineas(lineas, 'ausente').length, 0);
+});
+
+test('estadisticasDeParche: suma archivos, altas y bajas', () => {
+  const stats = estadisticasDeParche([
+    { adiciones: 3, eliminaciones: 1 },
+    { adiciones: 2, eliminaciones: 4 },
+    { ruta: 'sin conteo' },
+  ]);
+  assert.deepEqual([stats.archivos, stats.adiciones, stats.eliminaciones, stats.total], [3, 5, 5, 10]);
+  assert.match(stats.texto, /3 archivo\(s\) · \+5 −5/);
+  assert.deepEqual(estadisticasDeParche(null), { archivos: 0, adiciones: 0, eliminaciones: 0, total: 0, texto: '0 archivo(s) · +0 −0' });
+});
+
+test('claseDeLinea: error gana al éxito y el color es solo un refuerzo', () => {
+  assert.equal(claseDeLinea('✔ tests pass'), 'linea-ok');
+  assert.equal(claseDeLinea('FATAL error de red'), 'linea-error');
+  assert.equal(claseDeLinea('error: FAIL al compilar'), 'linea-error');
+  // Una línea con ambas señales no debe quedar en verde.
+  assert.equal(claseDeLinea('✔ 5 pass, 1 fail'), 'linea-error');
+  assert.equal(claseDeLinea('línea común'), '');
+  assert.equal(claseDeLinea(''), '');
+});
+
+test('debePausarSeguimiento: pausa al alejarse del final y tolera el umbral', () => {
+  assert.equal(debePausarSeguimiento({ scrollTop: 100, scrollHeight: 400, clientHeight: 300 }), false);
+  assert.equal(debePausarSeguimiento({ scrollTop: 100, scrollHeight: 500, clientHeight: 300 }), true);
+  // Unos pocos píxeles de diferencia no pausan (ruido de subpíxel/trackpad).
+  assert.equal(debePausarSeguimiento({ scrollTop: 100, scrollHeight: 410, clientHeight: 300 }), false);
+  assert.equal(debePausarSeguimiento({}, 0), false);
 });

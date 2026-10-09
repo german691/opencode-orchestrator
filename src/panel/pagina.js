@@ -72,13 +72,17 @@ ${scripts}
 </html>`;
 }
 
-/** Cabecera de la página principal: conexión, contadores y enlaces. */
-const NAV_PRINCIPAL = `<span id="conexion" class="conexion reconectando" role="status">
+/**
+ * Controles EXTRA de la cabecera principal: conexión, contadores, concurrencia y
+ * el botón de atajos. POR QUÉ sin `navSecciones`: estos controles van DENTRO del
+ * `<nav>` que arma `cabeceraHtml`, así no se duplica el navegador de secciones.
+ */
+const CONTROLES_PRINCIPAL = `<span id="conexion" class="conexion reconectando" role="status">
     <span class="punto" aria-hidden="true"></span><span id="conexion-texto">Reconectando…</span>
   </span>
   <span id="contadores" class="contadores">Corriendo 0/0 · En cola 0</span>
   <span id="concurrencia" class="concurrencia" hidden></span>
-  ${navSecciones('trabajos', '<button type="button" id="ayuda" class="boton" aria-haspopup="dialog">Atajos (?)</button>')}`;
+  <button type="button" id="ayuda" class="boton" aria-haspopup="dialog">Atajos (?)</button>`;
 
 /**
  * Cuerpo de la página principal: layout de aplicación (lista + divisor + detalle).
@@ -155,7 +159,7 @@ const CUERPO_PRINCIPAL = `<div class="cuerpo" id="cuerpo">
 /** Página principal (el cliente la hidrata). */
 export const PAGINA = armazonHtml({
   titulo: 'Trabajos de opencode',
-  cabecera: cabeceraHtml({ titulo: 'Trabajos de opencode', marca: 'panel en vivo', actual: 'trabajos' }),
+  cabecera: cabeceraHtml({ titulo: 'Trabajos de opencode', marca: 'panel en vivo', actual: 'trabajos', extra: CONTROLES_PRINCIPAL }),
   cuerpo: CUERPO_PRINCIPAL,
   scripts: '<script type="module" src="/static/app.js"></script>',
   claseCuerpo: 'panel-app',
