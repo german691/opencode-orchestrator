@@ -5,6 +5,7 @@ Servidor MCP (stdio) que permite a un orquestador (Claude) delegar trabajo de c�
 archivos **declarado y verificado**, y un ciclo de vida sin procesos huérfanos.
 
 - Diseño, decisiones y mediciones: [`docs/DISENO.md`](docs/DISENO.md)
+- Guía del panel web: [`docs/PANEL.md`](docs/PANEL.md)
 - Referencia de la v2 (serializada, un solo árbol): [`legacy/server-v2.js`](legacy/server-v2.js)
 
 ## Qué garantiza
@@ -142,9 +143,11 @@ no tiene autenticación: por defecto escucha en loopback y se niega a hacerlo fu
 
 Rutas:
 
-- `/` — lista de trabajos (activos primero) con buscador, chips de estado y de repo, y el detalle con
-  pestañas **Resumen**, **Consola** (transcript en vivo), **Diff** (parche git), **Alcance** (`writes`,
-  archivos tocados y cuáles quedaron fuera) y **Eventos** (registro del trabajo).
+- `/` — lista de trabajos (activos primero) con buscador, chips de estado y un select de
+  repositorio, y el detalle con pestañas **Resumen**, **Consola** (transcript en vivo), **Diff**
+  (parche git), **Alcance** (`writes`, archivos tocados y cuáles quedaron fuera) y **Eventos**
+  (registro del trabajo). Layout de aplicación con lista/divisor/detalle, divisor ajustable con
+  el teclado, maestro-detalle en pantallas angostas y selección en `?job=`.
 - `/auditoria` — registro global `eventos.jsonl` en una tabla, con filtros por `jobId`, `tipo`, `desde`
   y `hasta`.
 - `/pizarron` — documento del pizarrón compartido (solo lectura).
@@ -152,9 +155,11 @@ Rutas:
   `/api/estado`, `/api/trabajos/:id/log|diff|alcance|eventos`, `/api/pizarron`) y `/api/stream` (SSE).
 
 Atajos de teclado (botón «Atajos (?)»): `j`/`k` trabajo siguiente/anterior, `/` buscar, `1`–`5`
-pestañas, `f` seguir/pausar la consola, `?` ayuda. Accesibilidad: enlace «Saltar al contenido»,
+pestañas, `f` seguir/pausar la consola, `Esc`/`Alt`+`←` volver a la lista, `←`/`→` ajustar el
+ancho de la lista, `?` ayuda. Accesibilidad: enlace «Saltar al contenido»,
 `role="tablist"`/`tabpanel`, `aria-live` para anuncios y estados con texto + ícono (nunca solo color),
-y CSP estricta sin código en línea.
+y CSP estricta sin código en línea. Guía completa (pantallas, detalle, límites y verificación
+visual): [`docs/PANEL.md`](docs/PANEL.md).
 
 ## Prueba de humo
 
