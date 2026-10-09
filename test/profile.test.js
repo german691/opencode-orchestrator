@@ -510,3 +510,19 @@ test('validarPerfil: retencion opcional con defaults 30 días / 500 en memoria',
   assert.throws(() => validarPerfil({ ...base, retencion: { maxEnMemoria: 0 } }), /retencion\.maxEnMemoria/);
   assert.throws(() => validarPerfil({ ...base, retencion: { raro: 1 } }), /retencion\.raro: campo desconocido/);
 });
+
+test('validarPerfil: `autor` opcional se normaliza y por defecto es null', () => {
+  assert.equal(validarPerfil({ version: 1, name: 'x' }).autor, null);
+  assert.equal(perfilPorDefecto('x').autor, null);
+  const perfil = validarPerfil({ version: 1, name: 'x', autor: { nombre: 'Dueña', email: 'duena@repo.test' } });
+  assert.deepEqual(perfil.autor, { nombre: 'Dueña', email: 'duena@repo.test' });
+});
+
+test('validarPerfil: `autor` inválido falla con mensajes claros', () => {
+  const base = { version: 1, name: 'x' };
+  assert.throws(() => validarPerfil({ ...base, autor: 'Dueña' }), /autor: debe ser un objeto \{ nombre, email \}/);
+  assert.throws(() => validarPerfil({ ...base, autor: { nombre: 'A' } }), /autor\.email: debe ser un texto no vacío/);
+  assert.throws(() => validarPerfil({ ...base, autor: { nombre: 'A', email: 'sin-arroba' } }), /autor\.email: debe tener forma x@y/);
+  assert.throws(() => validarPerfil({ ...base, autor: { nombre: 'A<b', email: 'a@b' } }), /autor\.nombre: no puede tener saltos de línea ni/);
+  assert.throws(() => validarPerfil({ ...base, autor: { nombre: 'A', email: 'a@b', extra: 1 } }), /autor\.extra: campo desconocido/);
+});

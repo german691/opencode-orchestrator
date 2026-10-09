@@ -38,6 +38,7 @@ errores con la ruta del campo. Sin archivo rigen los valores por defecto seguros
 | `esperarIntegracion` | boolean | `false` | No arrancar si solapa `writes` con un `succeeded` sin integrar. |
 | `logs` | object | `{ "maxBytes": 20971520 }` | Tope de tamaño por archivo de log de un trabajo. |
 | `retencion` | object | `{ "dias": 30, "maxEnMemoria": 500 }` | Retención de logs pesados y de trabajos en memoria. |
+| `autor` | `{ nombre, email }` \| null | `null` | Identidad git con la que se firman (autor **y** committer) los commits nuevos. `null` = `user.name`/`user.email` del repo y, si faltan, `opencode-orchestrator <orquestador@localhost>`. |
 
 ## `worktrees`
 

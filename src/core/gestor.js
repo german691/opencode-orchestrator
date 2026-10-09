@@ -45,6 +45,7 @@ import { expandirReceta } from './recetas.js';
 import { decidirReanudacion, esFalloDeTransporte, textoAdvertencia } from './reanudacion.js';
 import { construirPromptRevision, debeRevisar, parsearVeredicto, resumenRevision } from './revisor.js';
 import { crearProveedor } from './recursos.js';
+import { resolverIdentidad } from './identidadGit.js';
 import { ejecutar } from './runner.js';
 import { verificarCambios, escriturasEnRutaProtegida } from './scope.js';
 import {
@@ -246,6 +247,8 @@ export class Gestor {
     this.aportesInvalidosAvisados = new Set();
     /** @type {Set<string>} trabajos cuyo refresco fallido del pizarrón ya se avisó (una vez) */
     this.pizarronesRefrescoAvisado = new Set();
+    /** @type {Set<string>} repos ya avisados por no tener `user.name`/`user.email` (una vez) */
+    this.identidadesAvisadas = new Set();
     /** @type {number|null} última versión del pizarrón copiada a los worktrees activos */
     this.pizarronVersionCopiada = null;
     /** @type {number} cantidad de fallos al registrar eventos globales (para loguear el 1º y cada 100) */
@@ -380,6 +383,24 @@ export class Gestor {
   #raices(perfil) {
     const rootDir = resolverRaizWorktrees(perfil, this.home);
     return { rootDir, rootDirIntegracion: path.join(rootDir, '_integracion') };
+  }
+
+  /**
+   * Identidad git con la que firmar los commits de un repo (perfil > `git config` > fallback).
+   * Si cae al fallback avisa UNA vez por repo: los commits no quedarán a nombre del dueño.
+   * @param {object} perfil
+   * @param {string} repo
+   * @returns {{ nombre: string, email: string, origen: string }}
+   */
+  #identidadDe(perfil, repo) {
+    const identidad = resolverIdentidad({ repo, perfilAutor: perfil?.autor });
+    if (identidad.origen === 'fallback' && !this.identidadesAvisadas.has(repo)) {
+      this.identidadesAvisadas.add(repo);
+      process.stderr.write(
+        'sin user.name/user.email en el repo: los commits saldrán como opencode-orchestrator\n',
+      );
+    }
+    return identidad;
   }
 
   // ---------------------------------------------------------------------------
@@ -752,6 +773,7 @@ export class Gestor {
         integrationBranch: perfil.integrationBranch,
         base: perfil.baseBranch,
         rootDirIntegracion,
+        identidad: this.#identidadDe(perfil, job.repo),
       });
       if (sync.ok) return perfil.integrationBranch;
       this.#eventoDeTrabajo(id, { tipo: 'base_integracion_no_sincronizable', conflictos: sync.conflictos });
@@ -1316,6 +1338,7 @@ export class Gestor {
           ruta: raizTrabajo,
           mensaje: `orq(${id}): ${job.titulo}`,
           autor: this.autor,
+          identidad: this.#identidadDe(perfil, job.repo),
           soloArchivos: archivosTrabajo,
         });
       }
@@ -1954,6 +1977,7 @@ export class Gestor {
       integrationBranch: perfil.integrationBranch,
       base: perfil.baseBranch,
       rootDirIntegracion,
+      identidad: this.#identidadDe(perfil, trabajo.repo),
     });
     if (resultado.ok) {
       this.#guardar(id, { estado: 'merged', integradoSha: resultado.sha, integradoEn: perfil.integrationBranch }, actor);
