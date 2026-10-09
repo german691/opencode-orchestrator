@@ -4,6 +4,7 @@
   "baseBranch": "main",
   "integrationBranch": "staging",
   "concurrency": 3,
+  "esperarIntegracion": true,
   "jobBase": "integracion",
   "timeoutMs": 3600000,
   "aceptacionTimeoutMs": 1200000,
