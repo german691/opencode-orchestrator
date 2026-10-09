@@ -20,6 +20,7 @@ import { cargarEntornoDeArchivo } from './entorno.js';
 import { AlmacenDeTrabajos } from './core/store.js';
 import { crearRegistroEventos } from './core/eventos.js';
 import { crearPizarron } from './core/pizarron.js';
+import { adquirirBloqueoConEspera } from './core/bloqueo.js';
 import { crearHerramientas } from './mcp/herramientas.js';
 import { crearServidorMcp } from './mcp/protocolo.js';
 
@@ -83,7 +84,8 @@ async function main() {
   let bloqueoAdquirido = false;
   try {
     // Un solo servidor por directorio de estado: dos servidores se pisarían los trabajos.
-    almacen.adquirirBloqueoDeInstancia();
+    // Espera corta: tras reiniciar el cliente, el servidor anterior puede estar aún apagándose.
+    await adquirirBloqueoConEspera(almacen, { esperaMs: enteroDeEntorno('ORQ_LOCK_WAIT_MS', 10000) });
     bloqueoAdquirido = true;
     // Lo que quedó vivo de una ejecución anterior se reconcilia (y se mata si es nuestro).
     const perdidos = await almacen.marcarPerdidos();

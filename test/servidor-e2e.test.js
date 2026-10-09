@@ -71,7 +71,7 @@ function montarEscenario() {
 
 /** Arranca el servidor real y devuelve un cliente JSON-RPC mínimo. */
 function iniciarServidor({ estado, envoltorio, env = {} }) {
-  const entorno = { ...process.env, ORQ_STATE_DIR: estado, ORQ_OPENCODE_BIN: envoltorio, ORQ_WAIT_MS: '10000', ...env };
+  const entorno = { ...process.env, ORQ_STATE_DIR: estado, ORQ_OPENCODE_BIN: envoltorio, ORQ_WAIT_MS: '10000', ORQ_LOCK_WAIT_MS: '0', ...env };
   // El opencode falso se vuelve inerte bajo el ejecutor de pruebas de Node (para que
   // `node --test` no lo corra como test): esa variable no debe llegar al servidor.
   delete entorno.NODE_TEST_CONTEXT;
