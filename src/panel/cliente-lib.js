@@ -514,6 +514,114 @@ export function ordenarPor(lista, criterio = 'actividad') {
 }
 
 /**
+ * Segmenta una línea en tramos que coinciden y que no con `consulta`, para
+ * resaltar la búsqueda de la consola sin `innerHTML`. Pura y sin estado.
+ * @param {string|null|undefined} texto
+ * @param {string|null|undefined} consulta
+ * @returns {Array<{ texto: string, coincide: boolean }>}
+ */
+export function segmentosDeLinea(texto, consulta) {
+  const contenido = String(texto ?? '');
+  const objetivo = String(consulta ?? '');
+  if (objetivo === '') return [{ texto: contenido, coincide: false }];
+  const bajo = contenido.toLowerCase();
+  const aguja = objetivo.toLowerCase();
+  const segmentos = [];
+  let desde = 0;
+  while (desde <= contenido.length) {
+    const pos = bajo.indexOf(aguja, desde);
+    if (pos === -1) break;
+    if (pos > desde) segmentos.push({ texto: contenido.slice(desde, pos), coincide: false });
+    segmentos.push({ texto: contenido.slice(pos, pos + aguja.length), coincide: true });
+    desde = pos + aguja.length;
+  }
+  if (desde < contenido.length) segmentos.push({ texto: contenido.slice(desde), coincide: false });
+  if (segmentos.length === 0) segmentos.push({ texto: contenido, coincide: false });
+  return segmentos;
+}
+
+/**
+ * Coincidencias de `consulta` sobre un arreglo de líneas: línea y rango. Pura,
+ * para poder probar el «n de m» y la navegación de la búsqueda de la consola.
+ * @param {string[]} lineas
+ * @param {string|null|undefined} consulta
+ * @returns {Array<{ linea: number, inicio: number, fin: number }>}
+ */
+export function coincidenciasEnLineas(lineas, consulta) {
+  const lista = Array.isArray(lineas) ? lineas : [];
+  const objetivo = String(consulta ?? '');
+  if (objetivo === '') return [];
+  const aguja = objetivo.toLowerCase();
+  const coincidencias = [];
+  lista.forEach(function (texto, linea) {
+    const contenido = String(texto ?? '');
+    const bajo = contenido.toLowerCase();
+    let desde = 0;
+    while (desde <= bajo.length) {
+      const pos = bajo.indexOf(aguja, desde);
+      if (pos === -1) break;
+      coincidencias.push({ linea, inicio: pos, fin: pos + aguja.length });
+      desde = pos + Math.max(1, aguja.length);
+    }
+  });
+  return coincidencias;
+}
+
+/**
+ * Totales del parche para la cabecera del Diff: cantidad de archivos y altas y
+ * bajas sumadas. Pura para no repetir el recorrido en el cliente.
+ * @param {Array<{ adiciones?: number, eliminaciones?: number }>|null|undefined} archivos
+ * @returns {{ archivos: number, adiciones: number, eliminaciones: number, total: number, texto: string }}
+ */
+export function estadisticasDeParche(archivos) {
+  const lista = Array.isArray(archivos) ? archivos : [];
+  let adiciones = 0;
+  let eliminaciones = 0;
+  lista.forEach(function (archivo) {
+    adiciones += Number(archivo?.adiciones) || 0;
+    eliminaciones += Number(archivo?.eliminaciones) || 0;
+  });
+  return {
+    archivos: lista.length,
+    adiciones,
+    eliminaciones,
+    total: adiciones + eliminaciones,
+    texto: `${lista.length} archivo(s) · +${adiciones} −${eliminaciones}`,
+  };
+}
+
+/** Patrones de la consola: primero el error para que un «failed» no quede en verde. */
+const RE_LINEA_ERROR = /error|fail|✗|✖|FAIL/i;
+const RE_LINEA_OK = /✔|ok |pass/i;
+
+/**
+ * Clase decorativa de una línea de consola. El color REFUERZA la señal; el texto
+ * de la línea (que se muestra tal cual) es la fuente principal, no el color.
+ * @param {string|null|undefined} texto
+ * @returns {''|'linea-error'|'linea-ok'}
+ */
+export function claseDeLinea(texto) {
+  const contenido = String(texto ?? '');
+  if (RE_LINEA_ERROR.test(contenido)) return 'linea-error';
+  if (RE_LINEA_OK.test(contenido)) return 'linea-ok';
+  return '';
+}
+
+/**
+ * ¿El usuario se alejó del final y corresponde pausar el seguimiento? Se mide la
+ * distancia al fondo y se tolera un umbral para no pausar por un píxel. Pura.
+ * @param {{ scrollTop?: number, scrollHeight?: number, clientHeight?: number }} [medidas]
+ * @param {number} [umbral]
+ * @returns {boolean}
+ */
+export function debePausarSeguimiento(medidas = {}, umbral = 24) {
+  const scrollTop = Number(medidas.scrollTop) || 0;
+  const scrollHeight = Number(medidas.scrollHeight) || 0;
+  const clientHeight = Number(medidas.clientHeight) || 0;
+  return scrollHeight - scrollTop - clientHeight > umbral;
+}
+
+/**
  * Resumen numérico del alcance de un trabajo para la cabecera de la pestaña.
  * @param {object|null|undefined} alcance
  * @returns {{ writes: number, protegidas: number, tocados: number, fuera: number,
