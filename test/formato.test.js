@@ -225,12 +225,16 @@ test('describirPerfil: lista las recetas con sus parámetros requeridos', () => 
   assert.match(texto, /revisar: sin parámetros/);
 });
 
-test('describirEstado: contadores, activos y succeeded sin integrar, con tope de líneas', () => {
+test('describirEstado: activos primero, integrables sin integrar y contador de sin cambios', () => {
   const trabajos = [
     { id: 'run1', estado: 'running', creadoEn: 0, titulo: 'corriendo' },
     { id: 'ver1', estado: 'verifying', creadoEn: 0, titulo: 'verificando' },
-    { id: 'ok1', estado: 'succeeded', creadoEn: 0, finEn: 1000, titulo: 'listo' },
-    { id: 'mg1', estado: 'merged', creadoEn: 0, finEn: 1000, titulo: 'ya integrado' },
+    // Integrable: `succeeded` con commit (se lista y va a 'sin integrar').
+    { id: 'ok1', estado: 'succeeded', creadoEn: 0, finEn: 1000, titulo: 'listo', resultado: { commit: 'abc123' } },
+    // No integrable: readonly sin commit (solo suma al contador).
+    { id: 'ro1', estado: 'succeeded', creadoEn: 0, finEn: 1000, titulo: 'readonly', resultado: { commit: null } },
+    // Ya integrado: no se lista ni cuenta.
+    { id: 'mg1', estado: 'merged', creadoEn: 0, finEn: 1000, titulo: 'ya integrado', resultado: { commit: 'def456' } },
     { id: 'fail1', estado: 'failed', creadoEn: 0, finEn: 1000, titulo: 'falló' },
   ];
   const texto = describirEstado({ trabajos, resumen: { corriendo: ['run1'], enCola: [] }, ahora: 2000 });
@@ -238,9 +242,43 @@ test('describirEstado: contadores, activos y succeeded sin integrar, con tope de
   assert.match(lineas[0], /^corriendo=1 \| en cola=0 \| verificando=1$/);
   assert.ok(lineas.some((l) => /^run1 \| running \|/.test(l)));
   assert.ok(lineas.some((l) => /^ok1 \| succeeded \|/.test(l)));
+  assert.ok(!lineas.some((l) => l.startsWith('ro1')), 'readonly no ocupa una fila');
   assert.ok(!lineas.some((l) => l.startsWith('mg1')), 'merged no se lista (ya integrado)');
   assert.ok(!lineas.some((l) => l.startsWith('fail1')), 'los fallidos no se listan');
+  assert.match(texto, /^1 sin cambios \(readonly\/compuerta\)$/m);
   assert.equal(lineas.at(-1), 'sin integrar: ok1');
+
+  // Activos SIEMPRE antes que los integrables, aunque lleguen después en la lista.
+  const orden = describirEstado({
+    trabajos: [
+      { id: 'ok2', estado: 'succeeded', creadoEn: 0, finEn: 10, resultado: { commit: 'x' } },
+      { id: 'run2', estado: 'running', creadoEn: 0 },
+    ],
+    resumen: { corriendo: ['run2'], enCola: [] },
+  }).split('\n');
+  assert.ok(
+    orden.findIndex((l) => l.startsWith('run2')) < orden.findIndex((l) => l.startsWith('ok2')),
+    'los activos van antes que los integrables',
+  );
+
+  // Valores explícitos: `integrable` manda; sin campo, decide `resultado.commit`.
+  const explicito = describirEstado({
+    trabajos: [
+      { id: 'e1', estado: 'succeeded', creadoEn: 0, finEn: 1, integrable: true },
+      { id: 'e2', estado: 'succeeded', creadoEn: 0, finEn: 1, integrable: false, resultado: { commit: 'x' } },
+    ],
+    resumen: {},
+  });
+  assert.match(explicito, /sin integrar: e1/);
+  assert.doesNotMatch(explicito, /sin integrar: .*e2/);
+
+  // Sin `succeeded` sin cambios no aparece el contador.
+  const sinContador = describirEstado({
+    trabajos: [{ id: 'ok3', estado: 'succeeded', creadoEn: 0, finEn: 10, resultado: { commit: 'x' } }],
+    resumen: {},
+  });
+  assert.doesNotMatch(sinContador, /sin cambios/);
+  assert.equal(sinContador.split('\n').at(-1), 'sin integrar: ok3');
 
   // Título truncado a 60.
   const largo = describirEstado({
@@ -250,11 +288,14 @@ test('describirEstado: contadores, activos y succeeded sin integrar, con tope de
   const fila = largo.split('\n').find((l) => l.startsWith('x1'));
   assert.equal((fila.split(' | ')[3]).length, 61, '60 caracteres + el …');
 
-  // Tope: nunca más de 25 líneas.
+  // Tope: nunca más de 25 líneas (ni con contador de sin cambios).
   const muchos = Array.from({ length: 40 }, (_, i) => ({ id: `j${i}`, estado: 'running', creadoEn: 0, titulo: 'x' }));
-  const tabla = describirEstado({ trabajos: muchos, resumen: { corriendo: muchos.map((t) => t.id), enCola: [] } });
-  assert.ok(tabla.split('\n').length <= 25, `tabla de ${tabla.split('\n').length} líneas`);
-  assert.match(tabla, /… \(\+\d+ más\)/);
+  const muchosSinCambios = Array.from({ length: 5 }, (_, i) => ({ id: `s${i}`, estado: 'succeeded', creadoEn: 0, finEn: 1, resultado: { commit: null } }));
+  for (const lista of [muchos, [...muchos, ...muchosSinCambios]]) {
+    const tabla = describirEstado({ trabajos: lista, resumen: { corriendo: muchos.map((t) => t.id), enCola: [] } });
+    assert.ok(tabla.split('\n').length <= 25, `tabla de ${tabla.split('\n').length} líneas`);
+    assert.match(tabla, /… \(\+\d+ más\)/);
+  }
 });
 
 test('pizarrón con clave: valor completo e historial; clave ausente se informa', () => {

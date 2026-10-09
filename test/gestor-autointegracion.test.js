@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 
 import { Gestor } from '../src/core/gestor.js';
 import { crearRegistroEventos } from '../src/core/eventos.js';
+import { describirEstado } from '../src/mcp/formato.js';
 import { crearGestor, entornoFalso, esperar, gitOK, montar, NODE } from './gestor-comun.js';
 
 /**
@@ -133,4 +134,50 @@ test('esperarIntegracion: un succeeded SIN commit no bloquea a un trabajo solapa
   assert.equal(finB.estado, 'succeeded');
 
   await gestor.cerrar();
+});
+
+test('opencode_status (describirEstado) lista solo los succeeded integrables y cuenta los sin cambios', async (t) => {
+  // Montaje A: el agente SÍ escribe (genera commit) y corre una compuerta `solo_aceptacion`.
+  const a = await montar(t, {});
+  const gestor = crearGestor(a.almacen, {
+    fake: a.fake,
+    entorno: entornoFalso({ ORQ_FAKE_ESCRIBIR: 'subA/x.js' }),
+    home: a.home,
+  });
+
+  const integrable = await gestor.enviar({ prompt: 'x', cwd: a.repo, mode: 'safe', writes: ['subA/**'], title: 'integrable' });
+  const finIntegrable = await gestor.esperar(integrable.id, 20000);
+  assert.equal(finIntegrable.estado, 'succeeded');
+  assert.ok(finIntegrable.resultado.commit, 'el trabajo con escrituras debe producir commit');
+
+  const compuerta = await gestor.enviar({ prompt: 'x', cwd: a.repo, mode: 'safe', solo_aceptacion: true, accept: 'default', title: 'compuerta' });
+  const finCompuerta = await gestor.esperar(compuerta.id, 20000);
+  assert.equal(finCompuerta.estado, 'succeeded');
+  assert.equal(finCompuerta.resultado.commit, null, 'la compuerta no produce commit');
+
+  // Readonly en otro montaje: el agente debe escribir NADA (si escribiera sería fuera de alcance).
+  const b = await montar(t, {});
+  const gestorRo = crearGestor(b.almacen, { fake: b.fake, entorno: entornoFalso({}), home: b.home });
+  const readonly = await gestorRo.enviar({ prompt: 'revisá', cwd: b.repo, mode: 'readonly', title: 'readonly' });
+  const finReadonly = await gestorRo.esperar(readonly.id, 20000);
+  assert.equal(finReadonly.estado, 'succeeded');
+  assert.equal(finReadonly.resultado.commit, null);
+
+  const juntar = () => [...gestor.listar({ limite: 200 }), ...gestorRo.listar({ limite: 200 })];
+  const resumen = { corriendo: [], enCola: [] };
+
+  const texto = describirEstado({ trabajos: juntar(), resumen });
+  assert.match(texto, new RegExp(`sin integrar: .*${integrable.id}`), 'el integrable sin merge debe figurar');
+  assert.doesNotMatch(texto, new RegExp(compuerta.id), 'la compuerta no se integra');
+  assert.doesNotMatch(texto, new RegExp(readonly.id), 'readonly no se integra');
+  assert.match(texto, /^2 sin cambios \(readonly\/compuerta\)$/m);
+
+  // Al integrarlo, un trabajo `merged` deja de figurar como sin integrar.
+  assert.equal((await gestor.integrar(integrable.id)).ok, true);
+  const trasMerge = describirEstado({ trabajos: juntar(), resumen });
+  assert.match(trasMerge, /^sin integrar: \(ninguno\)$/m);
+  assert.equal(gestor.obtener(integrable.id).estado, 'merged');
+
+  await gestor.cerrar();
+  await gestorRo.cerrar();
 });

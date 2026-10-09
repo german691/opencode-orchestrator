@@ -306,11 +306,31 @@ const MAX_LINEAS_ESTADO = 25;
 const MAX_TITULO_ESTADO = 60;
 
 /**
- * Tabla compacta del estado del servidor: contadores, una línea por trabajo activo o
- * `succeeded` sin integrar, y al final los ids que faltan mergear.
+ * ¿El trabajo `succeeded` es integrable? Usa el MISMO criterio que el planificador
+ * (`src/core/planificador.js`): vale el campo `integrable` ya persistido y, si falta
+ * (p. ej. un trabajo leído de disco), se deriva de `resultado.commit`. Solo un
+ * `succeeded` CON commit se puede integrar (`opencode_merge` falla sin commit).
+ * @param {object} trabajo
+ * @returns {boolean}
+ */
+function esIntegrable(trabajo) {
+  return (
+    trabajo?.integrable === true ||
+    (trabajo?.integrable === undefined &&
+      typeof trabajo?.resultado?.commit === 'string' &&
+      trabajo.resultado.commit !== '')
+  );
+}
+
+/**
+ * Tabla compacta del estado del servidor: contadores, los trabajos ACTIVOS primero,
+ * luego los `succeeded` integrables (con commit) sin integrar, y al final los ids que
+ * faltan mergear y un contador de los `succeeded` sin commit.
  *
  * POR QUÉ compacta y con tope: es la herramienta de sondeo rápido; debe entrar en el
- * contexto sin repetir lo que `opencode_list` ya detalla.
+ * contexto sin repetir lo que `opencode_list` ya detalla. POR QUÉ solo integrables y no
+ * todos los `succeeded`: un readonly, una compuerta `solo_aceptacion` o un análisis sin
+ * commit NO se pueden integrar; listarlos llenaba el contexto de ids inútiles.
  *
  * @param {object} opciones
  * @param {object[]} [opciones.trabajos] trabajos (más recientes primero)
@@ -324,21 +344,28 @@ export function describirEstado({ trabajos = [], resumen = {}, ahora = Date.now(
   const verificando = trabajos.filter((t) => t.estado === 'verifying').length;
   const lineas = [`corriendo=${corriendo} | en cola=${enCola} | verificando=${verificando}`];
 
-  const visibles = trabajos.filter((t) => !esTerminal(t.estado) || t.estado === 'succeeded');
-  // El tope total incluye cabecera y línea final: se reserva una línea para el aviso
-  // de truncado cuando hay más trabajos de los que entran.
-  const presupuesto = MAX_LINEAS_ESTADO - 2;
-  const truncados = Math.max(0, visibles.length - presupuesto);
-  const mostrados = truncados > 0 ? visibles.slice(0, presupuesto - 1) : visibles;
+  // Solo lo accionable: activos primero y después los integrables sin mergear. Los
+  // `succeeded` sin commit (readonly, compuertas, análisis) solo se cuentan al final.
+  const activos = trabajos.filter((t) => !esTerminal(t.estado));
+  const sinIntegrar = trabajos.filter((t) => t.estado === 'succeeded' && esIntegrable(t));
+  const sinCambios = trabajos.filter((t) => t.estado === 'succeeded' && !esIntegrable(t));
+  const visibles = [...activos, ...sinIntegrar];
+
+  // El tope total incluye la cabecera, el aviso de truncado y las líneas finales
+  // (contador de sin cambios, solo si hay, y 'sin integrar').
+  const lineasFinales = (sinCambios.length > 0 ? 1 : 0) + 1;
+  const disponibles = MAX_LINEAS_ESTADO - 1 - lineasFinales;
+  const truncados = Math.max(0, visibles.length - disponibles);
+  const mostrados = truncados > 0 ? visibles.slice(0, disponibles - 1) : visibles;
   for (const trabajo of mostrados) {
     const activo = !esTerminal(trabajo.estado);
     const edad = duracion((activo ? ahora : trabajo.finEn ?? ahora) - (trabajo.creadoEn ?? ahora));
     lineas.push(`${trabajo.id} | ${trabajo.estado} | ${edad} | ${truncarTexto(trabajo.titulo ?? '', MAX_TITULO_ESTADO)}`);
   }
-  if (truncados > 0) lineas.push(`… (+${truncados} más)`);
+  if (truncados > 0) lineas.push(`… (+${truncados + 1} más)`);
 
-  const sinIntegrar = trabajos.filter((t) => t.estado === 'succeeded').map((t) => t.id);
-  lineas.push(`sin integrar: ${sinIntegrar.length > 0 ? sinIntegrar.join(', ') : '(ninguno)'}`);
+  if (sinCambios.length > 0) lineas.push(`${sinCambios.length} sin cambios (readonly/compuerta)`);
+  lineas.push(`sin integrar: ${sinIntegrar.length > 0 ? sinIntegrar.map((t) => t.id).join(', ') : '(ninguno)'}`);
   return lineas.join('\n');
 }
 
