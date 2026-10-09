@@ -15,6 +15,8 @@
  *        GET /api/trabajos/:id/diff   diff git contra la base del trabajo
  *        GET /api/trabajos/:id/alcance writes/tocados/fuera del trabajo
  *        GET /api/trabajos/:id/eventos eventos del registro para ese trabajo
+ *        GET /pizarron                página del pizarrón compartido
+ *        GET /api/pizarron            documento del pizarrón (solo lectura)
  *        GET /api/stream              Server-Sent Events (trabajos y estado)
  */
 import http from 'node:http';
@@ -30,13 +32,15 @@ import {
   alcanceDeTrabajo,
   eventosDeTrabajo,
   leerTrabajo,
+  leerPizarron,
   idValido,
   idDePanel,
 } from './datos.js';
 import { leerRango, archivoDeFuente, LIMITE_MAX } from './logs.js';
 import { diffDeTrabajo } from './diff.js';
 import { crearFlujoEventos } from './stream.js';
-import { PAGINA, paginaAuditoria } from './pagina.js';
+import { PAGINA, paginaAuditoria, paginaPizarron } from './pagina.js';
+import { PIZARRON_CLIENTE } from './pizarron-cliente.js';
 import { ESTILOS } from './estilos.js';
 import { CLIENTE } from './cliente.js';
 import { TIPOS } from '../core/eventos.js';
@@ -173,7 +177,8 @@ async function atenderSubruta(res, { accion, id, dirTrabajos, ahora, registro, p
  * @param {object} [opciones.stream] overrides del flujo SSE (intervalos, máximo)
  */
 export function crearServidorPanel({ baseDir, ahora = Date.now, registro, concurrencia = null, stream } = {}) {
-  const dirTrabajos = `${baseDir ?? directorioEstado()}/jobs`;
+  const dirEstado = baseDir ?? directorioEstado();
+  const dirTrabajos = `${dirEstado}/jobs`;
   const flujo = crearFlujoEventos({
     trabajos: () => listarTrabajos(dirTrabajos, ahora()),
     estado: () => estadoDelPanel(dirTrabajos, { ahora: ahora(), registro, concurrencia }),
@@ -201,6 +206,11 @@ export function crearServidorPanel({ baseDir, ahora = Date.now, registro, concur
         res.end(paginaAuditoria({ eventos, tipos: registro?.tipos ?? TIPOS, filtros, disponible: Boolean(registro) }));
         return;
       }
+      if (pathname === '/pizarron') {
+        res.writeHead(200, CABECERAS_HTML);
+        res.end(paginaPizarron());
+        return;
+      }
       if (pathname === '/static/app.css') {
         servirEstatico(req, res, ESTILOS, 'text/css; charset=utf-8');
         return;
@@ -209,8 +219,16 @@ export function crearServidorPanel({ baseDir, ahora = Date.now, registro, concur
         servirEstatico(req, res, CLIENTE, 'text/javascript; charset=utf-8');
         return;
       }
+      if (pathname === '/static/pizarron.js') {
+        servirEstatico(req, res, PIZARRON_CLIENTE, 'text/javascript; charset=utf-8');
+        return;
+      }
       if (pathname === '/static/lib.js') {
         servirEstatico(req, res, LIB, 'text/javascript; charset=utf-8');
+        return;
+      }
+      if (pathname === '/api/pizarron') {
+        responderJson(res, 200, leerPizarron(dirEstado));
         return;
       }
       if (pathname === '/api/eventos') {

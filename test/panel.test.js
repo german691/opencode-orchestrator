@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { semaforo, listarTrabajos, detalleDeTrabajo, sinAnsi, idValido } from '../src/panel/datos.js';
+import { semaforo, listarTrabajos, detalleDeTrabajo, sinAnsi, idValido, leerPizarron } from '../src/panel/datos.js';
 import { crearServidorPanel } from '../src/panel/servidor.js';
 import { crearRegistroEventos } from '../src/core/eventos.js';
 
@@ -56,6 +56,24 @@ test('lista: activos primero, con segundos sin salida y semáforo', () => {
   assert.equal(lista[2].semaforo, null);
   assert.equal(lista[2].duracionS, 300);
   assert.equal(lista[0].duracionS, 400);
+});
+
+test('lista: ordena por actividad reciente (no solo por creación)', () => {
+  const { jobs } = crearEstado();
+  // Se creó antes, pero tuvo salida hace 10 s: debe ir arriba de uno más nuevo y callado.
+  crearJob(jobs, 'activo1', { estado: 'running', creadoEn: AHORA - 500_000 }, { stderr: 'x', hace: 10 });
+  crearJob(jobs, 'activo2', { estado: 'running', creadoEn: AHORA - 400_000 }, { stderr: 'x', hace: 300 });
+  const lista = listarTrabajos(jobs, AHORA);
+  // Por creación iría activo2 primero; por actividad (salida hace 10 s) gana activo1.
+  assert.deepEqual(lista.map((j) => j.id), ['activo1', 'activo2']);
+  assert.deepEqual(lista.map((j) => j.actividadEn), [AHORA - 10_000, AHORA - 300_000]);
+});
+
+test('pizarrón: leerPizarron devuelve vacío sin archivo o con JSON roto', () => {
+  const { base } = crearEstado();
+  assert.deepEqual(leerPizarron(base), { version: 0, actualizado: 0, claves: {}, notas: [] });
+  fs.writeFileSync(path.join(base, 'pizarron.json'), '{ roto');
+  assert.deepEqual(leerPizarron(base), { version: 0, actualizado: 0, claves: {}, notas: [] });
 });
 
 test('detalle: transcript sin ANSI, respuesta y fallos de la aceptación', () => {

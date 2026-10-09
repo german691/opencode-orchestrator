@@ -6,8 +6,10 @@
  * pasan como argv, de modo que un valor raro jamás se interpreta como shell.
  *
  * El diff se pide contra el worktree si todavía existe (incluye lo commiteado y lo
- * sin commitear) y, si ya se limpió, contra la rama. Si no hay ninguno de los dos,
- * se informa `disponible: false` en vez de fallar.
+ * sin commitear), si ya se limpió contra la rama y, si la rama también se borró,
+ * contra `resultado.commit`. Todas las llamadas corren con `-c safe.directory`
+ * acotado al directorio del trabajo (ver `argsConDirectorioSeguro`). Cuando nada
+ * corre se informa `disponible: false` junto con `motivo` y `detalle`.
  */
 import { execFile } from 'node:child_process';
 
@@ -39,6 +41,40 @@ export function ejecutarGit(args, { cwd, timeoutMs = TIMEOUT_MS } = {}) {
     );
   });
 }
+
+/**
+ * Antepone `-c safe.directory=<cwd>` al subcomando de git.
+ *
+ * POR QUÉ: el panel corre como servicio sin `HOME`/config global y los repos y
+ * worktrees pueden pertenecer a otro usuario o a un FS montado (/mnt/c); sin esto
+ * git rechaza todo con "detected dubious ownership". Se acota SIEMPRE al
+ * directorio concreto del trabajo (nunca `'*'`, que abriría cualquier repo).
+ *
+ * @param {string[]} args argumentos del subcomando (p. ej. `['diff', ...refs]`)
+ * @param {string} [cwd] directorio desde el que corre git
+ * @returns {string[]} argumentos con la excepción de propiedad si hay `cwd`
+ */
+export function argsConDirectorioSeguro(args, cwd) {
+  if (typeof cwd !== 'string' || cwd === '') return [...args];
+  return ['-c', `safe.directory=${cwd}`, ...args];
+}
+
+/**
+ * Primera línea con contenido de un texto, recortada: es el `detalle` corto que
+ * la UI muestra cuando el diff no está disponible.
+ * @param {string} texto
+ * @returns {string}
+ */
+export function primerRenglon(texto) {
+  const linea = String(texto ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l !== '');
+  return (linea ?? '').slice(0, 300);
+}
+
+/** git responde así cuando un ref/commit no existe en el repositorio. */
+const REVISION_INEXISTENTE = /bad (object|revision)|unknown revision|not a valid object name|invalid object name|ambiguous argument/i;
 
 /**
  * Trunca un diff a `max` bytes cortando en un salto de línea para no dejar media
@@ -102,31 +138,61 @@ export function unirArchivos(nameStatus, numstat) {
 /**
  * Diff de un trabajo contra su base.
  *
- * @param {object} job `job.json` del trabajo (usa `worktree`, `rama`, `repo`, `baseCommit`)
+ * Orden de intentos:
+ *  1) contra el worktree (incluye lo commiteado y lo sin commitear);
+ *  2) contra la rama `job/<id>` en el repo;
+ *  3) contra `resultado.commit` en el repo (cuando ya se integró y limpió el
+ *     worktree y la rama, pero el commit sigue existiendo).
+ * Si ninguno corre, la respuesta trae `motivo` y `detalle` para que la UI explique.
+ *
+ * @param {object} job `job.json` del trabajo (usa `worktree`, `rama`, `repo`, `baseCommit`, `resultado.commit`)
  * @param {{ ejecutar?: typeof ejecutarGit, maxBytes?: number, timeoutMs?: number }} [opciones]
- * @returns {Promise<{ archivos: Array<object>, parche: string, truncado: boolean, disponible: boolean }>}
+ * @returns {Promise<{ archivos: Array<object>, parche: string, truncado: boolean, disponible: boolean,
+ *   motivo?: 'sin_base'|'sin_worktree'|'git_fallo'|'commit_inexistente', detalle?: string }>}
  */
 export async function diffDeTrabajo(job, { ejecutar = ejecutarGit, maxBytes = MAX_PARCHE_BYTES, timeoutMs = TIMEOUT_MS } = {}) {
   const vacio = { archivos: [], parche: '', truncado: false, disponible: false };
-  if (job === null || typeof job !== 'object') return vacio;
+  if (job === null || typeof job !== 'object') return { ...vacio, motivo: 'sin_base', detalle: '' };
   const base = typeof job.baseCommit === 'string' && job.baseCommit !== '' ? job.baseCommit : null;
-  if (base === null) return vacio;
+  if (base === null) return { ...vacio, motivo: 'sin_base', detalle: '' };
 
-  /** @type {Array<{ cwd: string, refs: string[] }>} */
+  const repo = typeof job.repo === 'string' && job.repo !== '' ? job.repo : null;
+  const rama = typeof job.rama === 'string' && job.rama !== '' ? job.rama : null;
+  const commit =
+    typeof job.resultado?.commit === 'string' && job.resultado.commit !== '' ? job.resultado.commit : null;
+
+  /** @type {Array<{ cwd: string, refs: string[], tipo: string }>} */
   const destinos = [];
   if (typeof job.worktree === 'string' && job.worktree !== '') {
-    destinos.push({ cwd: job.worktree, refs: [base] });
+    destinos.push({ cwd: job.worktree, refs: [base], tipo: 'worktree' });
   }
-  if (typeof job.repo === 'string' && job.repo !== '' && typeof job.rama === 'string' && job.rama !== '') {
-    destinos.push({ cwd: job.repo, refs: [base, job.rama] });
+  if (repo !== null && rama !== null) {
+    destinos.push({ cwd: repo, refs: [base, rama], tipo: 'rama' });
   }
+  if (repo !== null && commit !== null) {
+    destinos.push({ cwd: repo, refs: [base, commit], tipo: 'commit' });
+  }
+  if (destinos.length === 0) return { ...vacio, motivo: 'sin_worktree', detalle: '' };
 
+  let ultimoGitFallo = '';
+  let falloCommit = null;
   for (const destino of destinos) {
-    const parcheRes = await ejecutar(['diff', '--no-color', ...destino.refs], { cwd: destino.cwd, timeoutMs });
-    if (parcheRes.codigo !== 0) continue; // worktree o rama inexistente: se prueba el siguiente
+    const argsDiff = argsConDirectorioSeguro(['diff', '--no-color', ...destino.refs], destino.cwd);
+    const parcheRes = await ejecutar(argsDiff, { cwd: destino.cwd, timeoutMs });
+    if (parcheRes.codigo !== 0) {
+      ultimoGitFallo = primerRenglon(parcheRes.stderr);
+      if (destino.tipo === 'commit') falloCommit = ultimoGitFallo;
+      continue; // worktree, rama o commit inexistente: se prueba el siguiente
+    }
     const [nameStatusRes, numstatRes] = await Promise.all([
-      ejecutar(['diff', '--name-status', ...destino.refs], { cwd: destino.cwd, timeoutMs }),
-      ejecutar(['diff', '--numstat', ...destino.refs], { cwd: destino.cwd, timeoutMs }),
+      ejecutar(argsConDirectorioSeguro(['diff', '--name-status', ...destino.refs], destino.cwd), {
+        cwd: destino.cwd,
+        timeoutMs,
+      }),
+      ejecutar(argsConDirectorioSeguro(['diff', '--numstat', ...destino.refs], destino.cwd), {
+        cwd: destino.cwd,
+        timeoutMs,
+      }),
     ]);
     const archivos =
       nameStatusRes.codigo === 0 && numstatRes.codigo === 0
@@ -135,5 +201,8 @@ export async function diffDeTrabajo(job, { ejecutar = ejecutarGit, maxBytes = MA
     const { parche, truncado } = recortarParche(parcheRes.stdout, maxBytes);
     return { archivos, parche, truncado, disponible: true };
   }
-  return vacio;
+  if (falloCommit !== null && REVISION_INEXISTENTE.test(falloCommit)) {
+    return { ...vacio, motivo: 'commit_inexistente', detalle: falloCommit };
+  }
+  return { ...vacio, motivo: 'git_fallo', detalle: ultimoGitFallo };
 }

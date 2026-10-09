@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { crearServidorPanel } from '../src/panel/servidor.js';
 import { PAGINA } from '../src/panel/pagina.js';
 import { CLIENTE } from '../src/panel/cliente.js';
+import { PIZARRON_CLIENTE } from '../src/panel/pizarron-cliente.js';
 
 const AHORA = 1_800_000_000_000;
 
@@ -68,6 +69,7 @@ test('estáticos: MIME correcto, ETag y 304 al revalidar', async () => {
     ['/static/app.css', /^text\/css/],
     ['/static/app.js', /^text\/javascript/],
     ['/static/lib.js', /^text\/javascript/],
+    ['/static/pizarron.js', /^text\/javascript/],
   ];
   await conServidor(async (url) => {
     for (const [ruta, tipo] of esperados) {
@@ -95,6 +97,8 @@ test('estilos: tokens de tema claro/oscuro y accesibilidad presentes', async () 
     assert.match(css, /prefers-reduced-motion:reduce/);
     assert.match(css, /forced-colors:active/);
     assert.match(css, /--esp:4px/);
+    assert.match(css, /\.tabla-pizarron\{/);
+    assert.match(css, /details\.plegable\{/);
     const lib = await (await fetch(`${url}/static/lib.js`)).text();
     assert.match(lib, /export function formatearDuracion/);
     assert.match(lib, /export function parsearParche/);
@@ -121,6 +125,12 @@ test('cliente: pasa node --check y trae atajos y ARIA esperados', () => {
   assert.match(CLIENTE, /aria-pressed/);
   assert.match(CLIENTE, /anunciar/);
 
+  // La tarea y la última salida van plegadas y el id se copia desde la cabecera.
+  assert.match(CLIENTE, /resumenTarea\(/);
+  assert.match(CLIENTE, /'Última salida'/);
+  assert.match(CLIENTE, /copiarId/);
+  assert.match(PAGINA, /id="copiar-id"/);
+
   // El shell aporta los roles de pestañas, la región en vivo y el diálogo de ayuda.
   assert.match(PAGINA, /role="tablist"/);
   assert.match(PAGINA, /role="tab"/);
@@ -141,4 +151,47 @@ test('auditoría: usa el CSS nuevo y el mismo shell accesible', async () => {
     assert.doesNotMatch(html, /onclick=/i);
     assert.doesNotMatch(html, /javascript:/i);
   });
+});
+
+test('pizarrón: misma shell, CSP y landmarks que el resto', async () => {
+  await conServidor(async (url) => {
+    const respuesta = await fetch(`${url}/pizarron`);
+    assert.equal(respuesta.status, 200);
+    assert.equal(respuesta.headers.get('x-content-type-options'), 'nosniff');
+    assert.match(respuesta.headers.get('content-security-policy'), /default-src 'self'/);
+    const html = await respuesta.text();
+    assert.match(html, /<html lang="es">/);
+    assert.match(html, /Pizarrón de opencode/);
+    assert.match(html, /href="\/static\/app\.css"/);
+    assert.match(html, /src="\/static\/pizarron\.js"/);
+    assert.match(html, /Saltar al contenido/);
+    assert.match(html, /<main/);
+    assert.match(html, /id="pizarron"/);
+    assert.doesNotMatch(html, /<style/i);
+    assert.doesNotMatch(html, /onclick=/i);
+    assert.doesNotMatch(html, /javascript:/i);
+  });
+});
+
+test('cabecera: enlaces a Pizarrón y Auditoría desde la página principal', async () => {
+  await conServidor(async (url) => {
+    const principal = await (await fetch(`${url}/`)).text();
+    assert.match(principal, /href="\/pizarron">Pizarrón/);
+    assert.match(principal, /href="\/auditoria">Auditoría/);
+    const auditoria = await (await fetch(`${url}/auditoria`)).text();
+    assert.match(auditoria, /href="\/pizarron"/);
+  });
+});
+
+test('cliente del pizarrón: pasa node --check y refresca por polling', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'panel-pizarron-'));
+  const archivo = path.join(dir, 'pizarron.mjs');
+  fs.writeFileSync(archivo, PIZARRON_CLIENTE);
+  execFileSync(process.execPath, ['--check', archivo]);
+  assert.match(PIZARRON_CLIENTE, /fetch\('\/api\/pizarron'\)/);
+  assert.match(PIZARRON_CLIENTE, /setInterval/);
+  assert.match(PIZARRON_CLIENTE, /replaceChildren/);
+  assert.match(PIZARRON_CLIENTE, /ver más/);
+  assert.match(PIZARRON_CLIENTE, /Todavía ningún agente compartió contexto/);
+  assert.doesNotMatch(PIZARRON_CLIENTE, /innerHTML/);
 });

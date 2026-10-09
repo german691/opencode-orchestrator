@@ -169,6 +169,27 @@ details.archivo>summary::marker{color:var(--mut)}
 .fuera-item{color:var(--mal)}
 .badge{font-size:12px;border:1px solid var(--bd);border-radius:999px;padding:0 6px;color:var(--mut)}
 
+/* Resumen plegable -------------------------------------------------------- */
+.titulo-fila{display:flex;align-items:center;gap:calc(var(--esp)*2)}
+.titulo-fila .titulo-trabajo{min-width:0}
+.titulo-fila .boton{flex:none}
+details.plegable{background:var(--card);border:1px solid var(--bd);border-radius:var(--radio);margin:calc(var(--esp)*2) 0}
+details.plegable>summary{cursor:pointer;padding:6px 10px;min-height:34px;display:flex;flex-wrap:wrap;gap:var(--esp);align-items:center}
+details.plegable>summary::marker{color:var(--mut)}
+.plegable-preview{white-space:pre-wrap;color:var(--mut);font-size:12px;font-family:ui-monospace,Consolas,monospace;flex:1;min-width:0}
+.plegable-accion{margin-left:auto;color:var(--foco);font-size:12px;white-space:nowrap}
+details.plegable[open] .plegable-accion{display:none}
+details.plegable>pre{border-radius:0 0 var(--radio) var(--radio)}
+
+/* Pizarrón ---------------------------------------------------------------- */
+.tabla-pizarron{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--bd);border-radius:var(--radio)}
+.tabla-pizarron th,.tabla-pizarron td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd);font-size:13px;vertical-align:top}
+.tabla-pizarron th{color:var(--mut);font-weight:600}
+.valor-pizarron{font-family:ui-monospace,Consolas,monospace;word-break:break-word}
+.marca-conflicto{color:var(--mal);font-weight:700}
+.notas-pizarron{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--esp)}
+.nota-pizarron{display:flex;flex-wrap:wrap;gap:calc(var(--esp)*2);align-items:baseline;background:var(--card);border:1px solid var(--bd);border-radius:var(--radio);padding:6px 10px;font-size:13px}
+
 /* Auditoría --------------------------------------------------------------- */
 .tabla-auditoria{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--bd);border-radius:var(--radio)}
 .tabla-auditoria th,.tabla-auditoria td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd);font-size:13px;vertical-align:top}
