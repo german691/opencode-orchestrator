@@ -200,6 +200,21 @@ export function resumenTarea(texto, lineas = 4) {
 }
 
 /**
+ * Etiqueta de pestaña con contador: `Diff 3`, `Eventos 5`. Con 0 (o sin número
+ * todavía) devuelve solo el nombre, porque un «Diff 0» no aporta y ensucia la
+ * barra. Pura para poder probar la omisión del cero.
+ * @param {string} nombre
+ * @param {number|null|undefined} n
+ * @returns {string}
+ */
+export function etiquetaPestana(nombre, n) {
+  const base = String(nombre ?? '');
+  const numero = Number(n);
+  if (!Number.isFinite(numero) || numero <= 0) return base;
+  return base + ' ' + numero;
+}
+
+/**
  * Traduce un motivo crudo a lenguaje claro; vacío si no hay.
  * @param {string|null|undefined} motivo
  * @returns {string}
@@ -300,6 +315,17 @@ export function contarEstados(lista) {
     fallidos: trabajos.filter((j) => FALLIDOS.has(j?.estado)).length,
     terminados: trabajos.filter((j) => TERMINADOS.has(j?.estado)).length,
   };
+}
+
+/**
+ * ¿Corresponde mostrar el estado vacío de la lista? SOLO cuando no queda ninguna
+ * fila tras filtrar. POR QUÉ pura: así el criterio tiene test y no se repite el
+ * bug de mostrar «No hay trabajos que coincidan» arriba/abajo de filas reales.
+ * @param {number} totalFiltrados
+ * @returns {boolean}
+ */
+export function debeMostrarVacio(totalFiltrados) {
+  return !(Number(totalFiltrados) > 0);
 }
 
 /** Quita el prefijo `a/` o `b/` de una ruta de diff; `null` para /dev/null. */
@@ -450,6 +476,20 @@ export function anchoListaInicial(viewportAncho) {
   if (!Number.isFinite(vp) || vp <= 0) return 320;
   if (vp >= 1700) return 440;
   return limitarAnchoLista(Math.min(420, Math.max(320, Math.round(vp * 0.28))));
+}
+
+/**
+ * ¿Hay que auto-seleccionar el primer trabajo al abrir el panel? Solo en
+ * escritorio (ancho >= 900 px) y cuando NO vino un `?job` en la URL. POR QUÉ:
+ * en móvil/tablet el panel debe arrancar en la LISTA; abrir el detalle del
+ * primero esconde la lista apenas carga.
+ * @param {number} ancho
+ * @param {boolean} haySeleccion
+ * @returns {boolean}
+ */
+export function debeAutoseleccionar(ancho, haySeleccion) {
+  if (haySeleccion) return false;
+  return Number(ancho) >= 900;
 }
 
 /**

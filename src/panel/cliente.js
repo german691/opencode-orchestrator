@@ -12,7 +12,7 @@
  * estilo que se toca desde JS es la variable `--ancho-lista` (CSSOM), necesaria
  * para el divisor arrastrable.
  */
-export const CLIENTE = String.raw`import { formatearDuracion, etiquetaEstado, motivoLegible, filtrarTrabajos, contarEstados, contarPorRepo, parsearParche, resumenAlcance, resumenTarea, limitarAnchoLista, anchoListaInicial, agruparTrabajos, tiempoRelativo, ordenarPor, segmentosDeLinea, coincidenciasEnLineas, estadisticasDeParche, claseDeLinea, debePausarSeguimiento, ANCHO_LISTA_MIN, ANCHO_LISTA_MAX } from '/static/lib.js';
+export const CLIENTE = String.raw`import { formatearDuracion, etiquetaEstado, motivoLegible, filtrarTrabajos, contarEstados, contarPorRepo, parsearParche, resumenAlcance, resumenTarea, limitarAnchoLista, anchoListaInicial, agruparTrabajos, tiempoRelativo, ordenarPor, segmentosDeLinea, coincidenciasEnLineas, estadisticasDeParche, claseDeLinea, debePausarSeguimiento, debeMostrarVacio, debeAutoseleccionar, etiquetaPestana, ANCHO_LISTA_MIN, ANCHO_LISTA_MAX } from '/static/lib.js';
 import { nodoIcono } from '/static/iconos.js';
 
 const porId = function (id) { return document.getElementById(id); };
@@ -136,6 +136,10 @@ function setConexion(vivo) {
   conElemento('conexion', function (caja) {
     caja.classList.toggle('vivo', vivo);
     caja.classList.toggle('reconectando', !vivo);
+    // En móvil el texto se oculta por CSS y queda solo el punto: el aria-label
+    // conserva el significado para lectores de pantalla.
+    caja.setAttribute('aria-label', vivo ? 'En vivo' : 'Reconectando');
+    caja.setAttribute('title', vivo ? 'En vivo' : 'Reconectando');
   });
   conElemento('conexion-texto', function (texto) { texto.textContent = vivo ? 'En vivo' : 'Reconectando…'; });
 }
@@ -146,20 +150,34 @@ function renderCabecera(resumen) {
   const corriendo = resumen.corriendo || 0;
   const enCola = resumen.enCola || 0;
   const usada = corriendo + (resumen.verificando || 0);
-  const maxima = typeof resumen.concurrencia === 'number' && resumen.concurrencia > 0 ? resumen.concurrencia : usada;
-  // Siempre visible: «Corriendo n/máx · En cola n» (y en móvil se compacta por CSS).
-  conElemento('contadores', function (nodo) {
-    nodo.textContent = 'Corriendo ' + usada + '/' + maxima + ' · En cola ' + enCola;
-  });
+  const hayMaximo = typeof resumen.concurrencia === 'number' && resumen.concurrencia > 0;
+  const maxima = hayMaximo ? resumen.concurrencia : usada;
+  // UNA sola píldora de concurrencia: ícono de actividad + «n/máx en curso» y la
+  // barra fina de uso cuando hay tope. La cola, si existe, va en su propia píldora:
+  // nada de repetir «Corriendo» en dos lugares.
   conElemento('concurrencia', function (caja) {
-    if (typeof resumen.concurrencia === 'number' && resumen.concurrencia > 0) {
+    caja.hidden = false;
+    caja.replaceChildren(nodoIcono('running', { clase: 'icono-svg', tamano: 14 }));
+    caja.append(crear('span', 'pill-largo', usada + '/' + maxima + ' en curso'));
+    caja.append(crear('span', 'pill-corto', usada + '/' + maxima));
+    if (hayMaximo) {
       const barra = document.createElement('progress');
       barra.className = 'barra';
       barra.max = maxima;
       barra.value = Math.min(usada, maxima);
       barra.setAttribute('aria-label', 'Concurrencia usada ' + usada + ' de ' + maxima);
+      caja.append(barra);
+    }
+  });
+  // Segunda píldora SOLO si hay cola; sin cola desaparece (no un «0» permanente).
+  conElemento('cola', function (caja) {
+    if (enCola > 0) {
       caja.hidden = false;
-      caja.replaceChildren(crear('span', '', 'Corriendo ' + usada + '/' + maxima), barra);
+      caja.replaceChildren(
+        nodoIcono('queued', { clase: 'icono-svg', tamano: 14 }),
+        crear('span', 'pill-largo', enCola + ' en cola'),
+        crear('span', 'pill-corto', '+' + enCola + ' cola'),
+      );
     } else {
       caja.hidden = true;
       caja.replaceChildren();
@@ -171,8 +189,11 @@ function renderCabecera(resumen) {
 // --- Toolbar de la lista ----------------------------------------------------
 
 // Value 'fallidos' se rotula «Problemas» (mismo criterio que la lib pura), para
-// que la etiqueta humana y el estado agrupado no se confundan.
+// que la etiqueta humana y el estado agrupado no se confundan. La etiqueta corta
+// («Fallos») se usa SOLO cuando la columna es angosta: se cambia por CSS con
+// consultas de contenedor, no desde el JS.
 const ESTADOS_TOOLBAR = [['todos', 'Todos'], ['activos', 'Activos'], ['fallidos', 'Problemas'], ['terminados', 'Terminados']];
+const ETIQUETA_CORTA_ESTADO = { todos: 'Todos', activos: 'Activos', fallidos: 'Fallos', terminados: 'Hechos' };
 
 function crearSegmentado() {
   const contenedor = porId('chips');
@@ -182,8 +203,16 @@ function crearSegmentado() {
     const boton = crear('button', 'chip');
     boton.type = 'button';
     boton.dataset.estado = def[0];
+    // El título y el aria-label llevan SIEMPRE la etiqueta completa, aunque el
+    // texto visible se acorte para no desbordar.
+    boton.title = def[1];
+    boton.setAttribute('aria-label', def[1]);
     boton.setAttribute('aria-pressed', def[0] === app.filtroEstado ? 'true' : 'false');
-    boton.append(crear('span', '', def[1]), crear('span', 'cuenta', '0'));
+    boton.append(
+      crear('span', 'chip-largo', def[1]),
+      crear('span', 'chip-corto', ETIQUETA_CORTA_ESTADO[def[0]] || def[1]),
+      crear('span', 'cuenta', '0'),
+    );
     boton.addEventListener('click', function () {
       app.filtroEstado = def[0];
       renderLista();
@@ -338,7 +367,7 @@ function renderLista() {
     }
     anterior = nodo;
   });
-  porId('lista-vacia').hidden = visibles.length !== 0;
+  porId('lista-vacia').hidden = !debeMostrarVacio(visibles.length);
   actualizarSegmentado();
   actualizarSelectRepo();
   contenedor.scrollTop = scrollTop;
@@ -462,7 +491,10 @@ function mostrarDetalle() {
   if (!id) return;
   const trabajo = trabajoSeleccionado();
   conElemento('titulo-trabajo', function (nodo) {
-    nodo.textContent = trabajo ? (trabajo.titulo || trabajo.id) : id;
+    const texto = trabajo ? (trabajo.titulo || trabajo.id) : id;
+    nodo.textContent = texto;
+    // El título largo se trunca con elipsis: el completo queda en el atributo title.
+    nodo.title = texto;
   });
   const copiar = porId('copiar-id');
   if (copiar) {
@@ -536,12 +568,13 @@ function actualizarEtiquetasTabs(id) {
     let texto = TAB_BASE[tab];
     let aria = null;
     let aviso = false;
-    if (tab === 'diff' && typeof cache.nDiff === 'number') {
-      texto = 'Diff ' + cache.nDiff;
-      aria = 'Diff, ' + cache.nDiff + ' archivo(s)';
-    } else if (tab === 'eventos' && typeof cache.nEventos === 'number') {
-      texto = 'Eventos ' + cache.nEventos;
-      aria = 'Eventos, ' + cache.nEventos + ' evento(s)';
+    if (tab === 'diff') {
+      // El «0» no se muestra: etiquetaPestana omite el contador nulo.
+      texto = etiquetaPestana('Diff', cache.nDiff);
+      if (cache.nDiff > 0) aria = 'Diff, ' + cache.nDiff + ' archivo(s)';
+    } else if (tab === 'eventos') {
+      texto = etiquetaPestana('Eventos', cache.nEventos);
+      if (cache.nEventos > 0) aria = 'Eventos, ' + cache.nEventos + ' evento(s)';
     } else if (tab === 'alcance' && cache.nFuera) {
       // El aviso de alcance solo aparece cuando HAY archivos fuera; sin ruido.
       texto = 'Alcance';
@@ -665,9 +698,9 @@ function pintarResumen(panel, trabajo, alcance) {
   }
   panel.append(franja);
 
-  // Acciones del resumen: copiar y saltar a la consola sin tocar la cabecera.
+  // Acciones del resumen: solo saltar a la consola. «Copiar id» vive UNA vez,
+  // junto al título del detalle (evita el duplicado que aparecía acá).
   const acciones = crear('div', 'resumen-acciones');
-  acciones.append(botonCopiar(trabajo.id, 'Copiar id'));
   const abrirConsola = crear('button', 'boton', 'Abrir consola');
   abrirConsola.type = 'button';
   abrirConsola.addEventListener('click', function () { activarTab('consola'); });
@@ -699,10 +732,9 @@ function pintarResumen(panel, trabajo, alcance) {
     panel.append(bloqueTarea(trabajo.prompt));
   }
   const ultima = bloqueUltimaSalida(trabajo.transcript);
-  if (ultima) {
-    panel.append(crear('h3', '', 'Última salida'));
-    panel.append(ultima);
-  }
+  // Sin salida no hay bloque: el plegable ya trae su propio «Última salida» en el
+  // summary, así que no se agrega además un título que duplicaba el texto.
+  if (ultima) panel.append(ultima);
 }
 
 // El prompt, el transcript y la última salida SOLO viven en el detalle: el listado
@@ -1428,7 +1460,9 @@ async function cargarTodo() {
     app.seleccionadoInicial = null;
     if (objetivo && app.seleccionado !== objetivo) seleccionar(objetivo, { historial: false });
     else if (objetivo) mostrarDetalle();
-    else if (app.trabajos.length) {
+    else if (app.trabajos.length && debeAutoseleccionar(window.innerWidth, false)) {
+      // Solo escritorio (>=900px) abre el primero: en móvil/tablet el panel
+      // arranca en la LISTA y el detalle se abre al tocar una fila.
       seleccionar(app.trabajos[0].id, { historial: false });
       actualizarUrlSeleccion(app.trabajos[0].id, true);
     }

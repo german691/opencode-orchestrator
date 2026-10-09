@@ -26,6 +26,9 @@ import {
   estadisticasDeParche,
   claseDeLinea,
   debePausarSeguimiento,
+  debeMostrarVacio,
+  debeAutoseleccionar,
+  etiquetaPestana,
   contraste,
   categoriaTipo,
 } from '../src/panel/cliente-lib.js';
@@ -504,4 +507,37 @@ test('categoriaTipo: agrupa los tipos de evento por familia', () => {
   assert.equal(categoriaTipo('pizarron.post'), 'pizarron');
   assert.equal(categoriaTipo('cualquiera'), 'otro');
   assert.equal(categoriaTipo(undefined), 'otro');
+});
+
+test('debeMostrarVacio: solo con 0 filas tras filtrar', () => {
+  assert.equal(debeMostrarVacio(0), true);
+  assert.equal(debeMostrarVacio(1), false);
+  assert.equal(debeMostrarVacio(12), false);
+  // Un valor ausente o no numérico no debe hacer parpadear el estado vacío.
+  assert.equal(debeMostrarVacio(undefined), true);
+  assert.equal(debeMostrarVacio(NaN), true);
+});
+
+test('debeAutoseleccionar: solo escritorio y sin selección previa', () => {
+  assert.equal(debeAutoseleccionar(1366, false), true);
+  assert.equal(debeAutoseleccionar(900, false), true);
+  assert.equal(debeAutoseleccionar(899, false), false);
+  assert.equal(debeAutoseleccionar(390, false), false);
+  assert.equal(debeAutoseleccionar(320, false), false);
+  // Con `?job` (haySeleccion) nunca auto-selecciona: se respeta la URL.
+  assert.equal(debeAutoseleccionar(1366, true), false);
+  assert.equal(debeAutoseleccionar(390, true), false);
+});
+
+test('etiquetaPestana: agrega el contador y omite el cero', () => {
+  assert.equal(etiquetaPestana('Diff', 3), 'Diff 3');
+  assert.equal(etiquetaPestana('Eventos', 12), 'Eventos 12');
+  // Sin archivos/eventos la pestaña queda sin número.
+  assert.equal(etiquetaPestana('Diff', 0), 'Diff');
+  assert.equal(etiquetaPestana('Eventos', 0), 'Eventos');
+  // Antes de cargar (undefined) tampoco inventa un número.
+  assert.equal(etiquetaPestana('Diff', undefined), 'Diff');
+  assert.equal(etiquetaPestana('Diff', null), 'Diff');
+  assert.equal(etiquetaPestana('Diff', 'x'), 'Diff');
+  assert.equal(etiquetaPestana('Diff', -2), 'Diff');
 });

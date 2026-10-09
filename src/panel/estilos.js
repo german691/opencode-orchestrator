@@ -74,7 +74,7 @@ export const ESTILOS = `:root{
 *::-webkit-scrollbar-thumb:hover{background:var(--texto-3);background-clip:padding-box}
 *::-webkit-scrollbar-track{background:transparent}
 ::selection{background:var(--acento-suave);color:var(--texto)}
-html,body{height:100%}
+html,body{height:100%;max-width:100%;overflow-x:hidden}
 body{
   margin:0; background:var(--sup); color:var(--texto); width:100%;
   font:14px/1.5 var(--fuente); -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
@@ -85,7 +85,7 @@ h1{font-size:16px;margin:0;letter-spacing:-.01em;text-wrap:balance}
 h2{font-size:15px;margin:0;letter-spacing:-.01em;text-wrap:balance}
 h3{font-size:13px;margin:0;letter-spacing:-.005em;text-wrap:balance}
 .mono,pre,code{font-family:var(--fuente-mono)}
-.num,.tarjeta-valor,.tiempo,.contadores,.barra,.evento-hora,time{font-variant-numeric:tabular-nums;font-feature-settings:'tnum' 1}
+.num,.tarjeta-valor,.tiempo,.pill,.barra,.evento-hora,time{font-variant-numeric:tabular-nums;font-feature-settings:'tnum' 1}
 .oculto{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .saltar{position:absolute;left:8px;top:-48px;z-index:10;background:var(--sup-elev);color:var(--texto);border:1px solid var(--borde);border-radius:var(--radio);padding:8px 12px;text-decoration:none}
@@ -97,11 +97,12 @@ h3{font-size:13px;margin:0;letter-spacing:-.005em;text-wrap:balance}
 /* Cabecera ---------------------------------------------------------------- */
 .cabecera{
   display:flex;flex-wrap:wrap;align-items:center;gap:calc(var(--esp)*3);
-  width:100%;box-sizing:border-box;
+  width:100%;max-width:100%;min-width:0;box-sizing:border-box;
   padding:calc(var(--esp)*2) calc(var(--esp)*4);background:var(--sup-elev);
   border-bottom:1px solid var(--borde);position:sticky;top:0;z-index:5;
 }
-.cabecera-titulo{display:flex;align-items:center;gap:calc(var(--esp)*2)}
+.cabecera-titulo{display:flex;align-items:center;gap:calc(var(--esp)*2);min-width:0}
+.cabecera-titulo h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .marca-logo{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--radio-s);background:var(--acento-suave);color:var(--acento);border:1px solid var(--acento-borde)}
 .cabecera .marca{color:var(--texto-3);font-size:12px}
 .conexion{display:inline-flex;align-items:center;gap:var(--esp);font-size:12px;color:var(--texto-3)}
@@ -111,14 +112,17 @@ h3{font-size:13px;margin:0;letter-spacing:-.005em;text-wrap:balance}
 .conexion.vivo .punto::after{content:'';position:absolute;inset:-3px;border-radius:50%;border:1px solid var(--exito);animation:latido 1.8s ease-out infinite}
 .conexion.reconectando .punto{background:var(--aviso)}
 @keyframes latido{0%{opacity:.7;transform:scale(.6)}70%{opacity:0;transform:scale(1.2)}100%{opacity:0}}
-.contadores{font-size:12px;color:var(--texto-2);background:var(--sup-suave);border:1px solid var(--borde);border-radius:var(--radio-p);padding:2px 10px}
-.concurrencia{display:inline-flex;align-items:center;gap:var(--esp);font-size:12px;color:var(--texto-3)}
-.barra{width:96px;height:6px;background:var(--sup-suave);border:1px solid var(--borde);border-radius:var(--radio-p);overflow:hidden;appearance:none}
+.pill{display:inline-flex;align-items:center;gap:var(--esp);max-width:100%;min-width:0;font-size:12px;color:var(--texto-2);background:var(--sup-suave);border:1px solid var(--borde);border-radius:var(--radio-p);padding:2px 10px}
+.pill .pill-largo,.pill .pill-corto{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pill-corto{display:none}
+.pill-cola{color:var(--aviso);background:var(--aviso-suave);border-color:var(--aviso-borde)}
+.concurrencia[hidden]{display:none}
+.barra{width:min(96px,20vw);height:6px;background:var(--sup-suave);border:1px solid var(--borde);border-radius:var(--radio-p);overflow:hidden;appearance:none;flex:none}
 .barra::-webkit-progress-bar{background:var(--sup-suave)}
 .barra::-webkit-progress-value{background:var(--en-curso)}
 .barra::-moz-progress-bar{background:var(--en-curso)}
 .barra-relleno{height:100%;background:var(--en-curso)}
-.cabecera-nav{margin-left:auto;display:flex;align-items:center;gap:calc(var(--esp)*2)}
+.cabecera-nav{margin-left:auto;display:flex;flex-wrap:wrap;align-items:center;gap:calc(var(--esp)*2);min-width:0;max-width:100%;justify-content:flex-end}
 .cabecera-nav a{font-size:13px;color:var(--texto-2);text-decoration:none;padding:4px 6px;border-radius:var(--radio-s)}
 .cabecera-nav a:hover{color:var(--texto);background:var(--sup-suave)}
 .cabecera-nav a[aria-current=page]{color:var(--acento);font-weight:600}
@@ -198,9 +202,10 @@ body.panel-app .cabecera{flex:none}
 }
 
 /* Lista de trabajos ------------------------------------------------------- */
-.lista{display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden;background:var(--sup);border-right:1px solid var(--borde)}
-/* La toolbar queda pegada arriba de la lista (la lista scrollea por debajo). */
-.toolbar{flex:none;position:sticky;top:0;z-index:3;display:flex;flex-direction:column;gap:var(--esp);padding:calc(var(--esp)*2) calc(var(--esp)*3);background:var(--sup-elev);border-bottom:1px solid var(--borde)}
+.lista{display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden;background:var(--sup);border-right:1px solid var(--borde);container-type:inline-size}
+/* La toolbar queda pegada arriba de la lista (la lista scrollea por debajo). Las
+   tres filas (búsqueda / segmentado / controles) se apilan y nunca desbordan. */
+.toolbar{flex:none;position:sticky;top:0;z-index:3;display:flex;flex-direction:column;gap:var(--esp);min-width:0;padding:calc(var(--esp)*2) calc(var(--esp)*3);background:var(--sup-elev);border-bottom:1px solid var(--borde)}
 .busqueda{margin:0}
 .busqueda-caja{position:relative;display:flex;align-items:center;color:var(--texto-3)}
 .busqueda-caja>.icono-svg{position:absolute;left:9px;pointer-events:none}
@@ -213,16 +218,26 @@ body.panel-app .cabecera{flex:none}
 .boton-limpiar:hover{background:var(--sup-suave);color:var(--texto)}
 .boton-limpiar[hidden]{display:none}
 ::placeholder{color:var(--texto-3);opacity:1}
-/* Control segmentado de estado: una sola fila, no se confunde con repos. */
-.segmentado{display:flex;gap:2px;padding:2px;background:var(--sup-suave);border:1px solid var(--borde);border-radius:var(--radio-s);overflow-x:auto;scrollbar-width:none}
+/* Control segmentado de estado: 4 columnas IGUALES que reparten el ancho de la
+   columna; las etiquetas se acortan por contenedor solo si no entran. */
+.segmentado{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px;padding:2px;background:var(--sup-suave);border:1px solid var(--borde);border-radius:var(--radio-s);overflow:hidden}
 .segmentado::-webkit-scrollbar{display:none}
-.toolbar-fila{display:flex;align-items:center;gap:var(--esp)}
-.toolbar-fila select{flex:1 1 auto;min-width:0;font:inherit;font-size:13px;min-height:32px;padding:2px 8px;color:var(--texto);background:var(--sup-elev);border:1px solid var(--borde-fuerte);border-radius:var(--radio-s)}
-.toolbar-fila #densidad{flex:none}
+/* Los tres controles en una grilla que reencuadra sola: a 280 px caen a 2+1 y a
+   560 px entran los tres, sin desbordar nunca el ancho de la columna. */
+.toolbar-fila{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));align-items:center;gap:var(--esp);min-width:0}
+.toolbar-fila select{width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;font:inherit;font-size:13px;min-height:32px;padding:2px 8px;color:var(--texto);background:var(--sup-elev);border:1px solid var(--borde-fuerte);border-radius:var(--radio-s)}
+.toolbar-fila #densidad{width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .chip{
-  font:inherit;font-size:12px;min-height:30px;padding:3px 10px;cursor:pointer;white-space:nowrap;
-  display:inline-flex;align-items:center;background:transparent;color:var(--texto-2);
+  font:inherit;font-size:12px;min-height:30px;padding:3px 8px;cursor:pointer;white-space:nowrap;min-width:0;overflow:hidden;
+  display:inline-flex;align-items:center;justify-content:center;background:transparent;color:var(--texto-2);
   border:1px solid transparent;border-radius:var(--radio-s);transition:background-color var(--trans),color var(--trans);
+}
+.chip .chip-largo,.chip .chip-corto{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip-corto{display:none}
+/* En columnas anchas entra la etiqueta completa; en angostas, la corta. */
+@container (max-width:520px){
+  .chip-largo{display:none}
+  .chip-corto{display:inline}
 }
 .chip:hover{color:var(--texto);background:var(--sup-hover)}
 .chip .cuenta{color:var(--texto-3);margin-left:5px;font-variant-numeric:tabular-nums}
@@ -254,6 +269,9 @@ body.panel-app .cabecera{flex:none}
 .cuerpo.densidad-compacta .trabajo{padding:6px 9px;min-height:38px}
 .cuerpo.densidad-compacta .trabajo-meta,.cuerpo.densidad-compacta .trabajo-estado{font-size:11px}
 .vacia{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:calc(var(--esp)*2);text-align:center;color:var(--texto-3);font-size:13px;padding:calc(var(--esp)*8) calc(var(--esp)*3)}
+/* .vacia fija display:flex, que pisa el [hidden] del navegador: sin esta
+   regla el estado vacío de la lista quedaba visible aun con filas. */
+.vacia[hidden]{display:none}
 .vacia .icono-svg{color:var(--borde-fuerte)}
 .estado-vacio-accion{color:var(--acento);font-size:12px}
 
@@ -455,11 +473,22 @@ kbd{font-family:var(--fuente-mono);font-size:12px;background:var(--sup-suave);bo
   .chip{min-height:36px}
   .toolbar-fila select,.boton-limpiar,#densidad{min-height:36px;height:36px}
   .tabs [role=tab]{min-height:40px}
-  /* Cabecera compacta: contadores y conexión siguen visibles sin comer alto. */
+  /* Cabecera compacta: píldoras y conexión siguen visibles sin comer alto. */
   .cabecera{gap:var(--esp);padding:6px 10px}
   .cabecera .marca{display:none}
-  .contadores,.conexion{font-size:11px}
+  .pill,.conexion{font-size:11px}
   .cabecera-nav a{font-size:12px}
+}
+
+/* Móvil (<640 px): píldoras compactas, «En vivo» como punto y enlaces juntos. */
+@media (max-width:640px){
+  .pill-largo{display:none}
+  .pill-corto{display:inline}
+  #conexion-texto{display:none}
+  .conexion{gap:0}
+  .cabecera-nav{width:100%;justify-content:flex-start;gap:var(--esp)}
+  .cabecera-nav a{padding:3px 5px}
+  .cabecera-nav #ayuda{padding:3px 8px}
 }
 
 /* Accesibilidad ----------------------------------------------------------- */
