@@ -56,6 +56,7 @@ import {
   eliminarWorktree,
   integrar,
   raizGit,
+  refrescarCopiaPizarron,
   sincronizarIntegracion,
   trasladarCambios,
 } from './workspace.js';
@@ -243,6 +244,10 @@ export class Gestor {
     this.perfiles = new Map();
     /** @type {Set<string>} trabajos cuyo aporte inválido ya se avisó (una vez por trabajo) */
     this.aportesInvalidosAvisados = new Set();
+    /** @type {Set<string>} trabajos cuyo refresco fallido del pizarrón ya se avisó (una vez) */
+    this.pizarronesRefrescoAvisado = new Set();
+    /** @type {number|null} última versión del pizarrón copiada a los worktrees activos */
+    this.pizarronVersionCopiada = null;
     /** @type {number} cantidad de fallos al registrar eventos globales (para loguear el 1º y cada 100) */
     this.fallosDeEvento = 0;
     this.cerrado = false;
@@ -801,7 +806,7 @@ export class Gestor {
         raizTrabajo = wt.ruta;
         baseCommit = wt.baseCommit;
         enlaces = wt.enlacesCreados ?? [];
-        this.#guardar(id, { worktree: wt.ruta, rama: wt.rama, baseCommit, enlacesCreados: enlaces });
+        this.#guardar(id, { worktree: wt.ruta, rama: wt.rama, baseCommit, enlacesCreados: enlaces, pizarronHabilitado: perfil.pizarron?.habilitado === true });
         if (job.desdeJob) {
           const origen = this.trabajos.get(job.desdeJob);
           // ANTES de trasladar: si el trabajo origen murió en medio de una mutación,
@@ -933,6 +938,8 @@ export class Gestor {
               // Aporte del pizarrón durante la corrida: así los demás agentes ven los
               // contratos en cuanto se publican, sin esperar al fin del trabajo.
               this.#fusionarAportePizarron(id, raizTrabajo, perfil);
+              // Y se repone la copia en los worktrees ACTIVOS si el documento cambió.
+              this.#refrescarPizarronEnActivos();
               const { archivos } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
               const propios = archivos.filter((archivo) => {
                 if (!previos.has(archivo)) return true;
@@ -1344,6 +1351,8 @@ export class Gestor {
       // best-effort y va antes de liberar recursos para no depender de ellos.
       const trabajoFinal = this.trabajos.get(id);
       if (trabajoFinal?.worktree) this.#fusionarAportePizarron(id, trabajoFinal.worktree, perfilDelTrabajo);
+      // Tras fusionar, se repone la copia en los demás trabajos ACTIVOS (best-effort).
+      this.#refrescarPizarronEnActivos();
       for (const liberar of liberadores.reverse()) {
         try {
           await liberar();
@@ -1536,6 +1545,40 @@ export class Gestor {
     } catch {
       /* el pizarrón jamás debe afectar al trabajo */
     }
+  }
+
+  /**
+   * Reescribe la COPIA de solo contenido del pizarrón en los worktrees de los trabajos
+   * ACTIVOS (running/verifying) cuyo pizarrón esté habilitado, cuando cambió la `version()`
+   * del documento vivo. Es best-effort: los errores se ignoran y se avisa UNA sola vez por
+   * trabajo. Nunca escribe en worktrees de trabajos terminados: solo recorre `this.corriendo`,
+   * que se vacía al terminar el pipeline.
+   *
+   * POR QUÉ: una copia creada al inicio quedaría desactualizada y el agente leería contratos
+   * viejos. El refresco reemplaza al symlink anterior, que además permitía escribir a través
+   * del enlace y corromper el pizarrón compartido o el estado.
+   *
+   * @returns {void}
+   */
+  #refrescarPizarronEnActivos() {
+    if (!this.pizarron) return;
+    let version;
+    try {
+      version = this.pizarron.version();
+    } catch {
+      return;
+    }
+    if (version === this.pizarronVersionCopiada) return;
+    for (const id of this.corriendo) {
+      const trabajo = this.trabajos.get(id);
+      if (!trabajo?.worktree || trabajo.pizarronHabilitado !== true) continue;
+      const ok = refrescarCopiaPizarron({ worktree: trabajo.worktree, pizarron: this.pizarron });
+      if (!ok && !this.pizarronesRefrescoAvisado.has(id)) {
+        this.pizarronesRefrescoAvisado.add(id);
+        this.#eventoDeTrabajo(id, { tipo: 'pizarron.refresco_fallido' });
+      }
+    }
+    this.pizarronVersionCopiada = version;
   }
 
   /**
@@ -1742,7 +1785,15 @@ export class Gestor {
     // El actor puede venir de una cancelación pedida por una herramienta MCP.
     const actor = this.actores.get(id) ?? 'servidor';
     this.actores.delete(id);
-    const guardado = this.#guardar(id, { estado, resultado: datos, motivoFin: datos.motivoFin ?? null, error: datos.error ?? null }, actor);
+    // `integrable` (para el planificador): solo un `succeeded` CON commit se puede integrar.
+    // Un succeeded sin commit (el agente no escribió nada) o una compuerta sin commit no
+    // debe frenar a los que solapan writes (de lo contrario la cola se traba para siempre).
+    const integrable = estado === 'succeeded' && Boolean(datos.commit);
+    const guardado = this.#guardar(
+      id,
+      { estado, resultado: datos, motivoFin: datos.motivoFin ?? null, error: datos.error ?? null, integrable },
+      actor,
+    );
     const duracionMs = (guardado.finEn ?? Date.now()) - (guardado.inicioEn ?? guardado.creadoEn ?? 0);
     this.#eventoDeTrabajo(id, { tipo: 'fin', estado, motivo: datos.motivoFin ?? null });
     this.#evento({ tipo: 'job.fin', jobId: id, estado, motivo: datos.motivoFin ?? null, actor, detalle: { duracionMs } });

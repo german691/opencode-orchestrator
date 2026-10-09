@@ -5,8 +5,9 @@
  * POR QUÉ un módulo independiente: el orquestador y cada worktree necesitan un
  * punto común de coordinación sin acoplarse a `gestor.js`/`workspace.js`. El
  * servidor (proceso único) es el único que escribe el archivo vivo
- * `<dir>/pizarron.json` de forma ATÓMICA; los worktrees reciben un symlink de
- * SOLO LECTURA y cada agente deja sus aportes en su propio `.orq/aporte.json`.
+ * `<dir>/pizarron.json` de forma ATÓMICA; cada worktree recibe una COPIA de solo
+ * contenido (archivo regular, nunca un symlink) que el servidor refresca, y cada
+ * agente deja sus aportes en su propio `.orq/aporte.json`.
  *
  * POR QUÉ escrituras síncronas: dos aportes simultáneos del MISMO proceso no
  * pueden intercalarse si cada operación (leer-modificar-escribir) corre entera
@@ -430,9 +431,9 @@ export function crearPizarron({ dir, ahora = () => Date.now() } = {}) {
  */
 export function instruccionesParaAgente() {
   return [
-    'PIZARRÓN COMPARTIDO (de SOLO LECTURA):',
+    'PIZARRÓN COMPARTIDO (copia de SOLO LECTURA):',
     '- `.orq/pizarron.json` reúne contratos y decisiones de los demás agentes: leelo al empezar y respetalos.',
-    '- No lo edites: el servidor es el único que lo escribe. Para compartir algo, escribí tu propio `.orq/aporte.json`.',
+    '- Es una COPIA que el servidor actualiza cada ~30 s: no lo edites, aunque lo cambies el servidor la repone. Para compartir algo, escribí tu propio `.orq/aporte.json`.',
     '- No toques nada más dentro de `.orq/` salvo `mutaciones.json`.',
     'Formato de `.orq/aporte.json`:',
     '```json',

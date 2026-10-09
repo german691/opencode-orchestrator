@@ -153,7 +153,9 @@ aceptación, recetas, concurrencia y demás secciones. Parámetro: `cwd`.
 Lee el pizarrón compartido entre agentes (documento de contratos y decisiones). Sin
 `clave`: devuelve la versión, la lista corta de claves con su valor vigente (truncado a
 200 caracteres) y las últimas 5 notas. Con `clave`: el valor completo y su historial. El
-pizarrón es de SOLO LECTURA para los agentes: ellos aportan en `.orq/aporte.json`.
+pizarrón es de SOLO LECTURA para los agentes: cada worktree recibe una **copia**
+`.orq/pizarron.json` que el servidor refresca cada ~30 s (nunca escribe el documento vivo;
+el servidor es el único que lo hace) y ellos aportan en `.orq/aporte.json`.
 
 ## `opencode_board_post`
 
