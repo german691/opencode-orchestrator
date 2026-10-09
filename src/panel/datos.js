@@ -23,6 +23,20 @@ export const UMBRAL_ROJO_S = 300;
 /** Máximo de bytes de log que se envían al navegador (la cola). */
 const MAX_BYTES_LOG = 60_000;
 
+/**
+ * Máximo de bytes de `prompt` y `transcript` en el detalle. POR QUÉ: un prompt
+ * enorme (o un transcript largo) haría pesada cada apertura de la pestaña Resumen;
+ * el listado ya no los manda y el detalle los recorta, avisando con `truncado`.
+ */
+export const MAX_BYTES_DETALLE = 65_536;
+
+/** Patrones `writes` que se muestran en el resumen liviano del listado. */
+export const MAX_WRITES_RESUMEN = 8;
+
+/** Tope por defecto y máximo de trabajos que devuelve `GET /api/trabajos`. */
+export const LIMITE_LISTA_POR_DEFECTO = 300;
+export const LIMITE_LISTA_MAX = 1000;
+
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
 /** @returns {string} directorio de estado, igual que el del orquestador */
@@ -70,6 +84,31 @@ export function leerCola(archivo, max = MAX_BYTES_LOG) {
 /** Quita secuencias de color ANSI del transcript de opencode. */
 export function sinAnsi(texto) {
   return texto.replace(ANSI, '');
+}
+
+/**
+ * Trunca un texto a `max` bytes UTF-8 sin partir un carácter multibyte.
+ * @param {string|null|undefined} texto
+ * @param {number} [max]
+ * @returns {{ texto: string, truncado: boolean }}
+ */
+export function truncarBytes(texto, max = MAX_BYTES_DETALLE) {
+  const completo = String(texto ?? '');
+  const buffer = Buffer.from(completo, 'utf8');
+  if (buffer.length <= max) return { texto: completo, truncado: false };
+  let corte = max;
+  // Un byte de continuación (10xxxxxx) pertenece al carácter anterior: se retrocede.
+  while (corte > 0 && (buffer[corte] & 0xc0) === 0x80) corte -= 1;
+  return { texto: buffer.subarray(0, corte).toString('utf8'), truncado: true };
+}
+
+/** Tamaño en bytes de un archivo; 0 si no existe (tolerante como el resto). */
+function tamanoArchivo(archivo) {
+  try {
+    return fs.statSync(archivo).size;
+  } catch {
+    return 0;
+  }
 }
 
 /** Valida que el id sea un nombre de carpeta simple (evita salir del directorio). */
@@ -133,7 +172,11 @@ export function resumenDeTrabajo(baseDir, id, ahora = Date.now()) {
     modo: job.mode ?? null,
     modelo: job.modelo ?? null,
     rama: job.rama ?? null,
-    writes: job.writes ?? [],
+    // `repoNombre` es lo que agrupa la lista entre repositorios distintos.
+    repoNombre: job.repoNombre ?? null,
+    // El listado es liviano a propósito: `writes` se recorta y el prompt/transcript
+    // completos SOLO viajan en `GET /api/trabajos/:id` (ver `detalleDeTrabajo`).
+    writes: Array.isArray(job.writes) ? job.writes.slice(0, MAX_WRITES_RESUMEN) : [],
     creadoEn: inicio,
     finEn: fin,
     actividadEn: actividad > 0 ? actividad : null,
@@ -142,6 +185,8 @@ export function resumenDeTrabajo(baseDir, id, ahora = Date.now()) {
     semaforo: semaforo(segundosSinSalida),
     motivoFin: job.motivoFin ?? null,
     error: job.error ?? null,
+    // Permite pintar el aviso sin traer el arreglo completo al listado.
+    tieneAdvertencias: Array.isArray(job.resultado?.advertencias) && job.resultado.advertencias.length > 0,
     // Por qué sigue en cola (motivo + ids que lo frenan), lo calcula el planificador.
     espera: job.estado === 'queued' ? (job.espera ?? null) : null,
   };
@@ -164,6 +209,44 @@ export function listarTrabajos(baseDir, ahora = Date.now()) {
   return resumenes.sort((a, b) => peso(a) - peso(b) || actividad(b) - actividad(a));
 }
 
+/** Normaliza el `limite` del listado: por defecto 300, acotado a 1..1000. */
+export function normalizarLimiteLista(valor) {
+  const n = Number(valor);
+  if (!Number.isFinite(n) || n <= 0) return LIMITE_LISTA_POR_DEFECTO;
+  return Math.min(LIMITE_LISTA_MAX, Math.trunc(n));
+}
+
+/**
+ * Listado liviano que sirve `GET /api/trabajos`.
+ *
+ * POR QUÉ separado de `listarTrabajos`: éste agrega filtro por repo y paginación
+ * (para que con cientos de trabajos la respuesta no crezca sin control) y recorta
+ * `writes`. El listado completo lo siguen usando el estado y el stream SSE.
+ *
+ * @param {string} baseDir directorio `jobs`
+ * @param {{ ahora?: number, limite?: number|string, desde?: string|null, repo?: string|null }} [opciones]
+ *   `desde` pagina: si coincide con el id de un trabajo, devuelve los siguientes;
+ *   si es un timestamp, devuelve los de actividad MÁS ANTIGUA (los siguientes de la página).
+ * @returns {{ trabajos: object[], total: number }} `total` ya viene filtrado por repo
+ */
+export function listarTrabajosPaginado(baseDir, { ahora = Date.now(), limite, desde = null, repo = null } = {}) {
+  let todos = listarTrabajos(baseDir, ahora);
+  if (repo) todos = todos.filter((trabajo) => trabajo.repoNombre === repo);
+  const total = todos.length;
+  let pagina = todos;
+  if (typeof desde === 'string' && desde !== '') {
+    const indice = todos.findIndex((trabajo) => trabajo.id === desde);
+    if (indice !== -1) pagina = todos.slice(indice + 1);
+    else {
+      const ts = Number(desde);
+      if (Number.isFinite(ts)) {
+        pagina = pagina.filter((trabajo) => (trabajo.actividadEn ?? trabajo.creadoEn ?? 0) < ts);
+      }
+    }
+  }
+  return { trabajos: pagina.slice(0, normalizarLimiteLista(limite)), total };
+}
+
 /** Detalle de un trabajo: transcript del agente, respuesta final y fallos de la aceptación. */
 export function detalleDeTrabajo(baseDir, id, ahora = Date.now()) {
   if (!idValido(id)) return null;
@@ -180,12 +263,19 @@ export function detalleDeTrabajo(baseDir, id, ahora = Date.now()) {
   const fallos = fallo
     ? (resumirFallos({ stdout: sinAnsi(aceptacionOut), stderr: sinAnsi(aceptacionErr) }) ?? null)
     : null;
+  // El detalle es la ÚNICA ruta que trae prompt y transcript completos; se recortan
+  // a 64 KB cada uno y `truncado` avisa cuando se perdió el final.
+  const prompt = truncarBytes(job.prompt ?? '');
+  const archivoTranscript = path.join(dir, 'stderr.log');
+  const transcript = sinAnsi(leerCola(archivoTranscript, MAX_BYTES_DETALLE));
+  const transcriptTruncado = tamanoArchivo(archivoTranscript) > MAX_BYTES_DETALLE;
   return {
     ...resumen,
     cwd: job.cwd ?? null,
     worktree: job.worktree ?? null,
-    prompt: job.prompt ?? '',
-    transcript: sinAnsi(leerCola(path.join(dir, 'stderr.log'))),
+    prompt: prompt.texto,
+    transcript,
+    truncado: prompt.truncado || transcriptTruncado,
     respuesta: sinAnsi(leerCola(path.join(dir, 'stdout.log'))),
     aceptacion: aceptacion
       ? {

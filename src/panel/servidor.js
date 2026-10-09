@@ -26,6 +26,7 @@ import { createHash } from 'node:crypto';
 import {
   directorioEstado,
   listarTrabajos,
+  listarTrabajosPaginado,
   detalleDeTrabajo,
   resumenDeTrabajo,
   estadoDelPanel,
@@ -54,6 +55,41 @@ const LIB = readFileSync(new URL('./cliente-lib.js', import.meta.url), 'utf8');
  * `/static/*` o de la propia API). Se aplica a las páginas HTML.
  */
 const CSP = "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:";
+
+/**
+ * Hosts considerados loopback. El panel NO tiene autenticación, así que escuchar
+ * fuera de estos expondría el estado de los trabajos a la red.
+ */
+const HOSTS_LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost', '::ffff:127.0.0.1']);
+
+/**
+ * Decide si se puede escuchar en `host`. Función PURA (sin abrir sockets) para
+ * poder testear la negativa sin arrancar el servidor.
+ * @param {string} host
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {boolean}
+ */
+export function hostPermitido(host, env = process.env) {
+  if (env.ORQ_PANEL_ALLOW_REMOTE === '1') return true;
+  return HOSTS_LOOPBACK.has(String(host ?? '').toLowerCase());
+}
+
+/**
+ * Mismo tope por defecto que usa el servidor MCP (`src/server.js` toma 3 de los
+ * DEFECTOS del gestor); se duplica acá con un comentario para no acoplar el panel.
+ */
+export const CONCURRENCIA_POR_DEFECTO = 3;
+
+/**
+ * Concurrencia configurada por entorno, acotada a 1..16 igual que el servidor MCP.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {number}
+ */
+export function concurrenciaDeEntorno(env = process.env) {
+  const valor = Number(env.ORQ_CONCURRENCY);
+  if (!Number.isInteger(valor) || valor < 1) return CONCURRENCIA_POR_DEFECTO;
+  return Math.min(16, valor);
+}
 
 /** Cabeceras de las páginas HTML (CSP + anti sniffing). */
 const CABECERAS_HTML = {
@@ -91,9 +127,12 @@ function servirEstatico(req, res, contenido, tipo) {
 
 function responderJson(res, estado, cuerpo) {
   const texto = JSON.stringify(cuerpo);
+  // `nosniff` también en JSON: evita que el navegador intente interpretar la
+  // respuesta como otro tipo y `no-store` evita cachear el estado en vivo.
   res.writeHead(estado, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
   });
   res.end(texto);
 }
@@ -261,7 +300,16 @@ export function crearServidorPanel({ baseDir, ahora = Date.now, registro, concur
         return;
       }
       if (pathname === '/api/trabajos') {
-        responderJson(res, 200, { ahora: ahora(), trabajos: listarTrabajos(dirTrabajos, ahora()) });
+        // El listado es liviano (sin prompt/transcript) y acepta `?limite=` (300 por
+        // defecto, máx 1000), `?desde=` (id o timestamp, para paginar) y `?repo=`.
+        // Compatibilidad: se mantienen los campos de siempre y solo se AGREGAN.
+        const { trabajos, total } = listarTrabajosPaginado(dirTrabajos, {
+          ahora: ahora(),
+          limite: url.searchParams.get('limite'),
+          desde: url.searchParams.get('desde'),
+          repo: url.searchParams.get('repo'),
+        });
+        responderJson(res, 200, { ahora: ahora(), trabajos, total });
         return;
       }
       const coincide = /^\/api\/trabajos\/([^/]+)$/.exec(pathname);

@@ -98,6 +98,8 @@ h3{font-size:13px;margin:0}
 .semaforo-amarillo{color:var(--cola);border-color:var(--cola)}
 .semaforo-rojo{color:var(--mal);border-color:var(--mal)}
 .trabajo-espera{color:var(--cola)}
+.trabajo-aviso{color:var(--cola)}
+.chips-repo{margin-top:calc(var(--esp)*-1)}
 .vacia{color:var(--mut);font-size:13px;padding:8px}
 
 /* Estados: texto + ícono + color ------------------------------------------ */

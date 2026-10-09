@@ -9,6 +9,7 @@ import { crearServidorPanel } from '../src/panel/servidor.js';
 import { crearFlujoEventos } from '../src/panel/stream.js';
 import { crearRegistroEventos } from '../src/core/eventos.js';
 import { diffDeTrabajo } from '../src/panel/diff.js';
+import { normalizarLimiteLista, LIMITE_LISTA_POR_DEFECTO } from '../src/panel/datos.js';
 
 const AHORA = 1_800_000_000_000;
 
@@ -355,6 +356,112 @@ test('stream: emite trabajos tras un cambio y rechaza al noveno cliente', async 
       control.abort();
     },
   );
+});
+
+test('listado: liviano (sin prompt/transcript), con repo, advertencias y writes recortados', async () => {
+  const { base, jobs } = crearEstado();
+  const writes = Array.from({ length: 12 }, (_, i) => `src/f${i}.js`);
+  crearJob(
+    jobs,
+    'list0001',
+    {
+      estado: 'succeeded',
+      repoNombre: 'compras',
+      writes,
+      prompt: 'instrucción muy larga',
+      resultado: { advertencias: ['rr', 'alcance'] },
+    },
+    { stderr: 'transcript completo', stdout: 'respuesta' },
+  );
+  await conServidor({ baseDir: base }, async (url) => {
+    const cuerpo = await (await fetch(`${url}/api/trabajos`)).json();
+    assert.equal(cuerpo.total, 1);
+    const [trabajo] = cuerpo.trabajos;
+    // El listado ya no arrastra el prompt ni el transcript: eso es del detalle.
+    assert.equal('prompt' in trabajo, false);
+    assert.equal('transcript' in trabajo, false);
+    assert.equal('respuesta' in trabajo, false);
+    assert.equal(trabajo.repoNombre, 'compras');
+    assert.equal(trabajo.tieneAdvertencias, true);
+    assert.equal(trabajo.writes.length, 8);
+    assert.deepEqual(trabajo.writes, writes.slice(0, 8));
+    // Compatibilidad: los campos de siempre siguen presentes.
+    for (const campo of ['id', 'titulo', 'estado', 'modo', 'modelo', 'rama', 'creadoEn', 'finEn', 'duracionS', 'semaforo']) {
+      assert.ok(campo in trabajo, `falta ${campo}`);
+    }
+  });
+});
+
+test('listado: respeta ?limite, ?repo y pagina con ?desde (id o timestamp)', async () => {
+  const { base, jobs } = crearEstado();
+  crearJob(jobs, 'alfa0001', { estado: 'succeeded', repoNombre: 'alfa', creadoEn: AHORA - 1000 });
+  crearJob(jobs, 'alfa0002', { estado: 'succeeded', repoNombre: 'alfa', creadoEn: AHORA - 2000 });
+  crearJob(jobs, 'alfa0003', { estado: 'succeeded', repoNombre: 'alfa', creadoEn: AHORA - 3000 });
+  crearJob(jobs, 'beta0001', { estado: 'succeeded', repoNombre: 'beta', creadoEn: AHORA - 500 });
+  await conServidor({ baseDir: base }, async (url) => {
+    const completa = await (await fetch(`${url}/api/trabajos`)).json();
+    assert.equal(completa.total, 4);
+    assert.deepEqual(completa.trabajos.map((t) => t.id), ['beta0001', 'alfa0001', 'alfa0002', 'alfa0003']);
+
+    const dos = await (await fetch(`${url}/api/trabajos?limite=2`)).json();
+    assert.equal(dos.trabajos.length, 2);
+    assert.equal(dos.total, 4);
+
+    const alfa = await (await fetch(`${url}/api/trabajos?repo=alfa`)).json();
+    assert.equal(alfa.total, 3);
+    assert.deepEqual(alfa.trabajos.map((t) => t.id), ['alfa0001', 'alfa0002', 'alfa0003']);
+
+    const alfaUno = await (await fetch(`${url}/api/trabajos?repo=alfa&limite=1`)).json();
+    assert.deepEqual(alfaUno.trabajos.map((t) => t.id), ['alfa0001']);
+
+    // `desde` con un id devuelve los siguientes en el orden de la lista.
+    const porId = await (await fetch(`${url}/api/trabajos?desde=alfa0001`)).json();
+    assert.deepEqual(porId.trabajos.map((t) => t.id), ['alfa0002', 'alfa0003']);
+
+    // `desde` con un timestamp devuelve los de actividad más antigua.
+    const porTs = await (await fetch(`${url}/api/trabajos?desde=${AHORA - 1500}`)).json();
+    assert.deepEqual(porTs.trabajos.map((t) => t.id), ['alfa0002', 'alfa0003']);
+  });
+});
+
+test('limite: por defecto 300 y acotado a 1000', () => {
+  assert.equal(LIMITE_LISTA_POR_DEFECTO, 300);
+  assert.equal(normalizarLimiteLista(undefined), 300);
+  assert.equal(normalizarLimiteLista(''), 300);
+  assert.equal(normalizarLimiteLista('0'), 300);
+  assert.equal(normalizarLimiteLista('nan'), 300);
+  assert.equal(normalizarLimiteLista('42'), 42);
+  assert.equal(normalizarLimiteLista('999999'), 1000);
+});
+
+test('detalle: prompt y transcript truncados a 64 KB con la bandera truncado', async () => {
+  const { base, jobs } = crearEstado();
+  crearJob(jobs, 'gran0001', { estado: 'succeeded', prompt: 'a'.repeat(70_000) }, { stderr: 'INICIO' + 'b'.repeat(70_000) });
+  crearJob(jobs, 'chic0001', { estado: 'succeeded', prompt: 'corto' }, { stderr: 'hola' });
+  await conServidor({ baseDir: base }, async (url) => {
+    const grande = await (await fetch(`${url}/api/trabajos/gran0001`)).json();
+    assert.equal(grande.truncado, true);
+    assert.equal(Buffer.byteLength(grande.prompt), 65_536);
+    assert.ok(Buffer.byteLength(grande.transcript) <= 65_536 + 64, 'el transcript no debería crecer sin control');
+    assert.equal(grande.transcript.includes('INICIO'), false, 'debería haberse recortado el comienzo');
+
+    const chico = await (await fetch(`${url}/api/trabajos/chic0001`)).json();
+    assert.equal(chico.truncado, false);
+    assert.equal(chico.prompt, 'corto');
+    assert.equal(chico.transcript, 'hola');
+  });
+});
+
+test('cabeceras: las respuestas JSON llevan nosniff y no-store', async () => {
+  const { base, jobs } = crearEstado();
+  crearJob(jobs, 'cabez001', { estado: 'running' });
+  await conServidor({ baseDir: base }, async (url) => {
+    for (const ruta of ['/api/estado', '/api/trabajos', '/api/trabajos/cabez001', '/api/nope']) {
+      const respuesta = await fetch(`${url}${ruta}`);
+      assert.equal(respuesta.headers.get('x-content-type-options'), 'nosniff', ruta);
+      assert.equal(respuesta.headers.get('cache-control'), 'no-store', ruta);
+    }
+  });
 });
 
 test('stream: al desconectar limpia timers y libera el cupo', () => {
