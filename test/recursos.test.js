@@ -331,6 +331,61 @@ test('recursos: si la creación falla se intenta borrar el resto y se propaga el
   ]);
 });
 
+test('recursos: {shard} produce una base distinta por fragmento', async () => {
+  const fake = ejecutarPsqlFalso();
+  const proveedor = crearProveedor(
+    { ...DEF, name: 'compras_{job}_{shard}_test', template: undefined },
+    { env: { ORQ_PG_ADMIN_URL: ADMIN }, ejecutarPsql: fake.ejecutar },
+  );
+
+  const fragmento = await proveedor.provisionar({ id: 'abc', shard: 2 });
+
+  assert.deepEqual(fake.llamadas[0], argsSql('DROP DATABASE IF EXISTS "compras_abc_2_test" WITH (FORCE)'));
+  assert.deepEqual(fake.llamadas[1], argsSql('CREATE DATABASE "compras_abc_2_test"'));
+  assert.deepEqual(fragmento.env, {
+    TEST_DATABASE_URL: 'postgres://usuario:secreto@localhost:5432/compras_abc_2_test',
+  });
+
+  // Cada fragmento libera SU propia base (no la de otro).
+  await fragmento.liberar();
+  assert.deepEqual(sqlDe(fake.llamadas[2]), 'DROP DATABASE IF EXISTS "compras_abc_2_test" WITH (FORCE)');
+
+  // Dos fragmentos del mismo trabajo no comparten nombre.
+  const fake2 = ejecutarPsqlFalso();
+  const proveedor1 = crearProveedor(
+    { ...DEF, name: 'compras_{job}_{shard}_test', template: undefined },
+    { env: { ORQ_PG_ADMIN_URL: ADMIN }, ejecutarPsql: fake2.ejecutar },
+  );
+  const uno = await proveedor1.provisionar({ id: 'abc', shard: 1 });
+  const tres = await proveedor1.provisionar({ id: 'abc', shard: 3 });
+  assert.notEqual(uno.env.TEST_DATABASE_URL, tres.env.TEST_DATABASE_URL);
+});
+
+test('recursos: sin {shard} en el nombre, el fragmento no cambia el comportamiento', async () => {
+  const fake = ejecutarPsqlFalso();
+  const proveedor = crearProveedor(
+    { ...DEF, template: undefined },
+    { env: { ORQ_PG_ADMIN_URL: ADMIN }, ejecutarPsql: fake.ejecutar },
+  );
+
+  // Aun pasando `shard`, un nombre sin el placeholder da el mismo nombre de siempre.
+  const { env } = await proveedor.provisionar({ id: 'abc', shard: 7 });
+
+  assert.deepEqual(fake.llamadas[0], argsSql('DROP DATABASE IF EXISTS "compras_abc_test" WITH (FORCE)'));
+  assert.equal(new URL(env.TEST_DATABASE_URL).pathname, '/compras_abc_test');
+});
+
+test('recursos: {shard} sin recibir shard se rechaza SIN invocar psql', async () => {
+  const fake = ejecutarPsqlFalso();
+  const proveedor = crearProveedor(
+    { ...DEF, name: 'compras_{job}_{shard}_test', template: undefined },
+    { env: { ORQ_PG_ADMIN_URL: ADMIN }, ejecutarPsql: fake.ejecutar },
+  );
+
+  await assert.rejects(proveedor.provisionar({ id: 'abc' }), /no recibió 'shard'/);
+  assert.equal(fake.llamadas.length, 0, 'no debe invocarse psql sin el shard resuelto');
+});
+
 /** ¿Hay un `psql` usable en el PATH? */
 function hayPsql() {
   const resultado = spawnSync('psql', ['--version'], { encoding: 'utf8', windowsHide: true });
