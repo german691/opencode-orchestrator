@@ -36,6 +36,8 @@ errores con la ruta del campo. Sin archivo rigen los valores por defecto seguros
 | `recetas` | object | `{}` | Plantillas de tarea con parámetros. |
 | `autoIntegrar` | object | `{ "habilitado": false, "requiereRevisor": false, "soloSinAdvertencias": true }` | Integración automática de trabajos `safe`. |
 | `esperarIntegracion` | boolean | `false` | No arrancar si solapa `writes` con un `succeeded` sin integrar. |
+| `logs` | object | `{ "maxBytes": 20971520 }` | Tope de tamaño por archivo de log de un trabajo. |
+| `retencion` | object | `{ "dias": 30, "maxEnMemoria": 500 }` | Retención de logs pesados y de trabajos en memoria. |
 
 ## `worktrees`
 
@@ -130,6 +132,19 @@ Cada valor es un comando literal (string) o una **compuerta en fragmentos**:
 | `requiereRevisor` | boolean | `false` | Exige veredicto `APRUEBA` para integrar. |
 | `soloSinAdvertencias` | boolean | `true` | Omite la integración si el trabajo dejó advertencias. |
 
+## `logs`
+
+| Clave | Tipo | Por defecto | Descripción |
+| --- | --- | --- | --- |
+| `maxBytes` | integer 1 MB..200 MB | `20971520` (20 MB) | Tope de cada archivo de log de un trabajo (`stdout`/`stderr`/aceptación). Al superarlo se compacta dejando cabeza y cola con un aviso de los bytes omitidos. |
+
+## `retencion`
+
+| Clave | Tipo | Por defecto | Descripción |
+| --- | --- | --- | --- |
+| `dias` | integer 1..3650 | `30` | Días que se conservan los logs pesados de trabajos terminados; después se purgan (queda `job.json`). |
+| `maxEnMemoria` | integer 1..100000 | `500` | Trabajos que el gestor carga en memoria al arrancar (los activos siempre se cargan). Los más antiguos quedan solo en disco, se leen bajo demanda y `opencode_list` los cuenta al final. |
+
 ## Ejemplo completo comentado
 
 > Los comentarios `//` son solo para explicar: el archivo real se parsea con `JSON.parse` y **no** los
@@ -195,7 +210,9 @@ Cada valor es un comando literal (string) o una **compuerta en fragmentos**:
     }
   },
   "autoIntegrar": { "habilitado": false, "requiereRevisor": true, "soloSinAdvertencias": true },
-  "esperarIntegracion": true
+  "esperarIntegracion": true,
+  "logs": { "maxBytes": 20971520 },         // 20 MB por archivo de log
+  "retencion": { "dias": 30, "maxEnMemoria": 500 }
 }
 ```
 

@@ -83,6 +83,17 @@ test('opencode_wait_any imprime la explicación de activos UNA sola vez, no por 
   assert.equal(veces, 1, `la explicación debe aparecer una vez (aparece ${veces})`);
 });
 
+test('opencode_list avisa al final los trabajos que la retención dejó solo en disco', async () => {
+  const gestor = {
+    listar: () => [{ id: 'a1', estado: 'running', mode: 'safe', isolation: 'worktree', creadoEn: 0, titulo: 'A' }],
+    resumen: () => ({ concurrencia: 3, corriendo: ['a1'], enCola: [] }),
+    trabajosEnDisco: 5,
+  };
+  const list = crearHerramientas(gestor).find((h) => h.name === 'opencode_list');
+  const { text } = await list.manejar({});
+  assert.match(text, /\n5 más antiguos en disco \(ver panel o `opencode_logs <id>`\)$/);
+});
+
 test('la cola de stdout por defecto se pide en ≤ 1500 bytes; con completo, sin recorte', async () => {
   let ultimo = null;
   const terminado = { id: 't1', estado: 'succeeded', mode: 'safe', isolation: 'worktree', resultado: {}, creadoEn: 0 };

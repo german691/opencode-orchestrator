@@ -110,7 +110,9 @@ todos los activos, no por trabajo.
 
 Lista los trabajos (estado, edad, modo, alcance) y la carga del servidor (corriendo y en
 cola). Parámetros: `estado` (filtra) y `limite` (por defecto 20). Usala antes de
-reenviar una tarea que parece no haber producido nada.
+reenviar una tarea que parece no haber producido nada. Si la retención dejó trabajos
+antiguos solo en disco, agrega al final `N más antiguos en disco`: existen y se pueden
+leer con `opencode_logs <id>` (o ver en el panel), pero no están en la lista.
 
 ## `opencode_logs`
 

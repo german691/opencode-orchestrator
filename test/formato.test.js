@@ -60,6 +60,18 @@ test('describirEspera y el listado dicen por qué un trabajo sigue en cola', asy
   assert.match(describirActivo(t, 1000), /En cola porque: .*\[aaa, bbb\]/);
 });
 
+test('el listado avisa al final cuántos trabajos quedaron solo en disco (solo si hay)', async () => {
+  const { describirListado } = await import('../src/mcp/formato.js');
+  const t = { id: 'q1', estado: 'running', mode: 'safe', isolation: 'worktree', creadoEn: 0, titulo: 'T' };
+  const base = { concurrencia: 3, corriendo: ['q1'], enCola: [] };
+
+  const conDisco = describirListado([t], { ...base, trabajosEnDisco: 4 });
+  assert.match(conDisco, /\n4 más antiguos en disco \(ver panel o `opencode_logs <id>`\)$/);
+
+  assert.equal(describirListado([t], base).includes('más antiguos en disco'), false);
+  assert.equal(describirListado([t], { ...base, trabajosEnDisco: 0 }).includes('más antiguos en disco'), false);
+});
+
 test('describirActivo: la explicación es UNA línea de ≤ 100 caracteres y se puede omitir', async () => {
   const { describirActivo, EXPLICACION_ACTIVO } = await import('../src/mcp/formato.js');
   const t = { id: 'q1', estado: 'running', creadoEn: 0, titulo: 'T' };
