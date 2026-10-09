@@ -71,7 +71,38 @@ function normalizarTrabajo(bruto, id) {
     // `null` significa "no sabemos cuándo se encoló": no cuenta como veterano.
     encoladoEn: Number.isFinite(trabajo.encoladoEn) ? trabajo.encoladoEn : null,
     estado: trabajo.estado,
+    // Opt-in del perfil: esperar a que se integren los trabajos que solapan sus writes.
+    esperarIntegracion: trabajo.esperarIntegracion === true,
   };
+}
+
+/**
+ * Ids de trabajos `succeeded` (sin integrar) del mismo repo cuyos `writes` se solapan
+ * con los del candidato.
+ *
+ * POR QUÉ existe: con `esperarIntegracion` el trabajo no debe partir de una base que
+ * quedará obsoleta en cuanto el anterior se integre (hoy arranca apenas el anterior
+ * termina y el conflicto aparece recién en el merge). `merged` no cuenta: ya está
+ * integrado y no deja la base atrás.
+ *
+ * @param {object} trabajo trabajo normalizado
+ * @param {Map<string, object>|Record<string, object>|undefined} trabajos
+ * @returns {string[]} ids que lo frenan (ordenados)
+ */
+function trabajosSucceededSolapados(trabajo, trabajos) {
+  if (trabajo.writes.length === 0) return [];
+  const ids = [];
+  const entradas = trabajos instanceof Map ? trabajos.entries() : Object.entries(trabajos ?? {});
+  for (const [id, bruto] of entradas) {
+    if (!bruto || typeof bruto !== 'object') continue;
+    const otro = normalizarTrabajo(bruto, id);
+    if (otro.id === trabajo.id) continue;
+    if (otro.repo !== trabajo.repo) continue;
+    if (otro.estado !== 'succeeded') continue;
+    if (otro.writes.length === 0) continue;
+    if (gruposSeSuperponen(trabajo.writes, otro.writes)) ids.push(otro.id);
+  }
+  return ids.sort();
 }
 
 /**
@@ -257,6 +288,9 @@ export function elegibles(entrada = {}) {
   /** @type {Set<string>} */
   const bloqueadosIds = new Set();
 
+  /** @type {Map<string, {motivo: string, por: string[]}>} motivo de espera de cada trabajo en cola */
+  const esperas = new Map();
+
   // Clasificamos cada candidato: bloqueado (dep fallida), esperando (dep pendiente) o listo.
   const listos = new Set();
   for (const candidato of candidatos) {
@@ -265,6 +299,18 @@ export function elegibles(entrada = {}) {
       bloqueadosIds.add(candidato.id);
     } else if (dependenciasListas(candidato.trabajo, trabajos)) {
       listos.add(candidato.id);
+    }
+  }
+
+  // `esperarIntegracion` (opt-in): un candidato que solapa writes con un trabajo
+  // `succeeded` aún sin integrar espera a que lo integren en vez de partir de una base
+  // que quedará obsoleta (el conflicto aparecería recién en el merge).
+  for (const candidato of candidatos) {
+    if (!listos.has(candidato.id) || !candidato.trabajo.esperarIntegracion) continue;
+    const bloqueadores = trabajosSucceededSolapados(candidato.trabajo, trabajos);
+    if (bloqueadores.length > 0) {
+      listos.delete(candidato.id);
+      esperas.set(candidato.id, { motivo: 'esperando_integracion', por: bloqueadores });
     }
   }
 
@@ -288,9 +334,8 @@ export function elegibles(entrada = {}) {
   const arrancar = [];
   /** @type {object[]} descriptores ya elegidos en esta pasada */
   const elegidos = [];
-  /** @type {Map<string, {motivo: string, por: string[]}>} motivo de espera de cada trabajo en cola */
-  const esperas = new Map();
   for (const candidato of candidatos) {
+    if (esperas.has(candidato.id)) continue; // ya tiene un motivo (p. ej. esperando_integracion)
     if (bloqueadosIds.has(candidato.id) || listos.has(candidato.id)) continue;
     const pendientes = candidato.trabajo.after.filter((dep) => !ESTADOS_SATISFECHOS.has(estadoDependencia(trabajos, dep)));
     esperas.set(candidato.id, { motivo: 'dependencia', por: pendientes });

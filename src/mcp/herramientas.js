@@ -12,6 +12,8 @@ import { ErrorDeGestor } from '../core/gestor.js';
 import { esTerminal } from '../core/estados.js';
 import {
   describirActivo,
+  describirEspera,
+  describirEstado,
   describirListado,
   describirPerfil,
   describirPizarronClave,
@@ -88,6 +90,8 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
           solo_aceptacion: { type: 'boolean', description: 'No corre al agente: solo ejecuta `accept` sobre un worktree. Úsalo como COMPUERTA sobre la integración (con base: "integracion" y accept: la suite completa) o para re-verificar un trabajo ya arreglado (con desde_job). No requiere `prompt` ni `writes`.' },
           desde_job: { type: 'string', description: 'Retoma un trabajo terminado (rechazado, fallido o caído) que conserve su worktree: el nuevo parte del mismo commit y recibe los archivos que dejó, y hereda su writes, resources y accept. Con solo_aceptacion solo repite la aceptación; sin ella el agente continúa con el nuevo `prompt`.' },
           completo: { type: 'boolean', description: 'Opcional: devuelve TODA la salida del agente y de la aceptación, sin recortar a las últimas líneas (por defecto se recorta para ahorrar contexto). Acepta true o "true".' },
+          receta: { type: 'string', description: 'Opcional: nombre de una receta del perfil. Su `prompt` (con {param}) y sus campos (writes, mode, accept, resources, reads) se expanden con `params`. Lo que pases explícito en la llamada pisa a la receta y `prompt` se agrega como "Notas adicionales".' },
+          params: { type: 'object', description: 'Opcional: valores de los {param} de la receta. Cada valor es un texto; los que se usan en `writes` no admiten saltos de línea, ".." ni rutas absolutas.' },
         },
         required: ['cwd'],
         additionalProperties: false,
@@ -96,6 +100,57 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
         const trabajo = await gestor.enviar(args, { actor: 'herramienta:coding' });
         return respuestaDe(trabajo.id, esperaMs, esCompleto(args));
       },
+    },
+    {
+      name: 'opencode_batch',
+      description:
+        'Encola VARIAS tareas (1 a 12) en UNA sola llamada, cada una con los mismos campos que opencode_coding (incluidos `receta` y `params`). ' +
+        'NO espera: devuelve una línea por trabajo (`<id> | <título> | <estado> | <motivo de espera>`). Si una tarea es inválida, su error va en su ' +
+        'propia línea sin impedir las demás. Después seguí con opencode_wait/opencode_wait_any.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tareas: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 12,
+            items: { type: 'object', description: 'Especificación de un trabajo: los mismos campos que opencode_coding.' },
+            description: 'Tareas a encolar (1 a 12).',
+          },
+        },
+        required: ['tareas'],
+        additionalProperties: false,
+      },
+      manejar: async (args) => {
+        const tareas = Array.isArray(args?.tareas) ? args.tareas : [];
+        if (tareas.length < 1 || tareas.length > 12) {
+          throw new ErrorDeGestor('`tareas` debe ser un array de 1 a 12 tareas');
+        }
+        const lineas = [];
+        let malo = false;
+        for (const tarea of tareas) {
+          try {
+            const creado = await gestor.enviar(tarea, { actor: 'herramienta:batch' });
+            const actual = gestor.obtener(creado.id);
+            lineas.push(`${actual.id} | ${actual.titulo} | ${actual.estado} | ${describirEspera(actual) || '-'}`);
+          } catch (error) {
+            malo = true;
+            lineas.push(`ERROR: ${error?.message ?? error}`);
+          }
+        }
+        return { text: lineas.join('\n'), isError: malo };
+      },
+    },
+    {
+      name: 'opencode_status',
+      description:
+        'Tabla compacta del estado del servidor: contadores (corriendo / en cola / verificando) y una línea por trabajo ACTIVO o `succeeded` ' +
+        'sin integrar (`<id> | <estado> | <edad> | <título>`), más la lista de ids "sin integrar" para saber qué falta mergear.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      manejar: async () => ({
+        text: describirEstado({ trabajos: gestor.listar({ limite: 200 }), resumen: gestor.resumen(), ahora: ahora() }),
+        isError: false,
+      }),
     },
     {
       name: 'opencode_wait',

@@ -7,6 +7,7 @@
  */
 
 import { esTerminal } from '../core/estados.js';
+import { parametrosDeReceta } from '../core/recetas.js';
 
 /** Máximo de archivos que se listan en línea. */
 const MAX_ARCHIVOS = 40;
@@ -103,6 +104,7 @@ const TEXTO_ESPERA = {
   recurso: 'espera un recurso compartido (p. ej. la base de datos)',
   solapa_alcance: 'sus `writes` se solapan con el trabajo en curso',
   veterano_adelante: 'otro trabajo más antiguo con el que choca va primero',
+  esperando_integracion: 'esperando la integración de otro trabajo con el que comparte writes',
 };
 
 /**
@@ -160,6 +162,11 @@ export function describirTerminado(trabajo, colas = {}, { completo = false } = {
   if (trabajo.rama) partes.push(`rama: ${trabajo.rama}${r.commit ? `  commit: ${r.commit}` : '  (sin commit)'}`);
   if (trabajo.worktree) partes.push(`worktree: ${trabajo.worktree}${trabajo.limpiado ? ' (limpiado)' : ''}`);
   if (trabajo.error) partes.push(`error: ${trabajo.error}`);
+  // Auto-integración: el trabajo safe ya quedó en la rama de integración sin que el
+  // orquestador llamara a opencode_merge (opt-in del perfil).
+  if (r.autoIntegrado === true) {
+    partes.push(`integrado automáticamente${r.autoIntegradoEn ? ` en ${r.autoIntegradoEn}` : ''}`);
+  }
 
   if (Array.isArray(r.archivos)) {
     const lista = r.archivos.slice(0, MAX_ARCHIVOS).join(', ');
@@ -248,11 +255,70 @@ export function describirListado(trabajos, resumen, ahora = Date.now()) {
  * @returns {string}
  */
 export function describirPerfil({ repo, archivo, existe, perfil }) {
-  return [
+  const lineas = [
     `repo: ${repo}`,
     existe ? `perfil: ${archivo}` : `perfil: (sin archivo; valores por defecto seguros. Creá ${archivo} para personalizarlo)`,
-    JSON.stringify(perfil, null, 2),
-  ].join('\n');
+  ];
+  // Las recetas llegan al orquestador con sus parámetros requeridos ya calculados:
+  // sin esto tendría que deducir los placeholders del prompt a mano.
+  const recetas = perfil?.recetas ?? {};
+  const nombres = Object.keys(recetas);
+  if (nombres.length > 0) {
+    lineas.push(`recetas (${nombres.length}):`);
+    for (const nombre of nombres) {
+      const requeridos = parametrosDeReceta(recetas[nombre]);
+      const detalle = requeridos.length > 0 ? `params: ${requeridos.join(', ')}` : 'sin parámetros';
+      const descripcion = typeof recetas[nombre]?.descripcion === 'string' && recetas[nombre].descripcion !== ''
+        ? ` - ${recetas[nombre].descripcion}`
+        : '';
+      lineas.push(`  - ${nombre}: ${detalle}${descripcion}`);
+    }
+  }
+  lineas.push(JSON.stringify(perfil, null, 2));
+  return lineas.join('\n');
+}
+
+/** Máximo de líneas de la tabla de estado (cabe en el contexto del orquestador). */
+const MAX_LINEAS_ESTADO = 25;
+
+/** Título máximo en la tabla de estado. */
+const MAX_TITULO_ESTADO = 60;
+
+/**
+ * Tabla compacta del estado del servidor: contadores, una línea por trabajo activo o
+ * `succeeded` sin integrar, y al final los ids que faltan mergear.
+ *
+ * POR QUÉ compacta y con tope: es la herramienta de sondeo rápido; debe entrar en el
+ * contexto sin repetir lo que `opencode_list` ya detalla.
+ *
+ * @param {object} opciones
+ * @param {object[]} [opciones.trabajos] trabajos (más recientes primero)
+ * @param {{ concurrencia?: number, corriendo?: string[], enCola?: string[] }} [opciones.resumen]
+ * @param {number} [opciones.ahora]
+ * @returns {string}
+ */
+export function describirEstado({ trabajos = [], resumen = {}, ahora = Date.now() } = {}) {
+  const corriendo = Array.isArray(resumen.corriendo) ? resumen.corriendo.length : 0;
+  const enCola = Array.isArray(resumen.enCola) ? resumen.enCola.length : 0;
+  const verificando = trabajos.filter((t) => t.estado === 'verifying').length;
+  const lineas = [`corriendo=${corriendo} | en cola=${enCola} | verificando=${verificando}`];
+
+  const visibles = trabajos.filter((t) => !esTerminal(t.estado) || t.estado === 'succeeded');
+  // El tope total incluye cabecera y línea final: se reserva una línea para el aviso
+  // de truncado cuando hay más trabajos de los que entran.
+  const presupuesto = MAX_LINEAS_ESTADO - 2;
+  const truncados = Math.max(0, visibles.length - presupuesto);
+  const mostrados = truncados > 0 ? visibles.slice(0, presupuesto - 1) : visibles;
+  for (const trabajo of mostrados) {
+    const activo = !esTerminal(trabajo.estado);
+    const edad = duracion((activo ? ahora : trabajo.finEn ?? ahora) - (trabajo.creadoEn ?? ahora));
+    lineas.push(`${trabajo.id} | ${trabajo.estado} | ${edad} | ${truncarTexto(trabajo.titulo ?? '', MAX_TITULO_ESTADO)}`);
+  }
+  if (truncados > 0) lineas.push(`… (+${truncados} más)`);
+
+  const sinIntegrar = trabajos.filter((t) => t.estado === 'succeeded').map((t) => t.id);
+  lineas.push(`sin integrar: ${sinIntegrar.length > 0 ? sinIntegrar.join(', ') : '(ninguno)'}`);
+  return lineas.join('\n');
 }
 
 /** Tope de caracteres de un valor al listar el pizarrón (los detalles van con `clave`). */

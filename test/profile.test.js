@@ -429,6 +429,50 @@ test('validarPerfil: pizarron opcional con defaults y errores claros', () => {
   assert.throws(() => validarPerfil({ ...base, pizarron: { raro: 1 } }), /pizarron\.raro: campo desconocido/);
 });
 
+test('validarPerfil: recetas opcionales se validan y se copian', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.deepEqual(validarPerfil(base).recetas, {});
+  assert.deepEqual(perfilPorDefecto('x').recetas, {});
+  const perfil = validarPerfil({
+    ...base,
+    recetas: {
+      tests: { descripcion: 'tests de un módulo', prompt: 'Escribí tests de {modulo}', writes: ['{modulo}/**'], mode: 'safe' },
+    },
+  });
+  assert.equal(perfil.recetas.tests.prompt, 'Escribí tests de {modulo}');
+  assert.deepEqual(perfil.recetas.tests.writes, ['{modulo}/**']);
+
+  assert.throws(() => validarPerfil({ ...base, recetas: [] }), /recetas: debe ser un objeto/);
+  assert.throws(() => validarPerfil({ ...base, recetas: { r: [] } }), /recetas\.r: debe ser un objeto/);
+  assert.throws(() => validarPerfil({ ...base, recetas: { r: { prompt: 'x', pompt: 'y' } } }), /recetas\.r\.pompt: campo desconocido/);
+  assert.throws(() => validarPerfil({ ...base, recetas: { r: {} } }), /recetas\.r\.prompt: debe ser un texto no vacío/);
+  assert.throws(() => validarPerfil({ ...base, recetas: { r: { prompt: 'x', mode: 'raro' } } }), /recetas\.r\.mode/);
+  assert.throws(() => validarPerfil({ ...base, recetas: { r: { prompt: 'x', writes: 'src/**' } } }), /recetas\.r\.writes/);
+  assert.throws(() => validarPerfil({ ...base, recetas: { r: { prompt: 'x', writes: ['/abs'] } } }), /recetas\.r\.writes\[0\]/);
+  assert.throws(() => validarPerfil({ ...base, recetas: { r: { prompt: 'x', solo_aceptacion: 'si' } } }), /recetas\.r\.solo_aceptacion/);
+});
+
+test('validarPerfil: autoIntegrar opcional con defaults y errores claros', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.deepEqual(validarPerfil(base).autoIntegrar, { habilitado: false, requiereRevisor: false, soloSinAdvertencias: true });
+  assert.deepEqual(perfilPorDefecto('x').autoIntegrar, { habilitado: false, requiereRevisor: false, soloSinAdvertencias: true });
+  assert.deepEqual(
+    validarPerfil({ ...base, autoIntegrar: { habilitado: true, requiereRevisor: true, soloSinAdvertencias: false } }).autoIntegrar,
+    { habilitado: true, requiereRevisor: true, soloSinAdvertencias: false },
+  );
+  assert.throws(() => validarPerfil({ ...base, autoIntegrar: [] }), /autoIntegrar: debe ser un objeto/);
+  assert.throws(() => validarPerfil({ ...base, autoIntegrar: { habilitado: 'si' } }), /autoIntegrar\.habilitado/);
+  assert.throws(() => validarPerfil({ ...base, autoIntegrar: { raro: true } }), /autoIntegrar\.raro: campo desconocido/);
+});
+
+test('validarPerfil: esperarIntegracion booleano, por defecto false', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.equal(validarPerfil(base).esperarIntegracion, false);
+  assert.equal(validarPerfil({ ...base, esperarIntegracion: true }).esperarIntegracion, true);
+  assert.throws(() => validarPerfil({ ...base, esperarIntegracion: 'si' }), /esperarIntegracion/);
+  assert.equal(perfilPorDefecto('x').esperarIntegracion, false);
+});
+
 test('validarPerfil: revisor se delega en configRevisor (default deshabilitado)', () => {
   const base = { version: 1, name: 'sistema' };
   assert.equal(validarPerfil(base).revisor.habilitado, false);
