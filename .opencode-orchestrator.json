@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "name": "opencode-orchestrator",
+  "baseBranch": "main",
+  "integrationBranch": "staging",
+  "concurrency": 3,
+  "jobBase": "integracion",
+  "timeoutMs": 3600000,
+  "aceptacionTimeoutMs": 1200000,
+  "promptPrefix": "CONTEXTO FIJO DEL PROYECTO (aplica a toda tarea):\n- Es el servidor MCP 'opencode-orchestrator' (Node 20, ESM, SIN dependencias externas, tests con node:test). Leé primero README.md y la parte de docs/DISENO.md que toque tu tarea.\n- Convenciones: comentarios y mensajes en español, que expliquen POR QUÉ, no qué; una sentencia por línea; nombres descriptivos.\n- Los tests viven en test/ y usan un opencode FALSO (test/gestor-comun.js: montar, crearGestor, entornoFalso, correr). Todo aspecto nuevo lleva su test en el MISMO lote y tiene que poder FALLAR si se revierte: comprobalo con una mutación manual SOLO sobre tus propios archivos de src/ (copia exacta, restaurá, verificá git status) y reportá 'MUTACION: detectada N/M'. NO mutes archivos fuera de tus writes.\n- Corré `node --test test/` completo UNA vez al final (tarda poco) y los archivos tocados durante el trabajo.\n- NUNCA ejecutes npm install ni agregues dependencias.\n- Este servidor se está usando en vivo para orquestar otros trabajos: no cambies formatos de salida existentes de las herramientas MCP ni nombres de parámetros; solo AGREGÁ campos/parámetros opcionales (compatibilidad hacia atrás).\n- Respuesta final corta: archivos tocados, decisiones, resultados y lo que quedó fuera de tus writes.",
+  "protected": [
+    ".opencode-orchestrator.json",
+    "legacy/**"
+  ],
+  "worktrees": {
+    "root": "~/work/{name}",
+    "link": [],
+    "setup": []
+  },
+  "resources": {},
+  "accept": {
+    "default": "node --test test/"
+  }
+}
