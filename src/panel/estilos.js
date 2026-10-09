@@ -24,7 +24,7 @@ export const ESTILOS = `:root{
 *{box-sizing:border-box}
 html,body{height:100%}
 body{
-  margin:0; background:var(--bg); color:var(--fg);
+  margin:0; background:var(--bg); color:var(--fg); width:100%;
   font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
 }
 a{color:var(--foco)}
@@ -41,6 +41,7 @@ h3{font-size:13px;margin:0}
 /* Cabecera ---------------------------------------------------------------- */
 .cabecera{
   display:flex;flex-wrap:wrap;align-items:center;gap:calc(var(--esp)*3);
+  width:100%;box-sizing:border-box;
   padding:calc(var(--esp)*2) calc(var(--esp)*4);background:var(--card);
   border-bottom:1px solid var(--bd);position:sticky;top:0;z-index:5;
 }
@@ -68,11 +69,14 @@ h3{font-size:13px;margin:0}
 @media (max-width:820px){.cuerpo{grid-template-columns:1fr;height:auto}}
 
 /* Páginas secundarias (auditoría y pizarrón) ------------------------------ */
-/* Mismo sistema de tokens que la principal: padding 20/24 px y ancho cómodo. */
+/* Mismo sistema de tokens que la principal: padding 20/24 px y ancho cómodo.
+   El ancho explícito (y no depender del shrink-to-fit del contenedor) evita
+   que la cabecera y el contenido queden en una columna angosta en las páginas
+   que no traen contenido propio hasta que hidrata el cliente (pizarrón). */
 .pagina{
   display:flex;flex-direction:column;gap:calc(var(--esp)*4);
   padding:calc(var(--esp)*5) calc(var(--esp)*6);
-  max-width:1100px;margin:0 auto;width:100%;min-width:0;
+  width:100%;max-width:1100px;margin-inline:auto;box-sizing:border-box;min-width:0;
 }
 .filtros{
   display:flex;flex-wrap:wrap;align-items:flex-end;gap:calc(var(--esp)*3);
@@ -89,11 +93,22 @@ h3{font-size:13px;margin:0}
 .boton-primario{background:var(--activo);color:#fff;border-color:var(--activo);font-weight:600}
 .boton-primario:hover{background:var(--foco);border-color:var(--foco);color:#fff}
 @media (prefers-color-scheme:dark){.boton-primario,.boton-primario:hover{color:#08122a}}
-.tabla-envoltorio{overflow:auto;max-height:70vh;border:1px solid var(--bd);border-radius:var(--radio);background:var(--card)}
+.tabla-envoltorio{overflow:auto;width:100%;max-width:100%;max-height:70vh;border:1px solid var(--bd);border-radius:var(--radio);background:var(--card)}
 .tabla-envoltorio table{border:0;border-radius:0}
 .paginacion{display:flex;justify-content:center}
 .badge-historico{color:var(--cola);border-color:var(--cola)}
 .campo-iso{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--mut)}
+
+/* Angosto (móvil): el padding se achica y los campos ocupan todo el ancho para
+   que el panel no genere scroll horizontal de página a 360 px; las tablas ya
+   scrollean dentro de .tabla-envoltorio. */
+@media (max-width:600px){
+  .pagina{padding:calc(var(--esp)*4) calc(var(--esp)*3)}
+  .filtros{padding:calc(var(--esp)*2) calc(var(--esp)*3)}
+  .filtros .campo{flex:1 1 100%;min-width:0}
+  .filtros input,.filtros select{width:100%;max-width:100%}
+  .filtros .acciones{margin-left:0;width:100%}
+}
 
 /* Lista de trabajos ------------------------------------------------------- */
 .lista{display:flex;flex-direction:column;gap:calc(var(--esp)*2);min-height:0}
