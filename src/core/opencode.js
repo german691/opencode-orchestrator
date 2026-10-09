@@ -404,6 +404,16 @@ export function construirPrompt({
     lineas.push(
       '- No explores el repositorio entero: leé solo lo que necesitás y empezá a escribir los cambios apenas sepas dónde. Si tras unas 20 lecturas no encontrás dónde cambiar, detenete y reportá qué te falta. Un trabajo que no escribe ningún archivo en 10 minutos se corta.',
     );
+    // Las mutaciones se DECLARAN: el servidor las aplica y RESTAURA siempre. Así el agente
+    // no deja el worktree mutado si su proceso muere a mitad de camino.
+    lineas.push(
+      '- NO mutes archivos a mano. Para comprobar que tus tests pueden fallar escribí `.orq/mutaciones.json` y el servidor las ejecuta, restaura y reporta "MUTACION: detectada N/M".',
+    );
+    lineas.push(
+      '- Formato exacto: {"mutaciones":[{"archivo":"ruta/relativa.js","buscar":"texto exacto","reemplazar":"texto nuevo","comando":"node --test test/x.test.js"}]}',
+    );
+    lineas.push('- `archivo` debe estar dentro de tus writes y `buscar` debe aparecer tal cual en el archivo.');
+    lineas.push('- No ejecutes la suite completa si hay un comando de aceptación del servidor (esa la corre el servidor al final).');
   }
   lineas.push('- No hagas git commit, ni push, ni reset, ni clean.');
   lineas.push('- No corras la suite completa ni comandos que usen recursos compartidos salvo que la tarea lo pida.');

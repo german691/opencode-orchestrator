@@ -284,6 +284,23 @@ export function escriturasEnRutaProtegida(writes, protegidos) {
 const MODOS_VALIDOS = new Set(['readonly', 'safe', 'auto']);
 
 /**
+ * Directorio reservado del trabajo (manifiesto de mutaciones). POR QUÉ se ignora acá:
+ * el agente lo escribe a mano y el servidor lo consume; jamás es un cambio del trabajo,
+ * ni siquiera en `readonly` (declarar mutaciones no modifica código).
+ */
+const DIR_ORQ = '.orq';
+
+/**
+ * ¿La ruta cae dentro de `.orq` (el directorio reservado de mutaciones)?
+ * @param {string} ruta
+ * @returns {boolean}
+ */
+function esRutaOrq(ruta) {
+  const normalizada = String(ruta).replace(/\\/g, '/').replace(/^\.\//, '');
+  return normalizada === DIR_ORQ || normalizada.startsWith(`${DIR_ORQ}/`);
+}
+
+/**
  * Verifica una lista de archivos cambiados contra el alcance declarado.
  *
  * Precedencia de motivos (del más fuerte al más débil):
@@ -333,6 +350,8 @@ export function verificarCambios(entrada = {}) {
     const ruta = original.replace(/\\/g, '/');
     if (vistos.has(ruta)) continue; // deduplicación: un archivo cuenta una vez
     vistos.add(ruta);
+    // `.orq` es el directorio reservado del trabajo; nunca es una violación de alcance.
+    if (esRutaOrq(ruta)) continue;
 
     let motivo = null;
     // Los protegidos NO distinguen mayúsculas: el repo real puede vivir en un sistema de

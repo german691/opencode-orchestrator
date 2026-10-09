@@ -95,3 +95,20 @@ test('log de aceptación fallido: coincidencias primero, sin subtests ok y con t
   assert.match(completo, /ok 1 - subtest que pasó/);
   assert.doesNotMatch(completo, /salida completa: opencode_logs/);
 });
+
+test('resultado con mutaciones: línea compacta N/M detectadas (solo si existen)', () => {
+  const conMutaciones = {
+    ...base(null),
+    estado: 'succeeded',
+    resultado: {
+      mutaciones: {
+        detectadas: 1,
+        total: 2,
+        restauradoOk: true,
+        detalle: [{ estado: 'detectada' }, { estado: 'no_detectada' }],
+      },
+    },
+  };
+  assert.match(describirTerminado(conMutaciones), /mutaciones: 1\/2 detectadas/);
+  assert.doesNotMatch(describirTerminado({ ...base(null), resultado: {} }), /mutaciones:/);
+});

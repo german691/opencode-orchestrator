@@ -51,6 +51,14 @@ const TOPE_SALIDA_SETUP = 8000;
 const SETUP_TIMEOUT_MS = 600000;
 
 /**
+ * Directorio interno de cada trabajo. Ahí el agente declara `.orq/mutaciones.json` y el
+ * servidor ejecuta las mutaciones con restauración verificada. POR QUÉ es reservado: no
+ * puede contar como cambio, ni violar el alcance, ni entrar al commit (el agente lo
+ * escribe a mano y un commit lo haría parte del trabajo).
+ */
+export const DIR_ORQ = '.orq';
+
+/**
  * Cerrojo en proceso por repositorio (§7). Serializa las operaciones que MUTAN
  * el repositorio (crear/eliminar worktrees, preparar/integrar) porque git usa
  * archivos de lock internos (`.git/worktrees/.../locked`, `index.lock`) que no
@@ -262,6 +270,55 @@ function validarRutaRelativa(relativa, indice, campo = 'link') {
     throw new ErrorDeWorkspace(`${campo}[${indice}] inválido: '${relativa}' no puede contener '..'`);
   }
   return normalizada;
+}
+
+/**
+ * ¿La ruta es el directorio reservado `.orq` o algo dentro de él? Se comprueba SIEMPRE,
+ * además de la lista `ignorar`, para que el manifiesto de mutaciones nunca cuente como
+ * cambio ni entre al commit aunque el llamador no pase `.orq` en `ignorar`.
+ *
+ * @param {string} ruta relativa con '/'
+ * @returns {boolean}
+ */
+export function esRutaOrq(ruta) {
+  const normalizada = String(ruta).replace(/\\/g, '/').replace(/^\.\//, '');
+  return normalizada === DIR_ORQ || normalizada.startsWith(`${DIR_ORQ}/`);
+}
+
+/**
+ * Agrega patrones al `info/exclude` LOCAL del worktree (el de SU gitdir, no el del
+ * repo principal): así la configuración no se comparte entre worktrees (W3). La
+ * garantía funcional la da igual el filtrado por ruta de `cambiosDelWorktree` y
+ * `commitearTrabajo`, que ignoran `.orq` aunque este archivo no se lea.
+ *
+ * @param {string} worktree ruta del worktree
+ * @param {string[]} patrones líneas a asegurar
+ * @returns {Promise<void>}
+ */
+async function agregarExcludeLocal(worktree, patrones) {
+  const resultado = await git(['rev-parse', '--git-dir'], { cwd: worktree });
+  if (resultado.codigo !== 0) return;
+  const gitdir = resultado.stdout.trim();
+  if (gitdir === '') return;
+  const archivo = path.resolve(worktree, gitdir, 'info', 'exclude');
+
+  let contenido = '';
+  try {
+    contenido = fs.readFileSync(archivo, 'utf8');
+  } catch {
+    /* el archivo puede no existir todavía */
+  }
+  const existentes = new Set(contenido.split(/\r?\n/).map((linea) => linea.trim()).filter((linea) => linea !== ''));
+  const faltantes = patrones.filter((patron) => !existentes.has(patron));
+  if (faltantes.length === 0) return;
+
+  try {
+    fs.mkdirSync(path.dirname(archivo), { recursive: true });
+    const separador = contenido === '' || contenido.endsWith('\n') ? '' : '\n';
+    fs.appendFileSync(archivo, `${separador}${faltantes.join('\n')}\n`);
+  } catch {
+    /* best-effort: el filtrado por ruta cubre el caso */
+  }
 }
 
 /**
@@ -527,6 +584,12 @@ export async function crearWorktree({
   /** @type {string[]} */
   const enlacesCreados = [];
   try {
+    // Directorio reservado del trabajo: se crea vacío y se marca en el exclude LOCAL del
+    // worktree para que git lo ignore. POR QUÉ: el agente declara ahí sus mutaciones y el
+    // servidor las ejecuta/restaura; que git lo vea sería un cambio ajeno al alcance.
+    fs.mkdirSync(path.join(creado.ruta, DIR_ORQ), { recursive: true });
+    await agregarExcludeLocal(creado.ruta, [`${DIR_ORQ}/`]);
+
     for (let indice = 0; indice < link.length; indice += 1) {
       const relativa = validarRutaRelativa(link[indice], indice);
       const origen = path.join(repoRaiz, relativa);
@@ -648,7 +711,9 @@ export async function cambiosDelWorktree({ ruta, baseCommit, ignorar = [] } = {}
     throw new ErrorDeWorkspace('cambiosDelWorktree espera un baseCommit');
   }
   if (!Array.isArray(ignorar)) throw new ErrorDeWorkspace('ignorar debe ser un array de rutas relativas');
-  const ignorado = (r) => estaIgnorada(r, ignorar);
+  // `.orq` se ignora SIEMPRE (además de `ignorar`): el manifiesto de mutaciones no es un
+  // cambio del trabajo, aunque su comando de prueba lo reescriba durante la aceptación.
+  const ignorado = (r) => esRutaOrq(r) || estaIgnorada(r, ignorar);
 
   /** @type {Set<string>} */
   const archivos = new Set();
@@ -763,6 +828,8 @@ export async function commitearTrabajo({ ruta, mensaje, autor, excluir = [], sol
       const argsSolo = ['add', '-A', '--'];
       for (let indice = 0; indice < soloArchivos.length; indice += 1) {
         const relativa = validarRutaRelativa(soloArchivos[indice], indice, 'soloArchivos');
+        // `.orq` nunca se commitea, aunque un llamador lo liste por error.
+        if (esRutaOrq(relativa)) continue;
         // Un archivo que el agente borró con `git rm` ya no está ni en el disco ni en el índice:
         // `git add -A -- <ruta>` falla con "did not match any files" y tumbaba el commit de un
         // trabajo terminado. Su borrado ya está en el índice, así que se omite del `add`.
@@ -774,6 +841,9 @@ export async function commitearTrabajo({ ruta, mensaje, autor, excluir = [], sol
     }
   } else {
     const argsAdd = ['add', '-A', '--', '.'];
+    // `.orq` ya está en el exclude LOCAL del worktree (crearWorktree), así que un `add -A`
+    // no lo stagea. No se agrega un pathspec `:(exclude).orq` porque git rechaza excluir
+    // por pathspec una ruta ignorada.
     for (let indice = 0; indice < excluir.length; indice += 1) {
       const relativa = validarRutaRelativa(excluir[indice], indice, 'excluir');
       argsAdd.push(pathspecExclusion(relativa));

@@ -35,6 +35,8 @@ import {
   resolverModo,
 } from './opencode.js';
 import { resumirFallos } from './fallos.js';
+import { leerManifiesto, ejecutarMutaciones, nombreManifiesto } from './mutaciones.js';
+import { ejecutarParalelo, normalizarParalelo } from './paralelo.js';
 import { elegibles } from './planificador.js';
 import { cargarPerfil, perfilPorDefecto, resolverRaizWorktrees } from './profile.js';
 import { decidirReanudacion, esFalloDeTransporte, textoAdvertencia } from './reanudacion.js';
@@ -73,6 +75,36 @@ const DEFECTOS = Object.freeze({
   modelo: 'opencode-go/deepseek-v4.1-flash',
   autor: 'opencode-orchestrator <orquestador@localhost>',
 });
+
+/** Tope de salida que se acumula de un comando de mutación para un eventual diagnóstico. */
+const TOPE_SALIDA_COMANDO = 8000;
+
+/**
+ * ¿Es una aceptación válida? Un comando literal (texto) o una compuerta en fragmentos (objeto
+ * `{ paralelo }`). Se usa para elegir la aceptación por defecto del perfil sin romper strings.
+ * @param {unknown} valor
+ * @returns {boolean}
+ */
+function esAceptacionValida(valor) {
+  return typeof valor === 'string' || (valor !== null && typeof valor === 'object' && !Array.isArray(valor));
+}
+
+/**
+ * Recurso que consume una aceptación paralela (`{ paralelo: { recurso } }`), o `null`.
+ * Ese recurso se provisiona por fragmento, no como instancia única del trabajo.
+ * @param {unknown} aceptacion
+ * @returns {string|null}
+ */
+function recursoDeAceptacionParalela(aceptacion) {
+  if (!aceptacion || typeof aceptacion !== 'object' || Array.isArray(aceptacion)) return null;
+  const recurso = aceptacion.paralelo?.recurso;
+  return typeof recurso === 'string' && recurso !== '' ? recurso : null;
+}
+
+/** Mensaje legible de un error cualquiera. */
+function mensajeDeError(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /** Lee el sha de HEAD de un repositorio (para la base de trabajos sin aislamiento). */
 function git(args, cwd) {
@@ -437,7 +469,7 @@ export class Gestor {
       aceptacion = Object.hasOwn(perfil.accept ?? {}, spec.accept) ? perfil.accept[spec.accept] : spec.accept;
     } else if (origen?.aceptacion) {
       aceptacion = origen.aceptacion; // retomar: la misma aceptación que el trabajo original
-    } else if (modo !== 'readonly' && perfil.accept && typeof perfil.accept.default === 'string') {
+    } else if (modo !== 'readonly' && esAceptacionValida(perfil.accept?.default)) {
       aceptacion = perfil.accept.default;
     }
     if (soloAceptacion && !aceptacion) {
@@ -651,9 +683,13 @@ export class Gestor {
       // Es una ADVERTENCIA, no un rechazo: una edición manual del usuario produce lo mismo.
       const arbolRealAntes = job.isolation === 'worktree' ? await this.#instantaneaDelArbolReal(job.repo) : null;
 
-      // 2) Recursos exclusivos por trabajo
+      // 2) Recursos exclusivos por trabajo. Un recurso que consume una aceptación paralela
+      // se provisiona POR FRAGMENTO dentro de `ejecutarParalelo` (una base por shard): acá
+      // se omite la instancia única para no crear una base de más.
+      const recursoParalelo = recursoDeAceptacionParalela(job.aceptacion);
       const envRecursos = {};
       for (const nombre of job.resources) {
+        if (nombre === recursoParalelo) continue;
         const proveedor = crearProveedor(perfil.resources[nombre], {
           env: this.entornoBase,
           ejecutarPsql: this.ejecutarPsql,
@@ -924,46 +960,165 @@ export class Gestor {
         });
       }
 
+      // 5b) Mutaciones del agente: si declaró `.orq/mutaciones.json`, el servidor aplica cada
+      // cambio, corre su comando y RESTAURA el original. Va después del alcance y antes de la
+      // aceptación: un test que no falla con la mutación es evidencia de tests débiles, no un
+      // cambio del trabajo (por eso el archivo mutado se restaura siempre).
+      let mutaciones = null;
+      const rutaManifiesto = path.join(raizTrabajo, nombreManifiesto);
+      if ((perfil.mutaciones?.habilitado ?? true) && fs.existsSync(rutaManifiesto)) {
+        const timeoutMutacionesMs = perfil.mutaciones?.timeoutMs ?? 300000;
+        let manifiesto = null;
+        try {
+          manifiesto = leerManifiesto(rutaManifiesto, raizTrabajo);
+        } catch (error) {
+          // Un manifiesto inválido es un error del agente, no del servidor: se advierte y se sigue.
+          advertencias.push(`manifiesto de mutaciones inválido: ${mensajeDeError(error)}`);
+        }
+        if (manifiesto) {
+          let resultadoMutaciones = null;
+          try {
+            resultadoMutaciones = await ejecutarMutaciones({
+              worktree: raizTrabajo,
+              manifiesto,
+              // Solo se muta lo que el trabajo puede escribir y no está protegido.
+              permitido: (archivo) =>
+                verificarCambios({
+                  archivosCambiados: [archivo],
+                  writes: job.writes,
+                  protegidos,
+                  modo: job.mode,
+                }).ok,
+              // Mismo mecanismo y entorno que la aceptación (incluidas las variables de recursos).
+              correr: (comando, { timeoutMs } = {}) =>
+                this.#correrComando(comando, {
+                  cwd: cwdTrabajo,
+                  env: entorno,
+                  timeoutMs: timeoutMs ?? timeoutMutacionesMs,
+                  ctl,
+                }),
+              timeoutMs: timeoutMutacionesMs,
+            });
+          } catch (error) {
+            if (error?.codigo === 'RESTAURACION_FALLIDA') {
+              // El worktree quedó corrupto: NUNCA se commitea; el trabajo falla con el detalle.
+              return this.#terminar(id, 'failed', {
+                proceso,
+                archivos: archivosTrabajo,
+                resumen,
+                advertencias,
+                motivoFin: 'error_interno',
+                error: `No se pudo restaurar un archivo mutado: ${mensajeDeError(error)}`,
+              });
+            }
+            advertencias.push(`no se pudieron ejecutar las mutaciones: ${mensajeDeError(error)}`);
+          }
+          if (resultadoMutaciones) {
+            mutaciones = {
+              detectadas: resultadoMutaciones.detectadas,
+              total: resultadoMutaciones.total,
+              restauradoOk: resultadoMutaciones.restauradoOk,
+              detalle: resultadoMutaciones.detalle,
+            };
+            for (const item of resultadoMutaciones.detalle ?? []) {
+              if (item.estado === 'no_detectada') {
+                advertencias.push(
+                  `MUTACION NO DETECTADA: ${item.archivo} con ${item.comando}: el test no falla si se rompe esto`,
+                );
+              } else if (item.estado === 'no_permitida') {
+                advertencias.push(`MUTACION NO PERMITIDA: ${item.archivo} no está dentro de los writes del trabajo; se omitió`);
+              }
+            }
+            this.#evento({
+              tipo: 'job.mutaciones',
+              jobId: id,
+              detectadas: mutaciones.detectadas,
+              total: mutaciones.total,
+              restauradoOk: mutaciones.restauradoOk,
+            });
+            this.#eventoDeTrabajo(id, {
+              tipo: 'job.mutaciones',
+              detectadas: mutaciones.detectadas,
+              total: mutaciones.total,
+              restauradoOk: mutaciones.restauradoOk,
+            });
+            // `exigirTodas`: una mutación no detectada deja el trabajo rechazado (sin commit).
+            const noDetectadas = (resultadoMutaciones.detalle ?? []).filter((d) => d.estado === 'no_detectada').length;
+            if ((perfil.mutaciones?.exigirTodas ?? false) && noDetectadas > 0) {
+              return this.#terminar(id, 'rejected', {
+                proceso,
+                archivos: archivosTrabajo,
+                resumen,
+                advertencias,
+                mutaciones,
+                motivoFin: 'mutacion',
+              });
+            }
+          }
+        }
+      }
+
       // 6) Aceptación
       let aceptado = { cmd: null, ejecutada: false };
       if (job.aceptacion) {
-        const salida = await ejecutar({
-          cmd: '/bin/sh',
-          args: ['-c', job.aceptacion],
-          cwd: cwdTrabajo,
-          env: entorno,
-          stdoutPath: path.join(rutas.dir, 'aceptacion.log'),
-          stderrPath: path.join(rutas.dir, 'aceptacion.err.log'),
-          // Tope de la aceptación: el del perfil (la compuerta completa pasa de 10 min) o el por defecto.
-          timeoutMs: perfil.aceptacionTimeoutMs ?? DEFECTOS.aceptacionTimeoutMs,
-          graceMs: this.graceMs,
-          signal: ctl.signal,
-        });
-        aceptado = {
-          cmd: job.aceptacion,
-          ejecutada: true,
-          exit: salida.code,
-          motivo: salida.motivo,
-          cola: leerColaArchivo(path.join(rutas.dir, 'aceptacion.log'), 2000),
-        };
-        // Solo si falló: el bloque de fallos (qué test, qué error) suele estar en stderr o en
-        // medio del stdout; sin esto había que abrir los logs a mano para saber por qué se rechazó.
-        if (salida.motivo !== 'exit' || salida.code !== 0) {
-          aceptado.fallos = resumirFallos({
-            stdout: leerColaArchivo(path.join(rutas.dir, 'aceptacion.log'), 400_000),
-            stderr: leerColaArchivo(path.join(rutas.dir, 'aceptacion.err.log'), 400_000),
+        if (typeof job.aceptacion === 'string') {
+          const salida = await ejecutar({
+            cmd: '/bin/sh',
+            args: ['-c', job.aceptacion],
+            cwd: cwdTrabajo,
+            env: entorno,
+            stdoutPath: path.join(rutas.dir, 'aceptacion.log'),
+            stderrPath: path.join(rutas.dir, 'aceptacion.err.log'),
+            // Tope de la aceptación: el del perfil (la compuerta completa pasa de 10 min) o el por defecto.
+            timeoutMs: perfil.aceptacionTimeoutMs ?? DEFECTOS.aceptacionTimeoutMs,
+            graceMs: this.graceMs,
+            signal: ctl.signal,
           });
-        }
-        if (salida.motivo === 'cancelado') return this.#terminar(id, 'cancelled', { proceso, motivoFin: 'cancelado', aceptacion: aceptado });
-        if (salida.motivo !== 'exit' || salida.code !== 0) {
-          return this.#terminar(id, 'rejected', {
-            proceso,
-            archivos: archivosTrabajo,
-            resumen,
-            aceptacion: aceptado,
-            advertencias,
-            motivoFin: 'aceptacion',
-          });
+          aceptado = {
+            cmd: job.aceptacion,
+            ejecutada: true,
+            exit: salida.code,
+            motivo: salida.motivo,
+            cola: leerColaArchivo(path.join(rutas.dir, 'aceptacion.log'), 2000),
+          };
+          // Solo si falló: el bloque de fallos (qué test, qué error) suele estar en stderr o en
+          // medio del stdout; sin esto había que abrir los logs a mano para saber por qué se rechazó.
+          if (salida.motivo !== 'exit' || salida.code !== 0) {
+            aceptado.fallos = resumirFallos({
+              stdout: leerColaArchivo(path.join(rutas.dir, 'aceptacion.log'), 400_000),
+              stderr: leerColaArchivo(path.join(rutas.dir, 'aceptacion.err.log'), 400_000),
+            });
+          }
+          if (salida.motivo === 'cancelado') return this.#terminar(id, 'cancelled', { proceso, motivoFin: 'cancelado', aceptacion: aceptado, mutaciones });
+          if (salida.motivo !== 'exit' || salida.code !== 0) {
+            return this.#terminar(id, 'rejected', {
+              proceso,
+              archivos: archivosTrabajo,
+              resumen,
+              aceptacion: aceptado,
+              advertencias,
+              mutaciones,
+              motivoFin: 'aceptacion',
+            });
+          }
+        } else {
+          // Compuerta en fragmentos: cada shard corre con SU propia instancia del recurso.
+          const paralelo = await this.#aceptacionParalela({ id, job, perfil, cwdTrabajo, entorno, rutas, ctl });
+          aceptado = paralelo.aceptado;
+          if (paralelo.cancelado) {
+            return this.#terminar(id, 'cancelled', { proceso, motivoFin: 'cancelado', aceptacion: aceptado, mutaciones });
+          }
+          if (!paralelo.ok) {
+            return this.#terminar(id, 'rejected', {
+              proceso,
+              archivos: archivosTrabajo,
+              resumen,
+              aceptacion: aceptado,
+              advertencias,
+              mutaciones,
+              motivoFin: 'aceptacion',
+            });
+          }
         }
       }
 
@@ -983,6 +1138,7 @@ export class Gestor {
         resumen,
         aceptacion: aceptado,
         advertencias,
+        mutaciones,
         commit,
       });
     } catch (error) {
@@ -1049,6 +1205,102 @@ export class Gestor {
     }
     for (const archivo of antes.hashes.keys()) if (!ahora.hashes.has(archivo)) cambios.push(archivo);
     return cambios;
+  }
+
+  /**
+   * Corre un comando de shell en el worktree con el MISMO mecanismo que la aceptación:
+   * `/bin/sh -c`, grupo de procesos propio, tope de tiempo y cancelación por `ctl.signal`.
+   * Devuelve la forma que espera `ejecutarMutaciones` (`codigo`, `salida`, `timeout`).
+   *
+   * @param {string} comando
+   * @param {{ cwd: string, env: NodeJS.ProcessEnv, timeoutMs?: number, ctl: AbortController, logBase?: string }} opciones
+   * @returns {Promise<{ codigo: number|null, salida: string, timeout: boolean }>}
+   */
+  async #correrComando(comando, { cwd, env, timeoutMs, ctl, logBase }) {
+    let salida = '';
+    const resultado = await ejecutar({
+      cmd: '/bin/sh',
+      args: ['-c', comando],
+      cwd,
+      env,
+      stdoutPath: logBase ? `${logBase}.out.log` : undefined,
+      stderrPath: logBase ? `${logBase}.err.log` : undefined,
+      timeoutMs,
+      graceMs: this.graceMs,
+      signal: ctl.signal,
+      onSalida: (evento) => {
+        salida += evento.texto;
+        // Se guarda solo la cola: un test verboso no debe acumular un buffer sin tope.
+        if (salida.length > TOPE_SALIDA_COMANDO) salida = salida.slice(-TOPE_SALIDA_COMANDO);
+      },
+    });
+    return { codigo: resultado.code, salida, timeout: resultado.motivo === 'timeout' };
+  }
+
+  /**
+   * Ejecuta una aceptación en fragmentos paralelos (`{ paralelo }`): provisiona una
+   * instancia del recurso por fragmento, corre los comandos y libera SIEMPRE cada
+   * instancia. Devuelve el resultado con la forma que consume `formato.js` y los topes
+   * de salida compacta ya aplicados por `ejecutarParalelo` (fallidos primero).
+   *
+   * @param {object} opciones
+   * @returns {Promise<{ aceptado: object, ok: boolean, cancelado: boolean }>}
+   */
+  async #aceptacionParalela({ id, job, perfil, cwdTrabajo, entorno, rutas, ctl }) {
+    const spec = job.aceptacion;
+    const normalizado = normalizarParalelo(spec);
+    const timeoutMs = normalizado.timeoutMs ?? perfil.aceptacionTimeoutMs ?? DEFECTOS.aceptacionTimeoutMs;
+
+    this.#eventoDeTrabajo(id, {
+      tipo: 'aceptacion_paralela',
+      fase: 'inicio',
+      fragmentos: normalizado.shards,
+    });
+
+    const resultado = await ejecutarParalelo({
+      spec,
+      ejecutar: async (comando, { env: envFragmento, indice }) => {
+        // El entorno del fragmento (su base) se SUMA al entorno del trabajo.
+        return this.#correrComando(comando, {
+          cwd: cwdTrabajo,
+          env: { ...entorno, ...envFragmento },
+          timeoutMs,
+          ctl,
+          logBase: path.join(rutas.dir, `aceptacion-${indice}`),
+        });
+      },
+      provisionar: async (indice) => {
+        if (!normalizado.recurso) return { env: {} };
+        const proveedor = crearProveedor(perfil.resources[normalizado.recurso], {
+          env: this.entornoBase,
+          ejecutarPsql: this.ejecutarPsql,
+        });
+        const recurso = await proveedor.provisionar({ id, shard: indice });
+        return { env: recurso.env, liberar: recurso.liberar };
+      },
+      // Liberar siempre: si el fragmento falló, su base no debe quedar viva.
+      liberar: async (datos) => {
+        if (datos && typeof datos.liberar === 'function') await datos.liberar();
+      },
+    });
+
+    this.#eventoDeTrabajo(id, {
+      tipo: 'aceptacion_paralela',
+      fase: 'fin',
+      fragmentos: normalizado.shards,
+      ok: resultado.ok,
+    });
+
+    const aceptado = {
+      cmd: normalizado.comando,
+      ejecutada: true,
+      exit: resultado.ok ? 0 : 1,
+      motivo: 'exit',
+      fragmentos: normalizado.shards,
+      // Fallidos primero (ya ordenado por `ejecutarParalelo`); `formato.js` recorta las líneas.
+      cola: resultado.salidaCombinada,
+    };
+    return { aceptado, ok: resultado.ok, cancelado: ctl.signal.aborted };
   }
 
   /** Cierra el trabajo en un estado terminal persistiendo el resultado. */

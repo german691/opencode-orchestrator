@@ -172,6 +172,14 @@ export function describirTerminado(trabajo, colas = {}, { completo = false } = {
         r.violaciones.slice(0, MAX_ARCHIVOS).map((v) => `  - ${v.ruta}: ${v.motivo}`).join('\n'),
     );
   }
+  // Resumen compacto de las mutaciones declaradas por el agente (`.orq/mutaciones.json`).
+  if (r.mutaciones && Number.isFinite(r.mutaciones.detectadas)) {
+    const detalle = Array.isArray(r.mutaciones.detalle) ? r.mutaciones.detalle : [];
+    const aplicables = detalle.length > 0
+      ? detalle.filter((d) => d.estado === 'detectada' || d.estado === 'no_detectada').length
+      : r.mutaciones.total;
+    partes.push(`mutaciones: ${r.mutaciones.detectadas}/${aplicables} detectadas`);
+  }
   if (Array.isArray(r.advertencias) && r.advertencias.length > 0) {
     partes.push(`ADVERTENCIAS:\n${r.advertencias.map((a) => `  - ${a}`).join('\n')}`);
   }
