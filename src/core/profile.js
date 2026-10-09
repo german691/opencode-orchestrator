@@ -11,6 +11,7 @@
 import { compilar } from './glob.js';
 import { normalizarParalelo } from './paralelo.js';
 import { configReanudacion } from './reanudacion.js';
+import { configRevisor } from './revisor.js';
 import { homedir } from 'node:os';
 
 /**
@@ -50,7 +51,18 @@ const CLAVES_PERFIL = new Set([
   'accept',
   'reanudacion',
   'mutaciones',
+  'pizarron',
+  'revisor',
 ]);
+
+/** Campos permitidos dentro de `pizarron`. */
+const CLAVES_PIZARRON = new Set(['habilitado', 'maxEntradasPorTrabajo']);
+
+/** Valores por defecto de la sección opcional `pizarron` (apagado salvo opt-in). */
+const PIZARRON_POR_DEFECTO = Object.freeze({ habilitado: false, maxEntradasPorTrabajo: 30 });
+
+/** Tope del aporte de un trabajo que se fusiona en el pizarrón. */
+const MAX_ENTRADAS_PIZARRON = 1000;
 
 /** Campos permitidos dentro de `mutaciones`. */
 const CLAVES_MUTACIONES = new Set(['habilitado', 'exigirTodas', 'timeoutMs']);
@@ -418,6 +430,44 @@ export function validarPerfil(objeto) {
     }
   }
 
+  // Sección opcional `pizarron`: documento compartido entre agentes del mismo repo.
+  // Apagado por defecto (opt-in): activarlo crea el symlink en cada worktree y suma
+  // instrucciones al prompt, así que no debe encenderse sin que el usuario lo pida.
+  let pizarron = { ...PIZARRON_POR_DEFECTO };
+  if (objeto.pizarron !== undefined) {
+    if (!esObjetoPlano(objeto.pizarron)) {
+      errores.push('pizarron: debe ser un objeto');
+    } else {
+      for (const clave of Object.keys(objeto.pizarron)) {
+        if (!CLAVES_PIZARRON.has(clave)) errores.push(`pizarron.${clave}: campo desconocido`);
+      }
+      if (objeto.pizarron.habilitado !== undefined && typeof objeto.pizarron.habilitado !== 'boolean') {
+        errores.push('pizarron.habilitado: debe ser true o false');
+      }
+      if (objeto.pizarron.maxEntradasPorTrabajo !== undefined) {
+        const n = objeto.pizarron.maxEntradasPorTrabajo;
+        if (!Number.isInteger(n) || n < 1 || n > MAX_ENTRADAS_PIZARRON) {
+          errores.push(`pizarron.maxEntradasPorTrabajo: debe ser un entero entre 1 y ${MAX_ENTRADAS_PIZARRON}`);
+        }
+      }
+      pizarron = {
+        habilitado: objeto.pizarron.habilitado ?? PIZARRON_POR_DEFECTO.habilitado,
+        maxEntradasPorTrabajo: objeto.pizarron.maxEntradasPorTrabajo ?? PIZARRON_POR_DEFECTO.maxEntradasPorTrabajo,
+      };
+    }
+  }
+
+  // Sección opcional `revisor`: la valida el MISMO módulo que arma el prompt y parsea
+  // el veredicto (src/core/revisor.js), para no duplicar reglas ni topes.
+  let revisor = configRevisor(undefined);
+  try {
+    revisor = configRevisor(objeto.revisor);
+  } catch (error) {
+    for (const mensaje of Array.isArray(error?.errores) ? error.errores : [String(error?.message ?? error)]) {
+      errores.push(mensaje);
+    }
+  }
+
   if (errores.length > 0) throw new ErrorDePerfil(errores);
 
   return {
@@ -451,6 +501,10 @@ export function validarPerfil(objeto) {
     reanudacion,
     // Ejecución de mutaciones declaradas por el agente en `.orq/mutaciones.json`.
     mutaciones,
+    // Documento compartido entre agentes concurrentes de este repo (opt-in).
+    pizarron,
+    // Revisor automático de solo lectura sobre trabajos safe exitosos (opt-in).
+    revisor,
   };
 }
 
@@ -512,6 +566,8 @@ export function perfilPorDefecto(nombreRepo) {
     accept: {},
     reanudacion: { habilitado: true, maxRelanzamientos: 1 },
     mutaciones: { ...MUTACIONES_POR_DEFECTO },
+    pizarron: { ...PIZARRON_POR_DEFECTO },
+    revisor: configRevisor(undefined),
   };
 }
 

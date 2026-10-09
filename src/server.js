@@ -19,6 +19,7 @@ import { Gestor } from './core/gestor.js';
 import { cargarEntornoDeArchivo } from './entorno.js';
 import { AlmacenDeTrabajos } from './core/store.js';
 import { crearRegistroEventos } from './core/eventos.js';
+import { crearPizarron } from './core/pizarron.js';
 import { crearHerramientas } from './mcp/herramientas.js';
 import { crearServidorMcp } from './mcp/protocolo.js';
 
@@ -70,6 +71,10 @@ async function main() {
   // Registro global de eventos (auditoría) en el MISMO directorio de estado del almacén:
   // lo comparten el gestor y el panel (que lo abre por su cuenta) para /auditoria.
   const registro = crearRegistroEventos({ dir: almacen.dir });
+  // Pizarrón compartido: vive en el MISMO directorio de estado (el panel lo puede abrir por
+  // su cuenta más adelante). El servidor es el único que escribe el archivo vivo; cada
+  // worktree recibe un symlink de solo lectura al habilitarse en el perfil del repo.
+  const pizarron = crearPizarron({ dir: almacen.dir });
   const concurrencia = Math.min(16, enteroDeEntorno('ORQ_CONCURRENCY', 3));
   const esperaMs = enteroDeEntorno('ORQ_WAIT_MS', 45000);
 
@@ -91,6 +96,7 @@ async function main() {
       concurrencia,
       modelo: process.env.OPENCODE_MODEL || undefined,
       registro,
+      pizarron,
     });
     gestor.registrarArranque({ recuperados: perdidos });
     herramientas = crearHerramientas(gestor, { esperaMs });

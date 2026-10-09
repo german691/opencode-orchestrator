@@ -40,6 +40,7 @@ import { ejecutarParalelo, normalizarParalelo } from './paralelo.js';
 import { elegibles } from './planificador.js';
 import { cargarPerfil, perfilPorDefecto, resolverRaizWorktrees } from './profile.js';
 import { decidirReanudacion, esFalloDeTransporte, textoAdvertencia } from './reanudacion.js';
+import { construirPromptRevision, debeRevisar, parsearVeredicto, resumenRevision } from './revisor.js';
 import { crearProveedor } from './recursos.js';
 import { ejecutar } from './runner.js';
 import { verificarCambios, escriturasEnRutaProtegida } from './scope.js';
@@ -48,6 +49,7 @@ import {
   commitearTrabajo,
   crearWorktree,
   avanzarBase,
+  DIR_ORQ,
   eliminarWorktree,
   integrar,
   raizGit,
@@ -78,6 +80,9 @@ const DEFECTOS = Object.freeze({
 
 /** Tope de salida que se acumula de un comando de mutación para un eventual diagnóstico. */
 const TOPE_SALIDA_COMANDO = 8000;
+
+/** Tope de tiempo del revisor automático (5 min): es acotado y nunca debe colgar el trabajo. */
+const REVISION_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * ¿Es una aceptación válida? Un comando literal (texto) o una compuerta en fragmentos (objeto
@@ -172,6 +177,7 @@ export class Gestor {
    * @param {Function} [opciones.ejecutarPsql] psql inyectable (tests)
    * @param {string} [opciones.autor] autor de los commits de los trabajos
    * @param {{ registrar: (ev: object) => boolean, listar: (f?: object) => object[] }} [opciones.registro] registro global de eventos (auditoría)
+   * @param {object} [opciones.pizarron] pizarrón compartido (`crearPizarron`); opcional
    */
   constructor({
     almacen,
@@ -187,6 +193,7 @@ export class Gestor {
     ejecutarPsql,
     autor = DEFECTOS.autor,
     registro = null,
+    pizarron = null,
   } = {}) {
     if (!almacen) throw new ErrorDeGestor('El gestor necesita un almacén de trabajos');
     if (!opencode || typeof opencode.cmd !== 'string' || opencode.cmd === '') {
@@ -208,6 +215,8 @@ export class Gestor {
     this.vigilanciaAlcanceMs = vigilanciaAlcanceMs;
     // Registro global de auditoría (opcional): si falta, registrar es un no-op.
     this.registro = registro;
+    // Pizarrón compartido (opcional): si falta, se desactiva por completo.
+    this.pizarron = pizarron;
     // undefined = rige el del perfil (o el por defecto); los tests lo acortan.
     this.sinProgresoMs = sinProgresoMs;
 
@@ -626,6 +635,8 @@ export class Gestor {
    */
   async #ejecutar(id, ctl) {
     const liberadores = [];
+    /** Perfil del repo, para usarlo también en el `finally` (pizarrón best-effort). */
+    let perfilDelTrabajo = null;
     try {
       // Primero la transición: desde 'queued' solo se puede ir a provisioning o cancelled,
       // así que cualquier error posterior (p. ej. un perfil inválido) puede terminar en failed.
@@ -633,6 +644,7 @@ export class Gestor {
       this.#eventoDeTrabajo(id, { tipo: 'provisionando' });
       let job = this.trabajos.get(id);
       const perfil = await this.#perfilDe(job.repo);
+      perfilDelTrabajo = perfil;
       const { rootDir } = this.#raices(perfil);
       const rutas = this.almacen.rutasDeLogs(id);
 
@@ -654,6 +666,7 @@ export class Gestor {
           setup: perfil.worktrees.setup,
           env: { ...perfil.env },
           signal: ctl.signal,
+          pizarron: perfil.pizarron?.habilitado === true ? this.pizarron : null,
         });
         raizTrabajo = wt.ruta;
         baseCommit = wt.baseCommit;
@@ -732,6 +745,7 @@ export class Gestor {
         protegidos,
         rutaTrabajo: cwdTrabajo,
         prefijo: perfil.promptPrefix,
+        pizarron: perfil.pizarron?.habilitado === true,
       });
       const args = construirArgs({
         prompt,
@@ -777,6 +791,9 @@ export class Gestor {
             if (revisando || violacionTemprana || sinProgreso) return;
             revisando = true;
             try {
+              // Aporte del pizarrón durante la corrida: así los demás agentes ven los
+              // contratos en cuanto se publican, sin esperar al fin del trabajo.
+              this.#fusionarAportePizarron(id, raizTrabajo, perfil);
               const { archivos } = await cambiosDelWorktree({ ruta: raizTrabajo, baseCommit, ignorar: enlaces });
               const propios = archivos.filter((archivo) => {
                 if (!previos.has(archivo)) return true;
@@ -1122,6 +1139,27 @@ export class Gestor {
         }
       }
 
+      // 6b) Revisor automático (opcional): un trabajo `safe` que ya pasó alcance y aceptación
+      // puede ser contrastado por un agente de solo lectura. Se corre de forma SECUENCIAL
+      // (no consume cupo de concurrencia del perfil: no entra a la cola) y es best-effort:
+      // un fallo, timeout o respuesta ilegible NUNCA falla el trabajo.
+      const revision = await this.#revisar(id, {
+        job,
+        perfil,
+        raizTrabajo,
+        baseCommit,
+        archivosTrabajo,
+        cwdTrabajo,
+        entorno,
+        rutas,
+        ctl,
+        advertencias,
+      });
+      // El revisor es un proceso más: si el trabajo se canceló mientras corría, se respeta.
+      if (ctl.signal.aborted) {
+        return this.#terminar(id, 'cancelled', { proceso, motivoFin: 'cancelado', advertencias });
+      }
+
       // 7) Commit SOLO de lo verificado (con aislamiento) y fin
       let commit = null;
       if (job.isolation === 'worktree') {
@@ -1140,6 +1178,7 @@ export class Gestor {
         advertencias,
         mutaciones,
         commit,
+        ...(revision ? { revision } : {}),
       });
     } catch (error) {
       const mensaje = error instanceof Error ? error.message : String(error);
@@ -1155,6 +1194,10 @@ export class Gestor {
         /* nada más que hacer */
       }
     } finally {
+      // Al terminar CUALQUIER trabajo (aunque falle) se fusiona su aporte al pizarrón. Es
+      // best-effort y va antes de liberar recursos para no depender de ellos.
+      const trabajoFinal = this.trabajos.get(id);
+      if (trabajoFinal?.worktree) this.#fusionarAportePizarron(id, trabajoFinal.worktree, perfilDelTrabajo);
       for (const liberar of liberadores.reverse()) {
         try {
           await liberar();
@@ -1301,6 +1344,145 @@ export class Gestor {
       cola: resultado.salidaCombinada,
     };
     return { aceptado, ok: resultado.ok, cancelado: ctl.signal.aborted };
+  }
+
+  /**
+   * Fusiona el aporte del trabajo (`.orq/aporte.json`) en el pizarrón compartido.
+   *
+   * POR QUÉ best-effort y sin lanzar: el pizarrón es una comodidad de coordinación; un
+   * archivo corrupto, un pizarrón ausente o un perfil que lo deshabilita NUNCA deben
+   * afectar al trabajo. Solo se registra el evento cuando el aporte agregó o chocó algo.
+   *
+   * @param {string} id
+   * @param {string} raizTrabajo worktree del trabajo
+   * @param {object} perfil perfil del repo (puede ser null en el finally temprano)
+   * @returns {void}
+   */
+  #fusionarAportePizarron(id, raizTrabajo, perfil) {
+    if (!this.pizarron || perfil?.pizarron?.habilitado !== true) return;
+    if (typeof raizTrabajo !== 'string' || raizTrabajo === '') return;
+    try {
+      const rutaAporte = path.join(raizTrabajo, DIR_ORQ, 'aporte.json');
+      const res = this.pizarron.fusionarAporte(id, rutaAporte);
+      const fusionadas = res?.fusionadas ?? 0;
+      const conflictos = res?.conflictos ?? 0;
+      if (fusionadas > 0 || conflictos > 0) {
+        this.#evento({ tipo: 'pizarron.post', jobId: id, fusionadas, conflictos });
+        this.#eventoDeTrabajo(id, { tipo: 'pizarron.post', fusionadas, conflictos });
+      }
+    } catch {
+      /* el pizarrón jamás debe afectar al trabajo */
+    }
+  }
+
+  /**
+   * Ejecuta el revisor automático de solo lectura sobre un trabajo ya verificado.
+   *
+   * POR QUÉ un agente readonly apuntando al MISMO worktree: no hace falta uno nuevo (no
+   * escribe) y el revisor debe ver exactamente lo que quedó en el árbol del trabajo. Su
+   * fallo no puede tumbar el trabajo: cualquier problema devuelve INDETERMINADO con una
+   * advertencia, y jamás se propaga una excepción.
+   *
+   * @param {string} id
+   * @param {object} opciones
+   * @returns {Promise<object|null>} `{veredicto, observaciones, crudo, resumen}` o null si no aplica
+   */
+  async #revisar(id, { job, perfil, raizTrabajo, baseCommit, archivosTrabajo, cwdTrabajo, entorno, rutas, ctl, advertencias }) {
+    const config = perfil.revisor;
+    const corresponde = debeRevisar({
+      modo: job.mode,
+      estado: 'succeeded',
+      config,
+      archivos: archivosTrabajo,
+      soloAceptacion: job.soloAceptacion,
+    });
+    if (!corresponde) return null;
+
+    // El diff puede ser grande: se acota con `maxDiffBytes` DENTRO del prompt, no acá.
+    let diff = '';
+    try {
+      diff = await git(['diff', '--no-color', baseCommit], raizTrabajo);
+    } catch (error) {
+      advertencias.push(`no se pudo calcular el diff para la revisión: ${mensajeDeError(error)}`);
+    }
+
+    const modeloRevision = config.modelo ?? job.modelo;
+    const promptRevision = construirPromptRevision({
+      tarea: job.prompt,
+      writes: job.writes,
+      archivos: archivosTrabajo,
+      diff,
+      reglas: config.reglas,
+      plantilla: config.prompt,
+      maxDiffBytes: config.maxDiffBytes,
+    });
+
+    let revision = { veredicto: 'INDETERMINADO', observaciones: [], crudo: '' };
+    try {
+      const rutaConfigRevision = escribirConfigDeTrabajo(
+        path.join(rutas.dir, 'revision'),
+        generarConfigDeTrabajo({
+          modo: 'readonly',
+          writes: [],
+          protegidos: perfil.protected ?? [],
+          modelo: modeloRevision,
+          nombreAgente: NOMBRE_AGENTE,
+        }),
+      );
+      const entornoRevision = {
+        ...entornoDeTrabajo({
+          rutaConfig: rutaConfigRevision,
+          base: {
+            ...entorno,
+            ORQ_JOB_ID: id,
+            ORQ_WORKTREE: raizTrabajo,
+            ORQ_BRANCH: this.trabajos.get(id).rama ?? '',
+          },
+        }),
+        PWD: cwdTrabajo,
+      };
+      const args = construirArgs({
+        prompt: promptRevision,
+        modo: 'readonly',
+        modelo: modeloRevision,
+        files: [],
+        agente: NOMBRE_AGENTE,
+      });
+      let salida = '';
+      const resultado = await ejecutar({
+        cmd: this.opencode.cmd,
+        args: [...this.opencode.argsPrefijo, ...args],
+        cwd: cwdTrabajo,
+        env: entornoRevision,
+        stdoutPath: path.join(rutas.dir, 'revision.log'),
+        stderrPath: path.join(rutas.dir, 'revision.err.log'),
+        timeoutMs: REVISION_TIMEOUT_MS,
+        graceMs: this.graceMs,
+        signal: ctl.signal,
+        onSalida: (evento) => {
+          salida += evento.texto;
+        },
+      });
+      if (resultado.motivo !== 'exit' || resultado.code !== 0) {
+        const motivo = resultado.code !== null && resultado.code !== undefined ? `${resultado.motivo} (exit ${resultado.code})` : resultado.motivo;
+        advertencias.push(`el revisor automático no terminó bien (${motivo}); la revisión queda INDETERMINADA`);
+        revision = { veredicto: 'INDETERMINADO', observaciones: [], crudo: salida.slice(0, 1000) };
+      } else {
+        revision = parsearVeredicto(salida);
+        if (revision.veredicto === 'INDETERMINADO') {
+          advertencias.push('no se pudo interpretar la respuesta del revisor automático; la revisión queda INDETERMINADA');
+        }
+      }
+    } catch (error) {
+      advertencias.push(`el revisor automático falló (${mensajeDeError(error)}); la revisión queda INDETERMINADA`);
+      revision = { veredicto: 'INDETERMINADO', observaciones: [], crudo: '' };
+    }
+
+    revision.resumen = resumenRevision(revision);
+    const detalle = { veredicto: revision.veredicto, observaciones: revision.observaciones.length };
+    this.#evento({ tipo: 'job.revision', jobId: id, ...detalle });
+    this.#eventoDeTrabajo(id, { tipo: 'job.revision', ...detalle });
+    return revision;
   }
 
   /** Cierra el trabajo en un estado terminal persistiendo el resultado. */

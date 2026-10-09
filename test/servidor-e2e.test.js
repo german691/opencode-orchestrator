@@ -129,7 +129,7 @@ const vivo = (pid) => {
   }
 };
 
-test('el servidor expone las 9 herramientas y su stdout es solo protocolo', async () => {
+test('el servidor expone las 11 herramientas y su stdout es solo protocolo', async () => {
   const e = montarEscenario();
   const s = iniciarServidor(e);
   const init = await s.rpc('initialize', { protocolVersion: '2024-11-05' });
@@ -137,7 +137,7 @@ test('el servidor expone las 9 herramientas y su stdout es solo protocolo', asyn
   const { result } = await s.rpc('tools/list');
   assert.deepEqual(
     result.tools.map((t) => t.name).sort(),
-    ['opencode_cancel', 'opencode_cleanup', 'opencode_coding', 'opencode_list', 'opencode_logs', 'opencode_merge', 'opencode_profile', 'opencode_wait', 'opencode_wait_any'],
+    ['opencode_board_get', 'opencode_board_post', 'opencode_cancel', 'opencode_cleanup', 'opencode_coding', 'opencode_list', 'opencode_logs', 'opencode_merge', 'opencode_profile', 'opencode_wait', 'opencode_wait_any'],
   );
   s.proceso.stdin.end();
   const { codigo } = await s.salida;
@@ -383,6 +383,34 @@ test('la salida se recorta por defecto y el parámetro completo: true la recuper
   const completo = await s.llamar('opencode_coding', { prompt: 'y', cwd: e.repo, mode: 'safe', writes: ['src/**'], completo: true });
   assert.equal(completo.isError, false, texto(completo));
   assert.doesNotMatch(texto(completo), /salida completa: opencode_logs/);
+
+  s.proceso.stdin.end();
+  await s.salida;
+});
+
+test('opencode_board_post y opencode_board_get operan sobre el pizarrón vía el protocolo', async () => {
+  const e = montarEscenario();
+  const s = iniciarServidor(e);
+
+  const vacio = await s.llamar('opencode_board_get', {});
+  assert.equal(vacio.isError, false, texto(vacio));
+  assert.match(texto(vacio), /pizarrón v0/);
+
+  const post = await s.llamar('opencode_board_post', { clave: 'contrato.api', valor: { ruta: '/v1' }, nota: 'definido' });
+  assert.equal(post.isError, false, texto(post));
+  assert.match(texto(post), /Publicado 'contrato\.api'/);
+
+  const lista = await s.llamar('opencode_board_get', {});
+  assert.match(texto(lista), /pizarrón v1/);
+  assert.match(texto(lista), /contrato\.api = \{"ruta":"\/v1"\}/);
+
+  const detalle = await s.llamar('opencode_board_get', { clave: 'contrato.api' });
+  assert.match(texto(detalle), /clave: contrato\.api/);
+  assert.match(texto(detalle), /"ruta": "\/v1"/);
+  assert.match(texto(detalle), /nota: definido/);
+
+  const inexistente = await s.llamar('opencode_board_get', { clave: 'no.existe' });
+  assert.match(texto(inexistente), /no existe/);
 
   s.proceso.stdin.end();
   await s.salida;

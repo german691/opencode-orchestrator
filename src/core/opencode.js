@@ -29,6 +29,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { compilar } from './glob.js';
+import { instruccionesParaAgente } from './pizarron.js';
 
 /**
  * Modos de trabajo y su agente de opencode. `auto` no fija agente (usa el de
@@ -357,6 +358,8 @@ function listar(valores, vacio) {
  * @param {string[]} [opciones.reads=[]] patrones que puede leer (informativo)
  * @param {string[]} [opciones.protegidos=[]] patrones que no puede tocar
  * @param {string} [opciones.rutaTrabajo] directorio donde corre (informativo)
+ * @param {boolean} [opciones.pizarron] si el pizarrón del perfil está habilitado: se
+ *   agregan sus instrucciones breves de uso (leer el enlace, aportar sin pisar)
  * @returns {string} encabezado + separador + prompt original
  * @throws {Error} si el prompt o el modo son inválidos
  */
@@ -368,6 +371,7 @@ export function construirPrompt({
   protegidos = [],
   rutaTrabajo,
   prefijo = '',
+  pizarron = false,
 } = {}) {
   if (typeof prompt !== 'string') throw new Error("El prompt debe ser un texto (puede estar vacío)");
   resolverModo(modo);
@@ -392,6 +396,12 @@ export function construirPrompt({
   }
 
   lineas.push(`- NUNCA modifiques estos (estan protegidos): ${listar(protegidos, '(ninguno)')}`);
+
+  // El pizarrón es opt-in por perfil: solo cuando está activo (y el agente puede
+  // escribir) se le explican el enlace de lectura y el aporte en `.orq/aporte.json`.
+  if (pizarron === true && modo !== 'readonly') {
+    lineas.push(instruccionesParaAgente());
+  }
   if (modo !== 'readonly') {
     // Observado en vivo: ante un archivo bloqueado el agente rediseñó el contrato para
     // esquivarlo en vez de avisar, y el trabajo salió torcido. Tiene que parar y reportar.

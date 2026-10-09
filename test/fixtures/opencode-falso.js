@@ -10,6 +10,10 @@
 //   ORQ_FAKE_IGNORA_TERM=1          ignora SIGTERM (para forzar el SIGKILL del grupo)
 //   ORQ_FAKE_NIETO=1                lanza un nieto de larga vida y anota su pid en ORQ_FAKE_PIDFILE
 //   ORQ_FAKE_VOLCADO=<ruta>         vuelca args + variables relevantes + la config apuntada, en JSON
+//   ORQ_FAKE_REVISOR=<texto>        si la invocación es del REVISOR (su prompt exige VEREDICTO:),
+//                                   imprime este texto y sale (vacío = respuesta ilegible)
+//   ORQ_FAKE_REVISOR_CODIGO=<n>     código de salida del revisor (por defecto 0)
+//   ORQ_FAKE_REVISOR_DORMIR=<ms>    espera antes de responder como revisor (para forzar timeout)
 //
 // Proceso auxiliar, no prueba: el runner de tests de node ejecuta todo .js bajo test/.
 import fs from 'node:fs';
@@ -32,6 +36,21 @@ if (env.ORQ_FAKE_IGNORA_TERM === '1') {
   process.on('SIGTERM', () => {
     /* ignora a propósito para forzar SIGKILL */
   });
+}
+
+// 0) Revisor automático: SOLO cuando la invocación es del revisor (su prompt siempre
+// exige un `VEREDICTO:`), se devuelve la respuesta fija pedida por ORQ_FAKE_REVISOR y se
+// sale ANTES de escribir archivos pensados para el agente principal. Se discrimina por
+// el prompt y no por una variable extra: así el fixture no obliga a cambiar el gestor.
+const argumentos = process.argv.slice(2);
+const esRevision = argumentos.some(
+  (argumento) => argumento.includes('REVISOR AUTOMÁTICO') || argumento.includes('VEREDICTO: APRUEBA'),
+);
+if (env.ORQ_FAKE_REVISOR !== undefined && esRevision) {
+  const demoraRevision = Math.max(0, Math.trunc(aNumero(env.ORQ_FAKE_REVISOR_DORMIR)));
+  if (demoraRevision > 0) await dormir(demoraRevision);
+  if (env.ORQ_FAKE_REVISOR !== '') process.stdout.write(env.ORQ_FAKE_REVISOR);
+  process.exit(Math.trunc(aNumero(env.ORQ_FAKE_REVISOR_CODIGO)) & 0xff);
 }
 
 // 1) Escribe archivos indicados, creando los directorios necesarios.

@@ -58,6 +58,9 @@ const SETUP_TIMEOUT_MS = 600000;
  */
 export const DIR_ORQ = '.orq';
 
+/** Nombre del symlink de SOLO LECTURA al archivo vivo del pizarrón dentro de `.orq/`. */
+export const ARCHIVO_PIZARRON = 'pizarron.json';
+
 /**
  * Cerrojo en proceso por repositorio (§7). Serializa las operaciones que MUTAN
  * el repositorio (crear/eliminar worktrees, preparar/integrar) porque git usa
@@ -464,6 +467,26 @@ async function limpiarSilencioso(repoRaiz, ruta, rama, rootDir) {
 }
 
 /**
+ * Asegura que el archivo vivo del pizarrón exista antes de enlazarlo desde un worktree.
+ *
+ * POR QUÉ: el primer worktree puede crearse antes de la primera escritura del servidor.
+ * Si el symlink apuntara a un archivo inexistente, el agente que lo lea vería ENOENT. Se
+ * crea vacío con el modelo del propio pizarrón (`leer()`), y de forma atómica (tmp +
+ * rename) para no exponer un JSON a medias si otro proceso lo lee en ese instante.
+ *
+ * @param {{ rutaViva: () => string, leer: () => object }} pizarron
+ * @returns {void}
+ */
+function asegurarPizarronVivo(pizarron) {
+  const ruta = pizarron.rutaViva();
+  if (fs.existsSync(ruta)) return;
+  fs.mkdirSync(path.dirname(ruta), { recursive: true });
+  const temporal = `${ruta}.tmp`;
+  fs.writeFileSync(temporal, JSON.stringify(pizarron.leer(), null, 2), 'utf8');
+  fs.renameSync(temporal, ruta);
+}
+
+/**
  * Crea un worktree aislado en la rama `job/<jobId>` a partir de `base`.
  *
  * Pasos y garantías:
@@ -489,6 +512,8 @@ async function limpiarSilencioso(repoRaiz, ruta, rama, rootDir) {
  * @param {number} [opciones.setupTimeoutMs=600000] tope total por comando de setup
  * @param {number} [opciones.idleTimeoutMs] tope sin salida por comando de setup
  * @param {AbortSignal} [opciones.signal] cancelación del setup
+ * @param {{ rutaViva: () => string, leer: () => object }} [opciones.pizarron] pizarrón
+ *   compartido: si se indica, crea el symlink `.orq/pizarron.json` hacia su archivo vivo
  * @returns {Promise<{ ruta: string, rama: string, baseCommit: string, enlacesCreados: string[], enlacesOmitidos: string[] }>}
  * @throws {ErrorDeWorkspace}
  */
@@ -504,6 +529,7 @@ export async function crearWorktree({
   setupTimeoutMs = SETUP_TIMEOUT_MS,
   idleTimeoutMs,
   signal,
+  pizarron,
 } = {}) {
   const id = validarJobId(jobId);
   validarRama(base, 'base');
@@ -589,6 +615,14 @@ export async function crearWorktree({
     // servidor las ejecuta/restaura; que git lo vea sería un cambio ajeno al alcance.
     fs.mkdirSync(path.join(creado.ruta, DIR_ORQ), { recursive: true });
     await agregarExcludeLocal(creado.ruta, [`${DIR_ORQ}/`]);
+
+    // Pizarrón compartido: enlace de SOLO LECTURA al archivo vivo. El servidor es el
+    // único que escribe (atómico con rename); el agente lee por el symlink y deja sus
+    // aportes en su propio `.orq/aporte.json`. Sin pizarrón no se crea nada.
+    if (pizarron && typeof pizarron.rutaViva === 'function') {
+      asegurarPizarronVivo(pizarron);
+      fs.symlinkSync(pizarron.rutaViva(), path.join(creado.ruta, DIR_ORQ, ARCHIVO_PIZARRON), 'file');
+    }
 
     for (let indice = 0; indice < link.length; indice += 1) {
       const relativa = validarRutaRelativa(link[indice], indice);
