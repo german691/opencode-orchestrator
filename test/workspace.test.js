@@ -557,6 +557,32 @@ test('crearWorktree no escribe en info/exclude y el enlace no aparece en cambios
   assert.equal(fs.readFileSync(exclude, 'utf8'), antes, 'sigue sin tocarse tras el commit');
 });
 
+test('crearWorktree crea .orq vacío, lo excluye en SU gitdir y es invisible para cambios/commit', async () => {
+  const { raiz, baseCommit, rootDir } = await montar();
+  const res = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'orq1', rootDir });
+
+  // El directorio reservado existe y está vacío.
+  assert.equal(fs.statSync(path.join(res.ruta, '.orq')).isDirectory(), true);
+  assert.deepEqual(fs.readdirSync(path.join(res.ruta, '.orq')), []);
+
+  // El exclude se escribe en el gitdir del WORKTREE, nunca en el info/exclude compartido.
+  const gitdir = (await gitOK(['rev-parse', '--git-dir'], res.ruta)).trim();
+  const excludeWorktree = path.resolve(res.ruta, gitdir, 'info', 'exclude');
+  assert.match(fs.readFileSync(excludeWorktree, 'utf8'), /^\.orq\/$/m);
+  const excludeMain = path.join(raiz, '.git', 'info', 'exclude');
+  assert.doesNotMatch(fs.readFileSync(excludeMain, 'utf8'), /\.orq/);
+
+  // Un archivo en `.orq` no cuenta como cambio ni entra al commit.
+  fs.writeFileSync(path.join(res.ruta, '.orq', 'mutaciones.json'), '{}');
+  fs.writeFileSync(path.join(res.ruta, 'real.txt'), 'r\n');
+  const { archivos } = await cambiosDelWorktree({ ruta: res.ruta, baseCommit });
+  assert.deepEqual(archivos, ['real.txt']);
+  const commit = await commitearTrabajo({ ruta: res.ruta, mensaje: 't', autor: 'T <t@t>', soloArchivos: archivos });
+  assert.match(commit, /^[0-9a-f]{40}$/);
+  const arbol = await gitOK(['ls-tree', '-r', '--name-only', 'HEAD'], res.ruta);
+  assert.equal(arbol.includes('.orq'), false);
+});
+
 // --- W4: setup con tope de tiempo y cancelable -------------------------------
 
 test('crearWorktree: un setup que cuelga expira, limpia worktree/rama y no deja procesos', async () => {

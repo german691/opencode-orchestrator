@@ -362,3 +362,17 @@ test('escriturasEnRutaProtegida: proteger migraciones por nombre deja agregar un
   assert.deepEqual(escriturasEnRutaProtegida(['backend/prisma/migrations/20261008*/**'], protegidos), []);
   assert.equal(escriturasEnRutaProtegida(['backend/prisma/migrations/0001_init/**'], protegidos).length, 1);
 });
+
+test('verificarCambios ignora el directorio reservado .orq (manifiesto de mutaciones)', () => {
+  // `.orq` no es un cambio del trabajo: no puede violar el alcance ni siquiera en readonly.
+  assert.deepEqual(
+    verificarCambios({ archivosCambiados: ['.orq/mutaciones.json', 'subA/x.js'], writes: ['subA/**'], protegidos: [] }),
+    { ok: true, violaciones: [] },
+  );
+  assert.equal(
+    verificarCambios({ archivosCambiados: ['.orq/mutaciones.json'], writes: [], protegidos: [], modo: 'readonly' }).ok,
+    true,
+  );
+  // Un archivo fuera de `.orq` sigue marcándose: el filtro no es un agujero.
+  assert.equal(verificarCambios({ archivosCambiados: ['otro/x.js'], writes: ['subA/**'] }).ok, false);
+});

@@ -401,3 +401,12 @@ test('construirPrompt pide acotar la exploración (salvo en readonly)', () => {
   assert.match(construirPrompt({ prompt: 'x', modo: 'safe', writes: ['a'] }), /No explores el repositorio entero/);
   assert.doesNotMatch(construirPrompt({ prompt: 'x', modo: 'readonly' }), /No explores el repositorio entero/);
 });
+
+test('construirPrompt pide declarar mutaciones en .orq en vez de mutar a mano (salvo readonly)', () => {
+  const texto = construirPrompt({ prompt: 'x', modo: 'safe', writes: ['a'] });
+  assert.match(texto, /NO mutes archivos a mano/);
+  assert.match(texto, /\.orq\/mutaciones\.json/);
+  assert.match(texto, /MUTACION: detectada N\/M/);
+  assert.match(texto, /"buscar":"texto exacto"/);
+  assert.doesNotMatch(construirPrompt({ prompt: 'x', modo: 'readonly' }), /NO mutes archivos a mano/);
+});

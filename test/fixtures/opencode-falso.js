@@ -45,6 +45,17 @@ for (const relativa of archivos) {
   fs.writeFileSync(destino, `escrito por opencode-falso: ${relativa}\n`);
 }
 
+// 1b) Archivos con CONTENIDO exacto: `ORQ_FAKE_ESCRIBIR_CONTENIDO='[{"ruta":"...","contenido":"..."}]'`.
+// Se usa para el manifiesto de mutaciones (`.orq/mutaciones.json`), que debe ser JSON válido.
+const conContenido = String(env.ORQ_FAKE_ESCRIBIR_CONTENIDO || '');
+if (conContenido !== '') {
+  for (const item of JSON.parse(conContenido)) {
+    const destino = path.resolve(process.cwd(), item.ruta);
+    fs.mkdirSync(path.dirname(destino), { recursive: true });
+    fs.writeFileSync(destino, item.contenido);
+  }
+}
+
 // 2) Nieto de larga vida (mismo grupo de procesos); anota su pid.
 if (env.ORQ_FAKE_NIETO === '1') {
   const nieto = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });

@@ -370,3 +370,47 @@ test('validarPerfil: reanudacion inválida se acumula con la ruta del campo', ()
   );
   assert.throws(() => validarPerfil({ ...base, reanudacion: [] }), /reanudacion/);
 });
+
+test('validarPerfil: mutaciones opcional con defaults y errores claros', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.deepEqual(validarPerfil(base).mutaciones, { habilitado: true, exigirTodas: false, timeoutMs: 300000 });
+  assert.deepEqual(
+    validarPerfil({ ...base, mutaciones: { exigirTodas: true, timeoutMs: 1000 } }).mutaciones,
+    { habilitado: true, exigirTodas: true, timeoutMs: 1000 },
+  );
+  assert.throws(() => validarPerfil({ ...base, mutaciones: [] }), /mutaciones: debe ser un objeto/);
+  assert.throws(() => validarPerfil({ ...base, mutaciones: { habilitado: 'si' } }), /mutaciones\.habilitado/);
+  assert.throws(() => validarPerfil({ ...base, mutaciones: { exigirTodas: 1 } }), /mutaciones\.exigirTodas/);
+  assert.throws(() => validarPerfil({ ...base, mutaciones: { timeoutMs: 0 } }), /mutaciones\.timeoutMs/);
+  assert.throws(() => validarPerfil({ ...base, mutaciones: { raro: 1 } }), /mutaciones\.raro: campo desconocido/);
+});
+
+test('validarPerfil: accept admite una compuerta paralela y valida su recurso', () => {
+  const base = { version: 1, name: 'sistema' };
+  const recurso = { kind: 'postgres-db', adminUrlEnv: 'ADMIN', name: 'db_{job}_{shard}_test', exportAs: 'TEST_DATABASE_URL' };
+  const perfil = validarPerfil({
+    ...base,
+    resources: { db: recurso },
+    accept: { fragmentos: { paralelo: { shards: 2, comando: 'vitest --shard={i}/{n}', recurso: 'db' } } },
+  });
+  assert.equal(perfil.accept.fragmentos.paralelo.shards, 2);
+  // Sin recurso también es válido (solo fragmenta el comando).
+  assert.doesNotThrow(() => validarPerfil({ ...base, accept: { partido: { paralelo: { shards: 3, comando: 'x {i}' } } } }));
+  // shards fuera de rango y comando sin '{i}': delegan en normalizarParalelo.
+  assert.throws(() => validarPerfil({ ...base, accept: { p: { paralelo: { shards: 1, comando: 'x {i}' } } } }), /accept\.p: .*shards/);
+  assert.throws(() => validarPerfil({ ...base, accept: { p: { paralelo: { shards: 2, comando: 'sin indice' } } } }), /accept\.p: .*'\{i\}'/);
+  assert.throws(() => validarPerfil({ ...base, accept: { p: 42 } }), /accept\.p: debe ser un texto o un objeto/);
+  // Recurso inexistente, de kind equivocado o sin '{shard}'.
+  assert.throws(
+    () => validarPerfil({ ...base, accept: { p: { paralelo: { shards: 2, comando: 'x {i}', recurso: 'nope' } } } }),
+    /accept\.p\.paralelo\.recurso: el recurso 'nope' no está declarado/,
+  );
+  assert.throws(
+    () => validarPerfil({ ...base, resources: { db: { kind: 'mysql' } }, accept: { p: { paralelo: { shards: 2, comando: 'x {i}', recurso: 'db' } } } }),
+    /accept\.p\.paralelo\.recurso: 'db' debe ser de kind postgres-db/,
+  );
+  assert.throws(
+    () => validarPerfil({ ...base, resources: { db: { ...recurso, name: 'db_{job}_test' } }, accept: { p: { paralelo: { shards: 2, comando: 'x {i}', recurso: 'db' } } } }),
+    /accept\.p\.paralelo\.recurso: el name de 'db' debe contener '\{shard\}'/,
+  );
+});

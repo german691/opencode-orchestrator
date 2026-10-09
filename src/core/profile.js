@@ -9,6 +9,7 @@
  */
 
 import { compilar } from './glob.js';
+import { normalizarParalelo } from './paralelo.js';
 import { configReanudacion } from './reanudacion.js';
 import { homedir } from 'node:os';
 
@@ -48,7 +49,18 @@ const CLAVES_PERFIL = new Set([
   'resources',
   'accept',
   'reanudacion',
+  'mutaciones',
 ]);
+
+/** Campos permitidos dentro de `mutaciones`. */
+const CLAVES_MUTACIONES = new Set(['habilitado', 'exigirTodas', 'timeoutMs']);
+
+/** Topes del tope de tiempo de una corrida de mutaciones (1 s a 1 h). */
+const MIN_TIMEOUT_MUTACIONES = 1000;
+const MAX_TIMEOUT_MUTACIONES = 60 * 60 * 1000;
+
+/** Valores por defecto de la sección opcional `mutaciones`. */
+const MUTACIONES_POR_DEFECTO = Object.freeze({ habilitado: true, exigirTodas: false, timeoutMs: 300000 });
 
 /** Campos permitidos dentro de `worktrees`. */
 const CLAVES_WORKTREES = new Set(['root', 'link', 'linkConCopia', 'setup']);
@@ -331,8 +343,66 @@ export function validarPerfil(objeto) {
       errores.push('accept: debe ser un objeto');
     } else {
       for (const [clave, valor] of Object.entries(objeto.accept)) {
-        if (typeof valor !== 'string') errores.push(`accept.${clave}: debe ser un texto`);
+        const base = `accept.${clave}`;
+        if (typeof valor === 'string') continue;
+        if (!esObjetoPlano(valor)) {
+          errores.push(`${base}: debe ser un texto o un objeto { paralelo }`);
+          continue;
+        }
+        // Compuerta en fragmentos: se valida con el MISMO módulo que la ejecuta.
+        let normalizado;
+        try {
+          normalizado = normalizarParalelo(valor);
+        } catch (error) {
+          errores.push(`${base}: ${error.message}`);
+          continue;
+        }
+        // Si la aceptación usa un recurso, tiene que ser una base `postgres-db` con `{shard}`:
+        // cada fragmento corre su propia base, así que la instancia única no sirve.
+        if (normalizado.recurso !== undefined) {
+          const recurso = esObjetoPlano(objeto.resources) ? objeto.resources[normalizado.recurso] : undefined;
+          if (!esObjetoPlano(recurso)) {
+            errores.push(`${base}.paralelo.recurso: el recurso '${normalizado.recurso}' no está declarado en resources`);
+          } else if (recurso.kind !== 'postgres-db') {
+            errores.push(`${base}.paralelo.recurso: '${normalizado.recurso}' debe ser de kind postgres-db`);
+          } else if (typeof recurso.name !== 'string' || !recurso.name.includes('{shard}')) {
+            errores.push(`${base}.paralelo.recurso: el name de '${normalizado.recurso}' debe contener '{shard}'`);
+          }
+        }
       }
+    }
+  }
+
+  // Sección opcional `mutaciones`: el agente declara en `.orq/mutaciones.json` cambios de
+  // texto; el servidor los aplica, corre el comando y restaura. `exigirTodas` convierte una
+  // mutación no detectada en rechazo; `habilitado: false` desactiva la ejecución.
+  let mutaciones = { ...MUTACIONES_POR_DEFECTO };
+  if (objeto.mutaciones !== undefined) {
+    if (!esObjetoPlano(objeto.mutaciones)) {
+      errores.push('mutaciones: debe ser un objeto');
+    } else {
+      for (const clave of Object.keys(objeto.mutaciones)) {
+        if (!CLAVES_MUTACIONES.has(clave)) errores.push(`mutaciones.${clave}: campo desconocido`);
+      }
+      if (objeto.mutaciones.habilitado !== undefined && typeof objeto.mutaciones.habilitado !== 'boolean') {
+        errores.push('mutaciones.habilitado: debe ser un booleano');
+      }
+      if (objeto.mutaciones.exigirTodas !== undefined && typeof objeto.mutaciones.exigirTodas !== 'boolean') {
+        errores.push('mutaciones.exigirTodas: debe ser un booleano');
+      }
+      if (objeto.mutaciones.timeoutMs !== undefined) {
+        const t = objeto.mutaciones.timeoutMs;
+        if (!Number.isFinite(t) || t < MIN_TIMEOUT_MUTACIONES || t > MAX_TIMEOUT_MUTACIONES) {
+          errores.push(
+            `mutaciones.timeoutMs: debe ser un número de milisegundos entre ${MIN_TIMEOUT_MUTACIONES} y ${MAX_TIMEOUT_MUTACIONES}`,
+          );
+        }
+      }
+      mutaciones = {
+        habilitado: objeto.mutaciones.habilitado ?? MUTACIONES_POR_DEFECTO.habilitado,
+        exigirTodas: objeto.mutaciones.exigirTodas ?? MUTACIONES_POR_DEFECTO.exigirTodas,
+        timeoutMs: objeto.mutaciones.timeoutMs ?? MUTACIONES_POR_DEFECTO.timeoutMs,
+      };
     }
   }
 
@@ -379,6 +449,8 @@ export function validarPerfil(objeto) {
     accept: objeto.accept ? { ...objeto.accept } : {},
     // Política de reanudación ante corte de transporte (socket cerrado) del agente.
     reanudacion,
+    // Ejecución de mutaciones declaradas por el agente en `.orq/mutaciones.json`.
+    mutaciones,
   };
 }
 
@@ -439,6 +511,7 @@ export function perfilPorDefecto(nombreRepo) {
     resources: {},
     accept: {},
     reanudacion: { habilitado: true, maxRelanzamientos: 1 },
+    mutaciones: { ...MUTACIONES_POR_DEFECTO },
   };
 }
 
