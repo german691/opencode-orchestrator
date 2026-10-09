@@ -27,11 +27,11 @@ pre{background:var(--code);color:var(--codefg);padding:10px;border-radius:6px;ov
 .err{border-left:4px solid var(--bad)}h2{font-size:14px;margin:14px 0 6px}
 button{font:inherit;padding:2px 8px}
 </style></head><body>
-<header><h1>Trabajos de opencode</h1><span id="meta">cargando…</span></header>
+<header><h1>Trabajos de opencode</h1><a href="/auditoria">Auditoría</a><span id="meta">cargando…</span></header>
 <main><section id="lista"></section><section id="detalle"><p>Elegí un trabajo.</p></section></main>
 <script>
 const el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e};
-let sel=null,seguir=true;
+let sel=new URLSearchParams(location.search).get('job'),seguir=true;
 const dur=s=>{if(s==null)return '–';const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?h+'h '+m+'m':m?m+'m '+(s%60)+'s':s+'s'};
 const MOTIVOS={dependencia:'espera sus dependencias',concurrencia:'tope de concurrencia',recurso:'espera un recurso compartido (base de datos)',solapa_alcance:'sus writes se solapan con otro trabajo',veterano_adelante:'otro trabajo más antiguo va primero'};
 const textoEspera=e=>(MOTIVOS[e.motivo]||e.motivo)+(e.por&&e.por.length?' ['+e.por.join(', ')+']':'');
@@ -80,3 +80,84 @@ async function pintarDetalle(){
 async function ciclo(){await pintarLista();await pintarDetalle()}
 ciclo();setInterval(ciclo,2500);
 </script></body></html>`;
+
+/** Escapa texto para insertarlo en HTML (la auditoría muestra datos leídos de disco). */
+function escaparHtml(valor) {
+  return String(valor ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+/** Hora en ISO UTC: estable para tests y para comparar entre máquinas. */
+function horaEvento(ts) {
+  const n = Number(ts);
+  return Number.isFinite(n) ? new Date(n).toISOString() : '';
+}
+
+/** Columna estado: muestra `anterior → nuevo` cuando hay transición. */
+function estadoEvento(evento) {
+  if (evento.anterior !== undefined && evento.estado !== undefined) {
+    return `${evento.anterior} → ${evento.estado}`;
+  }
+  return evento.estado !== undefined ? evento.estado : '';
+}
+
+/**
+ * Página de auditoría (HTML plano, renderizado en el servidor, sin JS pesado).
+ * Los filtros viajan por query string y se reenvían al registro.
+ * @param {{ eventos?: object[], tipos?: readonly string[], filtros?: object, disponible?: boolean }} [datos]
+ * @returns {string}
+ */
+export function paginaAuditoria({ eventos = [], tipos = [], filtros = {}, disponible = true } = {}) {
+  const opciones = ['', ...tipos]
+    .map((t) => {
+      const sel = t === filtros.tipo ? ' selected' : '';
+      return `<option value="${escaparHtml(t)}"${sel}>${escaparHtml(t || 'todos')}</option>`;
+    })
+    .join('');
+  const filas = eventos
+    .map((e) => {
+      const trabajo = e.jobId
+        ? `<a href="/?job=${encodeURIComponent(e.jobId)}">${escaparHtml(e.jobId)}</a>`
+        : '';
+      return `<tr><td>${escaparHtml(horaEvento(e.ts))}</td><td>${escaparHtml(e.tipo)}</td>` +
+        `<td>${trabajo}</td><td>${escaparHtml(estadoEvento(e))}</td>` +
+        `<td>${escaparHtml(e.motivo)}</td><td>${escaparHtml(e.actor)}</td></tr>`;
+    })
+    .join('');
+  const cuerpo = disponible
+    ? `<table><thead><tr><th>hora</th><th>tipo</th><th>trabajo</th><th>estado</th><th>motivo</th><th>actor</th></tr></thead><tbody>${filas}</tbody></table>`
+    : '<p>Auditoría no disponible</p>';
+  return `<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Auditoría de opencode</title>
+<style>
+:root{--bg:#f5f6f8;--fg:#1d2330;--card:#fff;--bd:#d9dde4;--mut:#6b7385;--code:#10141c}
+@media(prefers-color-scheme:dark){:root{--bg:#12151c;--fg:#e3e7ef;--card:#1b2029;--bd:#2c3340;--mut:#8f99ad}}
+*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+header{padding:12px 16px;border-bottom:1px solid var(--bd);display:flex;gap:12px;align-items:baseline}
+h1{font-size:16px;margin:0}a{color:inherit}
+main{padding:12px}
+form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+input,select,button{font:inherit;padding:3px 6px;background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:4px}
+table{border-collapse:collapse;width:100%;background:var(--card)}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd);font-size:13px;vertical-align:top}
+th{color:var(--mut);font-weight:600}
+</style></head><body>
+<header><h1>Auditoría de opencode</h1><a href="/">← Trabajos</a></header>
+<main>
+<form method="get" action="/auditoria">
+<label>trabajo <input name="jobId" value="${escaparHtml(filtros.jobId ?? '')}"></label>
+<label>tipo <select name="tipo">${opciones}</select></label>
+<label>desde <input name="desde" value="${escaparHtml(filtros.desde ?? '')}" size="14"></label>
+<label>hasta <input name="hasta" value="${escaparHtml(filtros.hasta ?? '')}" size="14"></label>
+<button type="submit">Filtrar</button>
+<a href="/auditoria">Recargar</a>
+</form>
+${cuerpo}
+</main></body></html>`;
+}

@@ -6,12 +6,15 @@
  * en el directorio de estado y no usa dependencias.
  *
  * Rutas: GET /            página
+ *        GET /auditoria               página de auditoría (registro de eventos)
  *        GET /api/trabajos            lista con semáforo de atasco
  *        GET /api/trabajos/:id        detalle (transcript, respuesta, fallos)
+ *        GET /api/eventos             eventos de auditoría filtrables
  */
 import http from 'node:http';
 import { directorioEstado, listarTrabajos, detalleDeTrabajo, idValido } from './datos.js';
-import { PAGINA } from './pagina.js';
+import { PAGINA, paginaAuditoria } from './pagina.js';
+import { TIPOS } from '../core/eventos.js';
 
 function responderJson(res, estado, cuerpo) {
   const texto = JSON.stringify(cuerpo);
@@ -22,11 +25,34 @@ function responderJson(res, estado, cuerpo) {
   res.end(texto);
 }
 
+/** Convierte un parámetro de query a número finito; `undefined` si viene vacío. */
+function numeroDeQuery(valor) {
+  if (valor === null || valor === '') return undefined;
+  const n = Number(valor);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** Extrae los filtros soportados por el registro desde el query string. */
+function leerFiltros(params) {
+  const filtros = {};
+  const jobId = params.get('jobId');
+  const tipo = params.get('tipo');
+  const desde = numeroDeQuery(params.get('desde'));
+  const hasta = numeroDeQuery(params.get('hasta'));
+  const limite = numeroDeQuery(params.get('limite'));
+  if (jobId) filtros.jobId = jobId;
+  if (tipo) filtros.tipo = tipo;
+  if (desde !== undefined) filtros.desde = desde;
+  if (hasta !== undefined) filtros.hasta = hasta;
+  if (limite !== undefined) filtros.limite = limite;
+  return filtros;
+}
+
 /**
  * Crea (sin escuchar) el servidor del panel.
- * @param {{ baseDir?: string, ahora?: () => number }} [opciones]
+ * @param {{ baseDir?: string, ahora?: () => number, registro?: object }} [opciones]
  */
-export function crearServidorPanel({ baseDir, ahora = Date.now } = {}) {
+export function crearServidorPanel({ baseDir, ahora = Date.now, registro } = {}) {
   const dirTrabajos = `${baseDir ?? directorioEstado()}/jobs`;
   return http.createServer((req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -34,11 +60,27 @@ export function crearServidorPanel({ baseDir, ahora = Date.now } = {}) {
       res.end();
       return;
     }
-    const { pathname } = new URL(req.url ?? '/', 'http://localhost');
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const { pathname } = url;
     try {
       if (pathname === '/') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
         res.end(PAGINA);
+        return;
+      }
+      if (pathname === '/auditoria') {
+        const filtros = leerFiltros(url.searchParams);
+        const eventos = registro ? registro.listar(filtros) : [];
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(paginaAuditoria({ eventos, tipos: registro?.tipos ?? TIPOS, filtros, disponible: Boolean(registro) }));
+        return;
+      }
+      if (pathname === '/api/eventos') {
+        if (!registro) {
+          responderJson(res, 503, { error: 'auditoría no disponible' });
+          return;
+        }
+        responderJson(res, 200, { ahora: ahora(), eventos: registro.listar(leerFiltros(url.searchParams)) });
         return;
       }
       if (pathname === '/api/trabajos') {
