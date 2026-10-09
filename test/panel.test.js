@@ -119,7 +119,13 @@ test('servidor: sirve página y API, rechaza escrituras y no modifica el estado'
   try {
     const pagina = await fetch(`${url}/`);
     assert.equal(pagina.status, 200);
-    assert.match(await pagina.text(), /Trabajos de opencode/);
+    const html = await pagina.text();
+    assert.match(html, /Trabajos de opencode/);
+    assert.match(html, /lang="es"/);
+    assert.match(html, /Saltar al contenido/);
+    assert.match(html, /\/static\/app\.css/);
+    assert.match(html, /\/static\/app\.js/);
+    assert.equal(pagina.headers.get('x-content-type-options'), 'nosniff');
     const lista = await (await fetch(`${url}/api/trabajos`)).json();
     assert.equal(lista.trabajos[0].id, 'abc');
     const det = await (await fetch(`${url}/api/trabajos/abc`)).json();

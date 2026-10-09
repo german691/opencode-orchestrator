@@ -1,0 +1,144 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { crearServidorPanel } from '../src/panel/servidor.js';
+import { PAGINA } from '../src/panel/pagina.js';
+import { CLIENTE } from '../src/panel/cliente.js';
+
+const AHORA = 1_800_000_000_000;
+
+function crearBase() {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'panel-ui-'));
+  fs.mkdirSync(path.join(base, 'jobs'));
+  return base;
+}
+
+async function conServidor(fn) {
+  const servidor = crearServidorPanel({ baseDir: crearBase(), ahora: () => AHORA });
+  await new Promise((r) => servidor.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${servidor.address().port}`;
+  try {
+    await fn(url);
+  } finally {
+    await new Promise((r) => servidor.close(r));
+  }
+}
+
+test('shell: landmarks, skip link, lang y referencias estáticas sin código en línea', async () => {
+  await conServidor(async (url) => {
+    const html = await (await fetch(`${url}/`)).text();
+    assert.match(html, /<html lang="es">/);
+    assert.match(html, /<header/);
+    assert.match(html, /<nav/);
+    assert.match(html, /<main/);
+    assert.match(html, /Saltar al contenido/);
+    assert.match(html, /href="\/static\/app\.css"/);
+    assert.match(html, /src="\/static\/app\.js"/);
+    assert.doesNotMatch(html, /onclick=/i);
+    assert.doesNotMatch(html, /javascript:/i);
+    // La CSP prohíbe estilos/scripts en línea: el shell no debe traerlos.
+    assert.doesNotMatch(html, /<style/i);
+    assert.doesNotMatch(html, /<script>[^<]/i);
+  });
+});
+
+test('HTML: CSP restrictiva y nosniff en las páginas', async () => {
+  await conServidor(async (url) => {
+    const respuesta = await fetch(`${url}/`);
+    const csp = respuesta.headers.get('content-security-policy');
+    assert.ok(csp, 'falta content-security-policy');
+    assert.match(csp, /default-src 'self'/);
+    assert.match(csp, /style-src 'self'/);
+    assert.match(csp, /script-src 'self'/);
+    assert.match(csp, /connect-src 'self'/);
+    assert.match(csp, /img-src 'self' data:/);
+    assert.equal(respuesta.headers.get('x-content-type-options'), 'nosniff');
+
+    const audit = await fetch(`${url}/auditoria`);
+    assert.equal(audit.headers.get('x-content-type-options'), 'nosniff');
+    assert.match(audit.headers.get('content-security-policy'), /default-src 'self'/);
+  });
+});
+
+test('estáticos: MIME correcto, ETag y 304 al revalidar', async () => {
+  const esperados = [
+    ['/static/app.css', /^text\/css/],
+    ['/static/app.js', /^text\/javascript/],
+    ['/static/lib.js', /^text\/javascript/],
+  ];
+  await conServidor(async (url) => {
+    for (const [ruta, tipo] of esperados) {
+      const respuesta = await fetch(`${url}${ruta}`);
+      assert.equal(respuesta.status, 200, ruta);
+      assert.match(respuesta.headers.get('content-type'), tipo, ruta);
+      assert.equal(respuesta.headers.get('cache-control'), 'no-cache', ruta);
+      const etag = respuesta.headers.get('etag');
+      assert.ok(etag, `sin ETag en ${ruta}`);
+      assert.ok((await respuesta.text()).length > 0, ruta);
+
+      const revalidada = await fetch(`${url}${ruta}`, { headers: { 'if-none-match': etag } });
+      assert.equal(revalidada.status, 304, ruta);
+    }
+    // Un estático inexistente sigue dando 404.
+    assert.equal((await fetch(`${url}/static/nope.js`)).status, 404);
+  });
+});
+
+test('estilos: tokens de tema claro/oscuro y accesibilidad presentes', async () => {
+  await conServidor(async (url) => {
+    const css = await (await fetch(`${url}/static/app.css`)).text();
+    assert.match(css, /:root\s*\{/);
+    assert.match(css, /prefers-color-scheme:dark/);
+    assert.match(css, /prefers-reduced-motion:reduce/);
+    assert.match(css, /forced-colors:active/);
+    assert.match(css, /--esp:4px/);
+    const lib = await (await fetch(`${url}/static/lib.js`)).text();
+    assert.match(lib, /export function formatearDuracion/);
+    assert.match(lib, /export function parsearParche/);
+  });
+});
+
+test('cliente: pasa node --check y trae atajos y ARIA esperados', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'panel-cliente-'));
+  const archivo = path.join(dir, 'app.mjs');
+  fs.writeFileSync(archivo, CLIENTE);
+  // node --check valida la sintaxis del módulo tal como lo cargaría el navegador.
+  execFileSync(process.execPath, ['--check', archivo]);
+
+  assert.match(CLIENTE, /from '\/static\/lib\.js'/);
+  // Atajos j/k, /, f y ?.
+  assert.match(CLIENTE, /evento\.key === 'j'/);
+  assert.match(CLIENTE, /evento\.key === 'k'/);
+  assert.match(CLIENTE, /evento\.key === 'f'/);
+  assert.match(CLIENTE, /evento\.key === '\?'/);
+  assert.match(CLIENTE, /evento\.key === '\/'/);
+  // ARIA que el cliente mantiene dinámicamente.
+  assert.match(CLIENTE, /aria-selected/);
+  assert.match(CLIENTE, /aria-current/);
+  assert.match(CLIENTE, /aria-pressed/);
+  assert.match(CLIENTE, /anunciar/);
+
+  // El shell aporta los roles de pestañas, la región en vivo y el diálogo de ayuda.
+  assert.match(PAGINA, /role="tablist"/);
+  assert.match(PAGINA, /role="tab"/);
+  assert.match(PAGINA, /role="tabpanel"/);
+  assert.match(PAGINA, /aria-live="polite"/);
+  assert.match(PAGINA, /<dialog/);
+});
+
+test('auditoría: usa el CSS nuevo y el mismo shell accesible', async () => {
+  await conServidor(async (url) => {
+    const html = await (await fetch(`${url}/auditoria`)).text();
+    assert.match(html, /<html lang="es">/);
+    assert.match(html, /Auditoría de opencode/);
+    assert.match(html, /href="\/static\/app\.css"/);
+    assert.match(html, /Saltar al contenido/);
+    assert.match(html, /<main/);
+    assert.doesNotMatch(html, /<style/i);
+    assert.doesNotMatch(html, /onclick=/i);
+    assert.doesNotMatch(html, /javascript:/i);
+  });
+});

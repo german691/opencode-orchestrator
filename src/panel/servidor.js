@@ -19,6 +19,8 @@
  */
 import http from 'node:http';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import {
   directorioEstado,
   listarTrabajos,
@@ -35,7 +37,53 @@ import { leerRango, archivoDeFuente, LIMITE_MAX } from './logs.js';
 import { diffDeTrabajo } from './diff.js';
 import { crearFlujoEventos } from './stream.js';
 import { PAGINA, paginaAuditoria } from './pagina.js';
+import { ESTILOS } from './estilos.js';
+import { CLIENTE } from './cliente.js';
 import { TIPOS } from '../core/eventos.js';
+
+// El cliente importa la librería pura como módulo ES desde `/static/lib.js`; se
+// sirve el mismo archivo que importan los tests, leído tal cual para no duplicarlo.
+const LIB = readFileSync(new URL('./cliente-lib.js', import.meta.url), 'utf8');
+
+/**
+ * CSP restrictiva del panel: sin recursos ni código en línea (todo sale de
+ * `/static/*` o de la propia API). Se aplica a las páginas HTML.
+ */
+const CSP = "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:";
+
+/** Cabeceras de las páginas HTML (CSP + anti sniffing). */
+const CABECERAS_HTML = {
+  'content-type': 'text/html; charset=utf-8',
+  'cache-control': 'no-store',
+  'content-security-policy': CSP,
+  'x-content-type-options': 'nosniff',
+};
+
+/** ETag fuerte y estable del contenido estático (permite 304 al revalidar). */
+function etagDe(texto) {
+  return `"${createHash('sha1').update(texto).digest('hex')}"`;
+}
+
+/**
+ * Sirve contenido estático con `no-cache` + ETag. POR QUÉ `no-cache` y no
+ * `no-store`: el navegador puede revalidar y recibir 304 sin volver a bajar el
+ * cuerpo, que es lo óptimo para un panel que se recarga seguido.
+ */
+function servirEstatico(req, res, contenido, tipo) {
+  const etag = etagDe(contenido);
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, { etag, 'cache-control': 'no-cache' });
+    res.end();
+    return;
+  }
+  res.writeHead(200, {
+    'content-type': tipo,
+    'cache-control': 'no-cache',
+    etag,
+    'x-content-type-options': 'nosniff',
+  });
+  res.end(contenido);
+}
 
 function responderJson(res, estado, cuerpo) {
   const texto = JSON.stringify(cuerpo);
@@ -142,15 +190,27 @@ export function crearServidorPanel({ baseDir, ahora = Date.now, registro, concur
     const { pathname } = url;
     try {
       if (pathname === '/') {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+        res.writeHead(200, CABECERAS_HTML);
         res.end(PAGINA);
         return;
       }
       if (pathname === '/auditoria') {
         const filtros = leerFiltros(url.searchParams);
         const eventos = registro ? registro.listar(filtros) : [];
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+        res.writeHead(200, CABECERAS_HTML);
         res.end(paginaAuditoria({ eventos, tipos: registro?.tipos ?? TIPOS, filtros, disponible: Boolean(registro) }));
+        return;
+      }
+      if (pathname === '/static/app.css') {
+        servirEstatico(req, res, ESTILOS, 'text/css; charset=utf-8');
+        return;
+      }
+      if (pathname === '/static/app.js') {
+        servirEstatico(req, res, CLIENTE, 'text/javascript; charset=utf-8');
+        return;
+      }
+      if (pathname === '/static/lib.js') {
+        servirEstatico(req, res, LIB, 'text/javascript; charset=utf-8');
         return;
       }
       if (pathname === '/api/eventos') {
