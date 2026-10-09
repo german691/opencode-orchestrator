@@ -10,7 +10,14 @@
 
 import { ErrorDeGestor } from '../core/gestor.js';
 import { esTerminal } from '../core/estados.js';
-import { describirActivo, describirListado, describirPerfil, describirTerminado } from './formato.js';
+import {
+  describirActivo,
+  describirListado,
+  describirPerfil,
+  describirPizarronClave,
+  describirPizarronLista,
+  describirTerminado,
+} from './formato.js';
 
 const CANALES = ['stdout', 'stderr', 'events', 'aceptacion'];
 
@@ -231,6 +238,63 @@ export function crearHerramientas(gestor, { esperaMs = 45000, ahora = Date.now }
       description: 'Muestra (y valida) el perfil resuelto de un repositorio: rama base, rutas protegidas, recursos, comandos de aceptación y concurrencia.',
       inputSchema: { type: 'object', properties: { cwd: { type: 'string', description: 'Ruta del repositorio.' } }, required: ['cwd'], additionalProperties: false },
       manejar: async (args) => ({ text: describirPerfil(await gestor.verPerfil(args.cwd)), isError: false }),
+    },
+    {
+      name: 'opencode_board_get',
+      description:
+        'Lee el PIZARRÓN COMPARTIDO entre agentes (documento de contratos y decisiones). Sin `clave`: devuelve la versión, ' +
+        'la lista corta de claves con su valor vigente (truncado a 200 caracteres) y las últimas 5 notas. Con `clave`: el ' +
+        'valor completo y su historial. El pizarrón es de SOLO LECTURA para los agentes: ellos aportan en `.orq/aporte.json`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          clave: { type: 'string', description: 'Clave a consultar (opcional). Sin ella se devuelve el resumen del pizarrón.' },
+        },
+        additionalProperties: false,
+      },
+      manejar: async (args) => {
+        if (!gestor?.pizarron) return { text: 'El pizarrón no está disponible en este servidor.', isError: true };
+        const clave = typeof args?.clave === 'string' ? args.clave : '';
+        if (clave !== '') {
+          const doc = gestor.pizarron.leer();
+          return { text: describirPizarronClave(clave, doc.claves?.[clave]), isError: false };
+        }
+        return { text: describirPizarronLista(gestor.pizarron.leer()), isError: false };
+      },
+    },
+    {
+      name: 'opencode_board_post',
+      description:
+        'Publica una clave en el PIZARRÓN COMPARTIDO. El orquestador publica con jobId "orquestador". `valor` es JSON o texto. ' +
+        'Una clave de OTRO trabajo no se pisa por accidente: devuelve conflicto salvo `forzar: true`. `nota` es opcional.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          clave: { type: 'string', description: 'Clave corta (1-80) sin espacios, p. ej. "contrato.api".' },
+          valor: { description: 'Valor a publicar: JSON (objeto/array/número/booleano/null) o texto.' },
+          nota: { type: 'string', description: 'Nota breve (hasta 500 caracteres) para los demás agentes.' },
+          forzar: { type: 'boolean', description: 'Opt-in: pisa la clave aunque sea de otro trabajo.' },
+        },
+        required: ['clave', 'valor'],
+        additionalProperties: false,
+      },
+      manejar: async (args) => {
+        if (!gestor?.pizarron) return { text: 'El pizarrón no está disponible en este servidor.', isError: true };
+        const res = gestor.pizarron.post({
+          clave: args?.clave,
+          valor: args?.valor,
+          nota: args?.nota,
+          jobId: 'orquestador',
+          forzar: args?.forzar === true || args?.forzar === 'true',
+        });
+        if (!res.aplicado && !res.conflicto) {
+          return { text: `No se pudo publicar '${args?.clave}': clave inválida (1-80, sin espacios), valor JSON de hasta 8 KB o nota de hasta 500 caracteres.`, isError: true };
+        }
+        if (res.conflicto && !res.aplicado) {
+          return { text: `CONFLICTO: la clave '${args.clave}' pertenece a otro trabajo y no se pisó. Usá forzar: true si querés reemplazarla.`, isError: true };
+        }
+        return { text: `Publicado '${args.clave}'${res.motivo === 'forzado' ? ' (forzado)' : ''} en el pizarrón.`, isError: false };
+      },
     },
   ];
 }

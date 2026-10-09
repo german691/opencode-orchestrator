@@ -180,6 +180,13 @@ export function describirTerminado(trabajo, colas = {}, { completo = false } = {
       : r.mutaciones.total;
     partes.push(`mutaciones: ${r.mutaciones.detectadas}/${aplicables} detectadas`);
   }
+  // Revisor automático: una línea con el veredicto y hasta 5 observaciones.
+  if (r.revision && typeof r.revision.veredicto === 'string') {
+    partes.push(`revisión: ${r.revision.veredicto}`);
+    for (const observacion of (Array.isArray(r.revision.observaciones) ? r.revision.observaciones : []).slice(0, 5)) {
+      partes.push(`  - ${observacion}`);
+    }
+  }
   if (Array.isArray(r.advertencias) && r.advertencias.length > 0) {
     partes.push(`ADVERTENCIAS:\n${r.advertencias.map((a) => `  - ${a}`).join('\n')}`);
   }
@@ -246,4 +253,77 @@ export function describirPerfil({ repo, archivo, existe, perfil }) {
     existe ? `perfil: ${archivo}` : `perfil: (sin archivo; valores por defecto seguros. Creá ${archivo} para personalizarlo)`,
     JSON.stringify(perfil, null, 2),
   ].join('\n');
+}
+
+/** Tope de caracteres de un valor al listar el pizarrón (los detalles van con `clave`). */
+const MAX_VALOR_PIZARRON = 200;
+
+/** Recorta un texto a `n` caracteres agregando un aviso si se pasó. */
+function truncarTexto(texto, n) {
+  const cadena = typeof texto === 'string' ? texto : String(texto);
+  return cadena.length > n ? `${cadena.slice(0, n)}…` : cadena;
+}
+
+/** Serializa un valor JSON del pizarrón en una sola línea, recortado. */
+function valorCompacto(valor) {
+  let texto;
+  try {
+    texto = JSON.stringify(valor);
+  } catch {
+    texto = String(valor);
+  }
+  if (texto === undefined) texto = String(valor);
+  return truncarTexto(texto, MAX_VALOR_PIZARRON);
+}
+
+/**
+ * Vista compacta del pizarrón sin clave: versión, claves vigentes (valor truncado) y
+ * las últimas 5 notas. POR QUÉ compacta: entra al contexto del orquestador.
+ * @param {object} doc documento del pizarrón (`leer()`)
+ * @returns {string}
+ */
+export function describirPizarronLista(doc) {
+  const claves = Object.keys(doc?.claves ?? {});
+  const lineas = [`pizarrón v${doc?.version ?? 0} | claves=${claves.length}`];
+  if (claves.length === 0) {
+    lineas.push('(sin claves todavía)');
+  } else {
+    for (const clave of claves) {
+      const entrada = doc.claves[clave] ?? {};
+      lineas.push(`${clave} = ${valorCompacto(entrada.valor)}${entrada.jobId ? `  [${entrada.jobId}]` : ''}`);
+    }
+  }
+  const notas = Array.isArray(doc?.notas) ? doc.notas.slice(-5) : [];
+  if (notas.length > 0) {
+    lineas.push('últimas notas:');
+    for (const nota of notas) {
+      const autor = nota?.jobId ? `${nota.jobId}: ` : '';
+      lineas.push(`  - ${autor}${truncarTexto(nota?.texto ?? '', MAX_VALOR_PIZARRON)}`);
+    }
+  }
+  return lineas.join('\n');
+}
+
+/**
+ * Vista completa de una clave del pizarrón: valor vigente (sin truncar) e historial.
+ * @param {string} clave
+ * @param {object|undefined} entrada entrada de la clave
+ * @returns {string}
+ */
+export function describirPizarronClave(clave, entrada) {
+  if (!entrada || typeof entrada !== 'object') return `pizarrón: la clave '${clave}' no existe`;
+  const partes = [
+    `clave: ${clave}`,
+    `valor: ${JSON.stringify(entrada.valor, null, 2)}`,
+    `jobId: ${entrada.jobId ?? '?'}`,
+  ];
+  if (entrada.nota) partes.push(`nota: ${entrada.nota}`);
+  const historial = Array.isArray(entrada.historial) ? entrada.historial : [];
+  partes.push(`historial (${historial.length}):`);
+  for (const item of historial.slice(-10)) {
+    const marca = item?.conflicto ? ' [conflicto]' : '';
+    const nota = item?.nota ? ` (${item.nota})` : '';
+    partes.push(`  - ${item?.ts ?? '?'}: ${valorCompacto(item?.valor)}${nota}${marca}`);
+  }
+  return partes.join('\n');
 }

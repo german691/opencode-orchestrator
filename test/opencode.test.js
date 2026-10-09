@@ -410,3 +410,12 @@ test('construirPrompt pide declarar mutaciones en .orq en vez de mutar a mano (s
   assert.match(texto, /"buscar":"texto exacto"/);
   assert.doesNotMatch(construirPrompt({ prompt: 'x', modo: 'readonly' }), /NO mutes archivos a mano/);
 });
+
+test('construirPrompt solo agrega las instrucciones del pizarrón cuando está habilitado (no en readonly)', () => {
+  assert.doesNotMatch(construirPrompt({ prompt: 'x', modo: 'safe', writes: ['a'] }), /PIZARRÓN COMPARTIDO/);
+  const conPizarron = construirPrompt({ prompt: 'x', modo: 'safe', writes: ['a'], pizarron: true });
+  assert.match(conPizarron, /PIZARRÓN COMPARTIDO/);
+  assert.match(conPizarron, /\.orq\/pizarron\.json/);
+  assert.match(conPizarron, /\.orq\/aporte\.json/);
+  assert.doesNotMatch(construirPrompt({ prompt: 'x', modo: 'readonly', pizarron: true }), /PIZARRÓN COMPARTIDO/);
+});

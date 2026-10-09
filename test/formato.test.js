@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { describirTerminado } from '../src/mcp/formato.js';
+import { describirPizarronClave, describirPizarronLista, describirTerminado } from '../src/mcp/formato.js';
 
 const base = (aceptacion) => ({
   id: 'abc12345',
@@ -111,4 +111,55 @@ test('resultado con mutaciones: línea compacta N/M detectadas (solo si existen)
   };
   assert.match(describirTerminado(conMutaciones), /mutaciones: 1\/2 detectadas/);
   assert.doesNotMatch(describirTerminado({ ...base(null), resultado: {} }), /mutaciones:/);
+});
+
+test('resultado con revisión: veredicto y hasta 5 observaciones (solo si existe)', () => {
+  const conRevision = {
+    ...base(null),
+    estado: 'succeeded',
+    resultado: { revision: { veredicto: 'OBSERVA', observaciones: ['a', 'b', 'c', 'd', 'e', 'f'] } },
+  };
+  const texto = describirTerminado(conRevision);
+  assert.match(texto, /revisión: OBSERVA/);
+  assert.match(texto, /  - a/);
+  assert.match(texto, /  - e/);
+  assert.doesNotMatch(texto, /  - f/);
+  assert.match(describirTerminado({ ...base(null), estado: 'succeeded', resultado: { revision: { veredicto: 'APRUEBA', observaciones: [] } } }), /revisión: APRUEBA/);
+  assert.doesNotMatch(describirTerminado({ ...base(null), resultado: {} }), /revisión:/);
+});
+
+test('pizarrón sin clave: versión, claves truncadas a 200 y últimas 5 notas', () => {
+  const doc = {
+    version: 3,
+    claves: {
+      'contrato.api': { valor: { ruta: '/v1' }, jobId: 'job1' },
+      'nota.larga': { valor: 'x'.repeat(300), jobId: 'job2' },
+    },
+    notas: Array.from({ length: 7 }, (_, i) => ({ jobId: 'job1', ts: i, texto: `nota ${i}` })),
+  };
+  const texto = describirPizarronLista(doc);
+  assert.match(texto, /pizarrón v3 \| claves=2/);
+  assert.match(texto, /contrato\.api = \{"ruta":"\/v1"\}  \[job1\]/);
+  assert.match(texto, /x+…  \[job2\]/, 'el valor se trunca con aviso');
+  assert.doesNotMatch(texto, /x{300}/, 'no se lista el valor completo');
+  assert.match(texto, /últimas notas:/);
+  assert.match(texto, /nota 2/);
+  assert.match(texto, /nota 6/);
+  assert.doesNotMatch(texto, /nota 1\b/);
+});
+
+test('pizarrón con clave: valor completo e historial; clave ausente se informa', () => {
+  const entrada = {
+    valor: { ruta: '/v1', extra: 'x'.repeat(300) },
+    jobId: 'job1',
+    nota: 'definido',
+    historial: [{ valor: 'A', ts: 1 }, { valor: 'B', ts: 2, conflicto: true }],
+  };
+  const texto = describirPizarronClave('contrato.api', entrada);
+  assert.match(texto, /clave: contrato\.api/);
+  assert.match(texto, /"extra": "x{300}"/);
+  assert.match(texto, /nota: definido/);
+  assert.match(texto, /historial \(2\):/);
+  assert.match(texto, /\[conflicto\]/);
+  assert.match(describirPizarronClave('nope', undefined), /la clave 'nope' no existe/);
 });

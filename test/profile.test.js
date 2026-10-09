@@ -414,3 +414,30 @@ test('validarPerfil: accept admite una compuerta paralela y valida su recurso', 
     /accept\.p\.paralelo\.recurso: el name de 'db' debe contener '\{shard\}'/,
   );
 });
+
+test('validarPerfil: pizarron opcional con defaults y errores claros', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.deepEqual(validarPerfil(base).pizarron, { habilitado: false, maxEntradasPorTrabajo: 30 });
+  assert.deepEqual(perfilPorDefecto('x').pizarron, { habilitado: false, maxEntradasPorTrabajo: 30 });
+  assert.deepEqual(
+    validarPerfil({ ...base, pizarron: { habilitado: true, maxEntradasPorTrabajo: 5 } }).pizarron,
+    { habilitado: true, maxEntradasPorTrabajo: 5 },
+  );
+  assert.throws(() => validarPerfil({ ...base, pizarron: [] }), /pizarron: debe ser un objeto/);
+  assert.throws(() => validarPerfil({ ...base, pizarron: { habilitado: 'si' } }), /pizarron\.habilitado/);
+  assert.throws(() => validarPerfil({ ...base, pizarron: { maxEntradasPorTrabajo: 0 } }), /pizarron\.maxEntradasPorTrabajo/);
+  assert.throws(() => validarPerfil({ ...base, pizarron: { raro: 1 } }), /pizarron\.raro: campo desconocido/);
+});
+
+test('validarPerfil: revisor se delega en configRevisor (default deshabilitado)', () => {
+  const base = { version: 1, name: 'sistema' };
+  assert.equal(validarPerfil(base).revisor.habilitado, false);
+  assert.equal(perfilPorDefecto('x').revisor.habilitado, false);
+  const activo = validarPerfil({ ...base, revisor: { habilitado: true, reglas: ['a'] } }).revisor;
+  assert.equal(activo.habilitado, true);
+  assert.deepEqual(activo.reglas, ['a']);
+  assert.throws(
+    () => validarPerfil({ ...base, revisor: { model: 'typo' } }),
+    (error) => error.errores.some((e) => /revisor\.model: campo desconocido/.test(e)),
+  );
+});

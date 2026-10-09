@@ -17,6 +17,7 @@ import {
   listarWorktrees,
   conCerrojo,
 } from '../src/core/workspace.js';
+import { crearPizarron } from '../src/core/pizarron.js';
 
 // SEGURIDAD: los tests usan git real en repos temporales bajo /tmp. Se anula la
 // configuración global del usuario y la del sistema para no leer ~/.gitconfig ni
@@ -899,4 +900,20 @@ test('commitearTrabajo: un archivo borrado con git rm (ya fuera del disco y del 
   assert.match(commit, /^[0-9a-f]{40}$/);
   const tocados = (await gitOK(['show', '--name-status', '--format=', 'HEAD'], w.ruta)).trim().split('\n').sort();
   assert.deepEqual(tocados, ['A\tnuevo.txt', 'D\tdocs/leeme.md', 'D\trenombrar.txt']);
+});
+
+test('crearWorktree con pizarrón enlaza `.orq/pizarron.json` al archivo vivo (vacío al inicio)', async () => {
+  const { raiz, rootDir, base } = await montar();
+  const pizarron = crearPizarron({ dir: path.join(base, 'pizarron') });
+
+  const w = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'piz123', rootDir, pizarron });
+  const enlace = path.join(w.ruta, '.orq', 'pizarron.json');
+  assert.ok(fs.lstatSync(enlace).isSymbolicLink(), 'debe ser un symlink, no una copia');
+  assert.equal(fs.realpathSync(enlace), fs.realpathSync(pizarron.rutaViva()));
+  // El archivo vivo se creó vacío para que el primer agente que lea no vea ENOENT.
+  assert.deepEqual(JSON.parse(fs.readFileSync(enlace, 'utf8')).version, 0);
+
+  // Sin pizarrón no se crea el enlace.
+  const sin = await crearWorktree({ repoRaiz: raiz, base: 'main', jobId: 'nopiz1', rootDir });
+  assert.equal(fs.existsSync(path.join(sin.ruta, '.orq', 'pizarron.json')), false);
 });
