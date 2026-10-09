@@ -10,6 +10,7 @@ import {
   contarEstados,
   parsearParche,
   resumenAlcance,
+  resumenTarea,
 } from '../src/panel/cliente-lib.js';
 
 test('formatearDuracion: segundos, minutos, horas y días', () => {
@@ -63,6 +64,25 @@ test('ordenarTrabajos: activos primero y, dentro del grupo, el más reciente', (
   assert.deepEqual(ordenarTrabajos(lista, { activosPrimero: false }).map((j) => j.id), ['ok', 'cola', 'corre']);
   // No muta la entrada.
   assert.deepEqual(lista.map((j) => j.id), ['ok', 'corre', 'cola']);
+});
+
+test('ordenarTrabajos: usa actividadEn (actividad reciente) cuando existe', () => {
+  const lista = [
+    { id: 'encoladoAntes', estado: 'running', creadoEn: 100, actividadEn: 500 },
+    { id: 'encoladoDespues', estado: 'running', creadoEn: 400, actividadEn: 300 },
+  ];
+  // Gana el que tuvo actividad más reciente, no el que se creó último.
+  assert.deepEqual(ordenarTrabajos(lista).map((j) => j.id), ['encoladoAntes', 'encoladoDespues']);
+});
+
+test('resumenTarea: primeras líneas con elipsis si el prompt es más largo', () => {
+  assert.equal(resumenTarea('', 4), '');
+  assert.equal(resumenTarea(null, 4), '');
+  assert.equal(resumenTarea('una\ndos\ntres', 4), 'una\ndos\ntres');
+  const largo = 'l1\nl2\nl3\nl4\nl5\nl6';
+  assert.equal(resumenTarea(largo, 4), 'l1\nl2\nl3\nl4…');
+  assert.equal(resumenTarea(largo, 1), 'l1…');
+  assert.equal(resumenTarea('solo una', 4), 'solo una');
 });
 
 test('filtrarTrabajos: por categoría de chip y por texto', () => {

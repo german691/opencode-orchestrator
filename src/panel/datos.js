@@ -123,6 +123,9 @@ export function resumenDeTrabajo(baseDir, id, ahora = Date.now()) {
   const segundosSinSalida =
     ACTIVOS.has(job.estado) && ultima > 0 ? Math.max(0, Math.round((ahora - ultima) / 1000)) : null;
   const inicio = job.creadoEn ?? null;
+  // Último instante con actividad real: creación, última salida o fin. Sirve para
+  // ordenar la lista por actividad reciente, no solo por cuándo se encoló.
+  const actividad = Math.max(Number(inicio) || 0, ultima || 0, Number(fin) || 0);
   return {
     id: job.id ?? id,
     titulo: job.titulo ?? '',
@@ -133,6 +136,7 @@ export function resumenDeTrabajo(baseDir, id, ahora = Date.now()) {
     writes: job.writes ?? [],
     creadoEn: inicio,
     finEn: fin,
+    actividadEn: actividad > 0 ? actividad : null,
     duracionS: inicio ? Math.max(0, Math.round(((fin ?? ahora) - inicio) / 1000)) : null,
     segundosSinSalida,
     semaforo: semaforo(segundosSinSalida),
@@ -143,7 +147,7 @@ export function resumenDeTrabajo(baseDir, id, ahora = Date.now()) {
   };
 }
 
-/** Lista los trabajos, los activos primero y luego por antigüedad descendente. */
+/** Lista los trabajos, los activos primero y luego por actividad reciente. */
 export function listarTrabajos(baseDir, ahora = Date.now()) {
   let ids = [];
   try {
@@ -156,7 +160,8 @@ export function listarTrabajos(baseDir, ahora = Date.now()) {
     .map((id) => resumenDeTrabajo(baseDir, id, ahora))
     .filter(Boolean);
   const peso = (j) => (TERMINALES.has(j.estado) ? 1 : 0);
-  return resumenes.sort((a, b) => peso(a) - peso(b) || (b.creadoEn ?? 0) - (a.creadoEn ?? 0));
+  const actividad = (j) => j.actividadEn ?? j.creadoEn ?? 0;
+  return resumenes.sort((a, b) => peso(a) - peso(b) || actividad(b) - actividad(a));
 }
 
 /** Detalle de un trabajo: transcript del agente, respuesta final y fallos de la aceptación. */
@@ -218,6 +223,28 @@ export function idDePanel(id) {
 export function leerTrabajo(baseDir, id) {
   if (!idValido(id)) return null;
   return leerJson(path.join(baseDir, id, 'job.json'));
+}
+
+/**
+ * Lee el documento del pizarrón compartido (`<dir>/pizarron.json`) SIN escribir
+ * nada: si el archivo no existe o está roto, devuelve el documento vacío (versión
+ * 0). Se evita `crearPizarron().leer()` a propósito porque éste aparta un archivo
+ * corrupto (una escritura) y el panel debe ser estrictamente de solo lectura.
+ *
+ * @param {string} dir directorio de estado (el mismo del orquestador)
+ * @returns {{ version: number, actualizado: number, claves: object, notas: object[] }}
+ */
+export function leerPizarron(dir) {
+  const vacio = { version: 0, actualizado: 0, claves: {}, notas: [] };
+  const doc = leerJson(path.join(dir, 'pizarron.json'));
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return vacio;
+  const claves = doc.claves !== null && typeof doc.claves === 'object' && !Array.isArray(doc.claves) ? doc.claves : {};
+  return {
+    version: Number.isInteger(doc.version) ? doc.version : 0,
+    actualizado: Number.isFinite(doc.actualizado) ? doc.actualizado : 0,
+    claves,
+    notas: Array.isArray(doc.notas) ? doc.notas.filter((nota) => nota !== null && typeof nota === 'object') : [],
+  };
 }
 
 /**

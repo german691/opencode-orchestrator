@@ -83,6 +83,22 @@ export function formatearDuracion(segundos) {
 }
 
 /**
+ * Primeras `lineas` líneas de un texto, con elipsis si quedó cortado. Se usa como
+ * resumen plegable de la tarea para no ocupar media pantalla.
+ * @param {string|null|undefined} texto
+ * @param {number} [lineas]
+ * @returns {string}
+ */
+export function resumenTarea(texto, lineas = 4) {
+  const completo = String(texto ?? '');
+  if (completo === '') return '';
+  const todas = completo.split('\n');
+  const tope = Math.max(1, Number.isFinite(Number(lineas)) ? Math.trunc(Number(lineas)) : 4);
+  if (todas.length <= tope) return completo.replace(/\s+$/, '');
+  return todas.slice(0, tope).join('\n').replace(/\s+$/, '') + '…';
+}
+
+/**
  * Traduce un motivo crudo a lenguaje claro; vacío si no hay.
  * @param {string|null|undefined} motivo
  * @returns {string}
@@ -110,21 +126,22 @@ export function etiquetaEstado(estado, motivo) {
 }
 
 /**
- * Ordena una copia de la lista: activos primero y, dentro de cada grupo, el más
- * reciente arriba (igual que la API, para que la UI no sorprenda).
+ * Ordena una copia de la lista: activos primero y, dentro de cada grupo, el de
+ * actividad más reciente arriba (igual que la API, para que la UI no sorprenda).
  * @param {object[]} lista
  * @param {{ activosPrimero?: boolean }} [opciones]
  * @returns {object[]}
  */
 export function ordenarTrabajos(lista, { activosPrimero = true } = {}) {
   const copia = Array.isArray(lista) ? [...lista] : [];
+  const actividad = (trabajo) => trabajo?.actividadEn ?? trabajo?.creadoEn ?? 0;
   return copia.sort((a, b) => {
     if (activosPrimero) {
       const pesoA = esTerminal(a?.estado) ? 1 : 0;
       const pesoB = esTerminal(b?.estado) ? 1 : 0;
       if (pesoA !== pesoB) return pesoA - pesoB;
     }
-    return (b?.creadoEn ?? 0) - (a?.creadoEn ?? 0);
+    return actividad(b) - actividad(a);
   });
 }
 

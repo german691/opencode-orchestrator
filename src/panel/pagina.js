@@ -65,6 +65,7 @@ const NAV_PRINCIPAL = `<span id="conexion" class="conexion reconectando" role="s
   <span id="contadores" class="contadores">Corriendo 0 · En cola 0 · Total 0</span>
   <span id="concurrencia" class="concurrencia" hidden></span>
   <nav class="cabecera-nav" aria-label="Secciones">
+    <a href="/pizarron">Pizarrón</a>
     <a href="/auditoria">Auditoría</a>
     <button type="button" id="ayuda" class="boton" aria-haspopup="dialog">Atajos (?)</button>
   </nav>`;
@@ -83,7 +84,10 @@ const CUERPO_PRINCIPAL = `<div class="cuerpo">
   <main id="contenido" class="detalle" tabindex="-1">
     <p id="sin-seleccion" class="cargando">Elegí un trabajo de la lista.</p>
     <section id="detalle-trabajo" aria-labelledby="titulo-trabajo" hidden>
-      <h2 id="titulo-trabajo" class="titulo-trabajo"></h2>
+      <div class="titulo-fila">
+        <h2 id="titulo-trabajo" class="titulo-trabajo"></h2>
+        <button type="button" id="copiar-id" class="boton" hidden>Copiar id</button>
+      </div>
       <div class="tabs" role="tablist" aria-label="Vistas del trabajo">
         <button type="button" role="tab" id="tab-resumen" aria-controls="panel-resumen" aria-selected="true" tabindex="0">Resumen</button>
         <button type="button" role="tab" id="tab-consola" aria-controls="panel-consola" aria-selected="false" tabindex="-1">Consola</button>
@@ -146,7 +150,7 @@ export function paginaAuditoria({ eventos = [], tipos = [], filtros = {}, dispon
   const cuerpo = disponible
     ? `<table class="tabla-auditoria"><thead><tr><th>hora</th><th>tipo</th><th>trabajo</th><th>estado</th><th>motivo</th><th>actor</th></tr></thead><tbody>${filas}</tbody></table>`
     : '<p class="nota">Auditoría no disponible</p>';
-  const nav = '<nav class="cabecera-nav" aria-label="Secciones"><a href="/">← Trabajos</a></nav>';
+  const nav = '<nav class="cabecera-nav" aria-label="Secciones"><a href="/">← Trabajos</a><a href="/pizarron">Pizarrón</a></nav>';
   return armazonHtml({
     titulo: 'Auditoría de opencode',
     cabecera: cabeceraHtml({ titulo: 'Auditoría de opencode', marca: 'registro de eventos', nav }),
@@ -161,5 +165,25 @@ export function paginaAuditoria({ eventos = [], tipos = [], filtros = {}, dispon
 </form>
 ${cuerpo}
 </main>`,
+  });
+}
+
+/**
+ * Página del pizarrón compartido. El shell es igual al del resto del panel; el
+ * contenido lo hidrata `/static/pizarron.js`, que refresca por polling contra
+ * `/api/pizarron` (sin escrituras: el panel solo lee el estado del orquestador).
+ * @returns {string}
+ */
+export function paginaPizarron() {
+  const nav =
+    '<nav class="cabecera-nav" aria-label="Secciones"><a href="/">← Trabajos</a><a href="/auditoria">Auditoría</a></nav>';
+  return armazonHtml({
+    titulo: 'Pizarrón de opencode',
+    cabecera: cabeceraHtml({ titulo: 'Pizarrón de opencode', marca: 'contexto compartido', nav }),
+    cuerpo: `<main id="contenido" class="detalle" tabindex="-1">
+<p id="pizarron-estado" class="nota" role="status" aria-live="polite">Cargando pizarrón…</p>
+<div id="pizarron"></div>
+</main>`,
+    scripts: '<script type="module" src="/static/pizarron.js"></script>',
   });
 }

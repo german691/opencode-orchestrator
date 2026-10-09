@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import { crearServidorPanel } from '../src/panel/servidor.js';
 import { crearFlujoEventos } from '../src/panel/stream.js';
 import { crearRegistroEventos } from '../src/core/eventos.js';
+import { diffDeTrabajo } from '../src/panel/diff.js';
 
 const AHORA = 1_800_000_000_000;
 
@@ -177,12 +178,89 @@ test('diff: archivos y parche del repo git contra la base', async () => {
   });
 });
 
-test('diff: sin baseCommit informa disponible false', async () => {
+test('diff: sin baseCommit informa disponible false con motivo sin_base', async () => {
   const { base, jobs } = crearEstado();
   crearJob(jobs, 'diff0002', { estado: 'succeeded', repo: '/noexiste', rama: 'x' });
   await conServidor({ baseDir: base }, async (url) => {
     const diff = await (await fetch(`${url}/api/trabajos/diff0002/diff`)).json();
-    assert.deepEqual(diff, { archivos: [], parche: '', truncado: false, disponible: false });
+    assert.deepEqual(diff, {
+      archivos: [],
+      parche: '',
+      truncado: false,
+      disponible: false,
+      motivo: 'sin_base',
+      detalle: '',
+    });
+  });
+});
+
+test('diff: pasa -c safe.directory con el cwd concreto y nunca con *', async () => {
+  const llamadas = [];
+  const ejecutar = async (args, opciones) => {
+    llamadas.push({ args, cwd: opciones && opciones.cwd });
+    return { codigo: 0, stdout: '', stderr: '' };
+  };
+  const diff = await diffDeTrabajo(
+    { baseCommit: 'base', repo: '/repo', worktree: '/worktree/job', rama: 'job/x' },
+    { ejecutar },
+  );
+  assert.equal(diff.disponible, true);
+  assert.ok(llamadas.length >= 3, 'debería consultar diff, name-status y numstat');
+  for (const llamada of llamadas) {
+    assert.equal(llamada.args[0], '-c');
+    assert.equal(llamada.args[1], `safe.directory=${llamada.cwd}`);
+    assert.notEqual(llamada.args[1], 'safe.directory=*');
+    assert.equal(llamada.args[2], 'diff');
+  }
+});
+
+test('diff: un git que rechaza por propiedad informa git_fallo con el detalle', async () => {
+  const ejecutar = async () => ({
+    codigo: 128,
+    stdout: '',
+    stderr: 'fatal: detected dubious ownership in repository at /mnt/c/repo\npista: agregá safe.directory',
+  });
+  const diff = await diffDeTrabajo({ baseCommit: 'base', repo: '/repo', worktree: '/worktree/x' }, { ejecutar });
+  assert.equal(diff.disponible, false);
+  assert.equal(diff.motivo, 'git_fallo');
+  assert.equal(diff.detalle, 'fatal: detected dubious ownership in repository at /mnt/c/repo');
+});
+
+test('diff: commit del resultado inexistente informa commit_inexistente', async () => {
+  const ejecutar = async () => ({ codigo: 128, stdout: '', stderr: 'fatal: bad object deadbeef\n' });
+  const diff = await diffDeTrabajo(
+    { baseCommit: 'base', repo: '/repo', resultado: { commit: 'deadbeef' } },
+    { ejecutar },
+  );
+  assert.equal(diff.disponible, false);
+  assert.equal(diff.motivo, 'commit_inexistente');
+  assert.match(diff.detalle, /bad object/);
+});
+
+test('diff: usa resultado.commit cuando el worktree y la rama ya no existen', async () => {
+  const { base, jobs } = crearEstado();
+  const { repo, sha } = crearRepoGit();
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'uno\ndos\n');
+  fs.writeFileSync(path.join(repo, 'nuevo.txt'), 'creado\n');
+  git(repo, ['add', '.']);
+  git(repo, ['commit', '-q', '-m', 'trabajo']);
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
+  // La rama vuelve a la base: el commit queda colgado pero sigue existiendo en el repo.
+  git(repo, ['reset', '-q', '--hard', sha]);
+  crearJob(jobs, 'fall0001', {
+    estado: 'merged',
+    repo,
+    baseCommit: sha,
+    rama: 'job/ya-no-existe',
+    resultado: { commit },
+  });
+  await conServidor({ baseDir: base }, async (url) => {
+    const diff = await (await fetch(`${url}/api/trabajos/fall0001/diff`)).json();
+    assert.equal(diff.disponible, true);
+    assert.match(diff.parche, /nuevo\.txt/);
+    assert.match(diff.parche, /\+creado/);
+    const rutas = diff.archivos.map((a) => a.ruta);
+    assert.ok(rutas.includes('nuevo.txt'));
   });
 });
 
@@ -225,6 +303,33 @@ test('eventos: filtra por jobId; sin registro devuelve vacío', async () => {
   await conServidor({ baseDir: base }, async (url) => {
     const vacio = await (await fetch(`${url}/api/trabajos/even0001/eventos`)).json();
     assert.deepEqual(vacio, []);
+  });
+});
+
+test('pizarrón: /api/pizarron vacío si no existe y documento si está', async () => {
+  const { base } = crearEstado();
+  await conServidor({ baseDir: base }, async (url) => {
+    const vacio = await (await fetch(`${url}/api/pizarron`)).json();
+    assert.deepEqual(vacio, { version: 0, actualizado: 0, claves: {}, notas: [] });
+  });
+  const entrada = {
+    valor: { path: '/v1/salud' },
+    nota: 'definido',
+    jobId: 'abc12345',
+    ts: AHORA,
+    historial: [{ valor: {}, jobId: 'otro0001', ts: AHORA, conflicto: true }],
+  };
+  fs.writeFileSync(
+    path.join(base, 'pizarron.json'),
+    JSON.stringify({ version: 7, actualizado: AHORA, claves: { 'api.ruta': entrada }, notas: [{ jobId: 'abc12345', ts: AHORA, texto: 'hola' }] }),
+  );
+  await conServidor({ baseDir: base }, async (url) => {
+    const doc = await (await fetch(`${url}/api/pizarron`)).json();
+    assert.equal(doc.version, 7);
+    assert.equal(doc.actualizado, AHORA);
+    assert.equal(doc.claves['api.ruta'].valor.path, '/v1/salud');
+    assert.equal(doc.claves['api.ruta'].historial[0].conflicto, true);
+    assert.equal(doc.notas[0].texto, 'hola');
   });
 });
 

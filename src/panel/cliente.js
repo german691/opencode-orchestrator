@@ -10,7 +10,7 @@
  * línea. Todo nodo se crea con `createElement` y el texto se asigna con
  * `textContent`, así que nada leído de disco puede inyectar HTML.
  */
-export const CLIENTE = String.raw`import { formatearDuracion, etiquetaEstado, motivoLegible, ordenarTrabajos, filtrarTrabajos, contarEstados, parsearParche, resumenAlcance } from '/static/lib.js';
+export const CLIENTE = String.raw`import { formatearDuracion, etiquetaEstado, motivoLegible, ordenarTrabajos, filtrarTrabajos, contarEstados, parsearParche, resumenAlcance, resumenTarea } from '/static/lib.js';
 
 const porId = function (id) { return document.getElementById(id); };
 const crear = function (etiqueta, clase, texto) {
@@ -120,7 +120,9 @@ function pintarFila(boton, trabajo) {
   titulo.title = trabajo.titulo || trabajo.id;
   const meta = crear('span', 'trabajo-meta');
   meta.append(crear('span', 'trabajo-id', idCorto(trabajo.id)));
-  meta.append(crear('span', 'trabajo-duracion', formatearDuracion(trabajo.duracionS)));
+  const duracion = crear('span', 'trabajo-duracion', formatearDuracion(trabajo.duracionS));
+  duracion.title = 'Duración total';
+  meta.append(duracion);
   if (trabajo.semaforo) {
     meta.append(crear('span', 'trabajo-semaforo semaforo-' + trabajo.semaforo, 'sin salida hace ' + formatearDuracion(trabajo.segundosSinSalida)));
   }
@@ -221,7 +223,32 @@ function mostrarDetalle() {
   if (!id) return;
   const trabajo = trabajoSeleccionado();
   porId('titulo-trabajo').textContent = trabajo ? (trabajo.titulo || trabajo.id) : id;
+  const copiar = porId('copiar-id');
+  if (copiar) {
+    copiar.hidden = false;
+    copiar.dataset.id = id;
+  }
   activarTab(app.tab, false);
+}
+
+async function copiarId(boton) {
+  const id = boton.dataset.id || app.seleccionado || '';
+  if (!id) return;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(id);
+    else {
+      const area = crear('textarea');
+      area.value = id;
+      document.body.append(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+    }
+    boton.textContent = 'Copiado';
+    setTimeout(function () { boton.textContent = 'Copiar id'; }, 1200);
+  } catch (error) {
+    boton.textContent = 'No se pudo copiar';
+  }
 }
 
 function activarTab(tab, cargar) {
@@ -265,42 +292,61 @@ function filaResumen(dl, etiqueta, valor) {
   dl.append(dd);
 }
 
+// Tarea dentro de <details> cerrado: las primeras líneas como resumen y el texto
+// completo al desplegar, para no ocupar media pantalla con un prompt largo.
+function bloqueTarea(texto) {
+  const detalle = crear('details', 'plegable');
+  const resumen = crear('summary');
+  resumen.append(crear('span', 'plegable-preview', resumenTarea(texto, 4)));
+  resumen.append(crear('span', 'plegable-accion', 'Ver tarea completa'));
+  detalle.append(resumen, crear('pre', 'prompt', texto));
+  return detalle;
+}
+
+// Última salida también plegable: es informativa y no debe empujar lo importante.
+function bloqueUltimaSalida(transcript) {
+  const detalle = crear('details', 'plegable');
+  detalle.append(crear('summary', '', 'Última salida'));
+  detalle.append(crear('pre', 'salida', transcript ? transcript.slice(-2000) : '(sin salida todavía)'));
+  return detalle;
+}
+
 function pintarResumen(panel, trabajo, alcance) {
   const dl = crear('dl', 'resumen');
   const etiqueta = etiquetaEstado(trabajo.estado, trabajo.motivoFin);
   const estado = crear('span', 'trabajo-estado ' + etiqueta.clase);
   estado.append(crear('span', 'icono', etiqueta.icono), crear('span', 'texto-estado', etiqueta.texto));
+  // Primero lo importante: estado, por qué terminó, duración, advertencias y
+  // resultado de mutaciones/revisión; los metadatos van después.
   filaResumen(dl, 'Estado', estado);
   if (trabajo.motivoFin) filaResumen(dl, 'Motivo de fin', motivoLegible(trabajo.motivoFin));
+  filaResumen(dl, 'Duración', formatearDuracion(trabajo.duracionS));
+  if (Array.isArray(trabajo.advertencias) && trabajo.advertencias.length) {
+    const lista = crear('ul', 'lista-simple');
+    trabajo.advertencias.forEach(function (aviso) { lista.append(crear('li', '', String(aviso))); });
+    filaResumen(dl, 'Advertencias', lista);
+  }
+  if (alcance && alcance.mutaciones) {
+    filaResumen(dl, 'Mutaciones', (alcance.mutaciones.detectada === undefined ? '?' : alcance.mutaciones.detectada) + '/' + (alcance.mutaciones.total === undefined ? '?' : alcance.mutaciones.total));
+  }
+  if (alcance && alcance.revision) filaResumen(dl, 'Revisión', alcance.revision.veredicto || JSON.stringify(alcance.revision));
   if (trabajo.modelo) filaResumen(dl, 'Modelo', trabajo.modelo);
   if (trabajo.rama) filaResumen(dl, 'Rama', trabajo.rama);
   if (trabajo.modo) filaResumen(dl, 'Modo', trabajo.modo);
   filaResumen(dl, 'Creado', trabajo.creadoEn ? new Date(trabajo.creadoEn).toLocaleString() : null);
   if (trabajo.finEn) filaResumen(dl, 'Terminado', new Date(trabajo.finEn).toLocaleString());
-  filaResumen(dl, 'Duración', formatearDuracion(trabajo.duracionS));
   if (trabajo.semaforo) filaResumen(dl, 'Semáforo', 'sin salida hace ' + formatearDuracion(trabajo.segundosSinSalida));
   filaResumen(dl, 'Id', trabajo.id);
-  if (alcance && alcance.mutaciones) {
-    filaResumen(dl, 'Mutaciones', (alcance.mutaciones.detectada === undefined ? '?' : alcance.mutaciones.detectada) + '/' + (alcance.mutaciones.total === undefined ? '?' : alcance.mutaciones.total));
-  }
-  if (alcance && alcance.revision) filaResumen(dl, 'Revisión', alcance.revision.veredicto || JSON.stringify(alcance.revision));
   panel.append(dl);
   if (trabajo.prompt) {
     panel.append(crear('h3', '', 'Tarea'));
-    panel.append(crear('pre', 'prompt', trabajo.prompt));
-  }
-  if (Array.isArray(trabajo.advertencias) && trabajo.advertencias.length) {
-    panel.append(crear('h3', '', 'Advertencias'));
-    const lista = crear('ul', 'lista-simple');
-    trabajo.advertencias.forEach(function (aviso) { lista.append(crear('li', '', String(aviso))); });
-    panel.append(lista);
+    panel.append(bloqueTarea(trabajo.prompt));
   }
   if (trabajo.fallos) {
     panel.append(crear('h3', '', 'Aceptación: qué falló'));
     panel.append(crear('pre', 'salida', trabajo.fallos));
   }
-  panel.append(crear('h3', '', 'Última salida'));
-  panel.append(crear('pre', 'salida', trabajo.transcript ? trabajo.transcript.slice(-2000) : '(sin salida todavía)'));
+  panel.append(bloqueUltimaSalida(trabajo.transcript));
 }
 
 async function cargarResumen(id) {
@@ -787,6 +833,8 @@ function iniciar() {
   });
   const ayuda = porId('ayuda');
   if (ayuda) ayuda.addEventListener('click', abrirAyuda);
+  const copiar = porId('copiar-id');
+  if (copiar) copiar.addEventListener('click', function () { copiarId(copiar); });
   document.addEventListener('keydown', atajos);
   app.seleccionado = new URLSearchParams(location.search).get('job');
   cargarTodo();
