@@ -14,7 +14,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { leerManifiesto, ejecutarMutaciones, resumen, nombreManifiesto } from '../src/core/mutaciones.js';
+import {
+  leerManifiesto,
+  ejecutarMutaciones,
+  resumen,
+  nombreManifiesto,
+  nombreJournalMutacion,
+  recuperarMutacionPendiente,
+} from '../src/core/mutaciones.js';
 
 /** Directorio temporal propio de cada prueba. */
 function crearWorktree() {
@@ -371,4 +378,77 @@ test('ejecutarMutaciones: si la restauración no puede verificar, lanza RESTAURA
   } finally {
     fs.writeFileSync = originalWrite;
   }
+});
+
+// ---------------------------------------------------------------------------
+// Journal de mutación pendiente (recuperación tras caída del servidor)
+// ---------------------------------------------------------------------------
+
+/**
+ * Simula una caída a mitad de una mutación: escribe una copia exacta del original en
+ * el respaldo y el journal, y deja el archivo mutado en disco.
+ * @param {string} wt
+ * @param {string} archivoRel
+ * @param {Buffer} original
+ * @param {Buffer} mutado
+ */
+function simularCaidaDeMutacion(wt, archivoRel, original, mutado) {
+  const dirOrq = path.join(wt, '.orq');
+  fs.mkdirSync(dirOrq, { recursive: true });
+  fs.writeFileSync(path.join(wt, archivoRel), mutado);
+  fs.writeFileSync(path.join(dirOrq, 'mutacion-pendiente.bak'), original);
+  fs.writeFileSync(
+    path.join(wt, nombreJournalMutacion),
+    JSON.stringify({ archivo: archivoRel, sha256Original: sha(original), rutaRespaldo: '.orq/mutacion-pendiente.bak' }),
+  );
+}
+
+test('ejecutarMutaciones: deja el journal ANTES de mutar y lo borra al restaurar', async () => {
+  const wt = crearWorktree();
+  const archivo = path.join(wt, 'x.js');
+  fs.writeFileSync(archivo, 'original\n');
+
+  let journalDurante = null;
+  let mutadoDurante = null;
+  const { correr } = correrFalso(() => {
+    journalDurante = fs.existsSync(path.join(wt, nombreJournalMutacion));
+    mutadoDurante = fs.readFileSync(archivo, 'utf8');
+    return { codigo: 0, salida: '' };
+  });
+  await ejecutarMutaciones({ worktree: wt, manifiesto: [{ ...MUTACION_BASE }], correr });
+
+  assert.equal(journalDurante, true, 'el journal debe existir mientras la mutación está aplicada');
+  assert.equal(mutadoDurante, 'mutado\n', 'la mutación debe estar aplicada cuando corre el comando');
+  assert.equal(fs.existsSync(path.join(wt, nombreJournalMutacion)), false, 'el journal se borra al restaurar');
+  assert.equal(fs.readFileSync(archivo, 'utf8'), 'original\n');
+});
+
+test('recuperarMutacionPendiente: sin journal no hace nada', () => {
+  const wt = crearWorktree();
+  assert.deepEqual(recuperarMutacionPendiente(wt), { recuperado: false });
+});
+
+test('recuperarMutacionPendiente: restaura el original tras una caída y borra journal y respaldo', () => {
+  const wt = crearWorktree();
+  const original = Buffer.from('original\n');
+  simularCaidaDeMutacion(wt, 'x.js', original, Buffer.from('mutado\n'));
+
+  const res = recuperarMutacionPendiente(wt);
+  assert.deepEqual(res, { recuperado: true, archivo: 'x.js', restaurado: true });
+  assert.equal(fs.readFileSync(path.join(wt, 'x.js'), 'utf8'), 'original\n');
+  assert.equal(fs.existsSync(path.join(wt, nombreJournalMutacion)), false);
+  assert.equal(fs.existsSync(path.join(wt, '.orq', 'mutacion-pendiente.bak')), false);
+});
+
+test('recuperarMutacionPendiente: un respaldo que no coincide con el sha256 no se restaura', () => {
+  const wt = crearWorktree();
+  simularCaidaDeMutacion(wt, 'x.js', Buffer.from('original\n'), Buffer.from('mutado\n'));
+  // El respaldo se corrompe: el hash del journal ya no coincide.
+  fs.writeFileSync(path.join(wt, '.orq', 'mutacion-pendiente.bak'), Buffer.from('otra cosa\n'));
+
+  const res = recuperarMutacionPendiente(wt);
+  assert.equal(res.recuperado, false);
+  assert.equal(res.motivo, 'hash_no_coincide');
+  assert.equal(fs.readFileSync(path.join(wt, 'x.js'), 'utf8'), 'mutado\n', 'no se toca a ciegas');
+  assert.equal(fs.existsSync(path.join(wt, nombreJournalMutacion)), false, 'el journal inválido se descarta');
 });

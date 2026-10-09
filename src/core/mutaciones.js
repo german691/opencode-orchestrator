@@ -29,6 +29,22 @@ import path from 'node:path';
 /** Ruta del manifiesto, relativa a la raíz del worktree. */
 export const nombreManifiesto = '.orq/mutaciones.json';
 
+/** Directorio de estado interno que el servidor usa dentro del worktree. */
+const DIR_ORQ = '.orq';
+
+/**
+ * Journal de la mutación en curso, relativo al worktree. Existe SOLO mientras hay una
+ * mutación aplicada y sin restaurar; al restaurar se borra. Si el servidor muere a
+ * mitad, el journal sobrevive y `recuperarMutacionPendiente` puede deshacer el cambio.
+ */
+export const nombreJournalMutacion = `${DIR_ORQ}/mutacion-pendiente.json`;
+
+/** Copia byte a byte del original que acompaña al journal. */
+const nombreRespaldoMutacion = `${DIR_ORQ}/mutacion-pendiente.bak`;
+
+/** Texto con el que el servidor deja constancia de una restauración por caída. */
+export const TEXTO_MUTACION_RECUPERADA = 'se restauró un archivo que había quedado mutado';
+
 /** Tope de mutaciones por manifiesto: acota el tiempo total de la corrida. */
 const MAX_MUTACIONES = 20;
 
@@ -252,6 +268,118 @@ function restaurar(absoluta, original, hashOriginal) {
 }
 
 /**
+ * ¿`ruta` (ya resuelta) queda dentro de `raiz`? Se usa para no confiar en el journal:
+ * un archivo de journal manipulado no debe hacer que se escriba fuera del worktree.
+ * @param {string} ruta
+ * @param {string} raiz
+ * @returns {boolean}
+ */
+function dentroDelWorktree(ruta, raiz) {
+  return ruta === raiz || ruta.startsWith(`${raiz}${path.sep}`);
+}
+
+/** Borra el journal de mutación en curso, si existe (best-effort). */
+function borrarJournal(rutaJournal) {
+  try {
+    fs.rmSync(rutaJournal, { force: true });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Deshace una mutación que quedó "pegada" por una caída del servidor.
+ *
+ * Antes de mutar, `ejecutarMutaciones` deja en `.orq/mutacion-pendiente.json` el
+ * `{ archivo, sha256Original, rutaRespaldo }` y una copia EXACTA del original. Si el
+ * proceso muere entre la escritura mutada y la restauración, este journal permite
+ * restaurar el original (verificando el sha256) al arrancar o al retomar el trabajo,
+ * en vez de trasladar/commitear un archivo mutado.
+ *
+ * @param {string} worktree raíz del worktree a inspeccionar
+ * @returns {{ recuperado: boolean, archivo?: string, restaurado?: boolean, motivo?: string }}
+ */
+export function recuperarMutacionPendiente(worktree) {
+  if (typeof worktree !== 'string' || worktree === '') return { recuperado: false };
+  let raizReal;
+  try {
+    raizReal = fs.realpathSync(worktree);
+  } catch {
+    return { recuperado: false, motivo: 'worktree_inexistente' };
+  }
+  const rutaJournal = path.join(raizReal, nombreJournalMutacion);
+  let crudo;
+  try {
+    crudo = fs.readFileSync(rutaJournal, 'utf8');
+  } catch {
+    return { recuperado: false }; // sin journal no hay nada pendiente
+  }
+
+  let journal;
+  try {
+    journal = JSON.parse(crudo);
+  } catch {
+    borrarJournal(rutaJournal);
+    return { recuperado: false, motivo: 'journal_invalido' };
+  }
+  if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
+    borrarJournal(rutaJournal);
+    return { recuperado: false, motivo: 'journal_invalido' };
+  }
+
+  const archivo = typeof journal.archivo === 'string' ? journal.archivo.replace(/\\/g, '/') : '';
+  const respaldo = typeof journal.rutaRespaldo === 'string' ? journal.rutaRespaldo.replace(/\\/g, '/') : '';
+  const esperado = typeof journal.sha256Original === 'string' ? journal.sha256Original : '';
+  // El journal se valida como cualquier entrada del manifiesto: rutas relativas y
+  // dentro del worktree. Uno manipulado no puede redirigir la restauración afuera.
+  const rutasSeguras =
+    archivo !== '' &&
+    respaldo !== '' &&
+    esperado !== '' &&
+    !path.isAbsolute(archivo) &&
+    !path.isAbsolute(respaldo) &&
+    !archivo.split('/').includes('..') &&
+    !respaldo.split('/').includes('..');
+  if (!rutasSeguras) {
+    borrarJournal(rutaJournal);
+    return { recuperado: false, motivo: 'journal_invalido' };
+  }
+  const absoluta = path.resolve(raizReal, archivo);
+  const rutaRespaldo = path.resolve(raizReal, respaldo);
+  if (!dentroDelWorktree(absoluta, raizReal) || !dentroDelWorktree(rutaRespaldo, raizReal)) {
+    borrarJournal(rutaJournal);
+    return { recuperado: false, motivo: 'journal_invalido' };
+  }
+
+  let original;
+  try {
+    original = fs.readFileSync(rutaRespaldo);
+  } catch {
+    borrarJournal(rutaJournal);
+    return { recuperado: false, motivo: 'sin_respaldo' };
+  }
+  if (sha256(original) !== esperado) {
+    // El respaldo no es el original que el journal declara: no se restaura a ciegas.
+    borrarJournal(rutaJournal);
+    return { recuperado: false, motivo: 'hash_no_coincide' };
+  }
+
+  try {
+    restaurar(absoluta, original, esperado);
+  } catch {
+    // Si no se pudo verificar la restauración, se deja el journal para reintentar.
+    return { recuperado: false, motivo: 'restauracion_fallida' };
+  }
+  borrarJournal(rutaJournal);
+  try {
+    fs.rmSync(rutaRespaldo, { force: true });
+  } catch {
+    /* el respaldo sobrante no molesta */
+  }
+  return { recuperado: true, archivo, restaurado: true };
+}
+
+/**
  * Ejecuta las mutaciones declaradas: aplica, corre y restaura cada una.
  *
  * @param {object} opciones
@@ -308,6 +436,18 @@ export async function ejecutarMutaciones({ worktree, manifiesto, permitido, corr
       original.subarray(encontrado + buscar.length),
     ]);
 
+    // Journal + respaldo ANTES de tocar el archivo: si el servidor muere entre la
+    // escritura mutada y la restauración, al arrancar/retomar se puede volver al
+    // original exacto en vez de trasladar y commitear un archivo mutado.
+    const rutaJournal = path.join(raizReal, nombreJournalMutacion);
+    const rutaRespaldo = path.join(raizReal, nombreRespaldoMutacion);
+    fs.mkdirSync(path.join(raizReal, DIR_ORQ), { recursive: true });
+    fs.writeFileSync(rutaRespaldo, original);
+    fs.writeFileSync(
+      rutaJournal,
+      JSON.stringify({ archivo: mutacion.archivo, sha256Original: hashOriginal, rutaRespaldo: nombreRespaldoMutacion }),
+    );
+
     let codigo = null;
     const inicio = Date.now();
     try {
@@ -326,7 +466,15 @@ export async function ejecutarMutaciones({ worktree, manifiesto, permitido, corr
     } finally {
       // SIEMPRE restauramos: pase lo que pase con el comando, el archivo vuelve a
       // ser byte a byte el original (o el trabajo falla con RESTAURACION_FALLIDA).
+      // El journal se borra solo si la restauración se pudo verificar; si falla,
+      // queda para que `recuperarMutacionPendiente` lo intente al arrancar.
       restaurar(absoluta, original, hashOriginal);
+      borrarJournal(rutaJournal);
+      try {
+        fs.rmSync(rutaRespaldo, { force: true });
+      } catch {
+        /* el respaldo sobrante no molesta */
+      }
     }
   }
 

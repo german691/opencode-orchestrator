@@ -30,6 +30,7 @@ export const TIPOS = Object.freeze([
   'avanzar_base',
   'cleanup',
   'pizarron.post',
+  'pizarron.aporte_invalido',
 ]);
 
 /** Tamaño (bytes) a partir del cual `eventos.jsonl` se rota a `eventos.1.jsonl`. */
@@ -149,31 +150,40 @@ export function crearRegistroEventos({ dir, ahora = () => Date.now() } = {}) {
   /**
    * Lee, filtra y ordena los eventos. Tolera líneas corruptas o a medio escribir
    * (las ignora). Por defecto devuelve los 200 más recientes.
+   *
+   * Lee TAMBIÉN el respaldo `eventos.1.jsonl`: tras la rotación el archivo actual
+   * arranca vacío y, si no se leyera el respaldo, el panel perdería todo el historial
+   * anterior. El respaldo es más viejo, así que sus líneas van PRIMERO; con eso el
+   * orden cronológico se preserva antes de invertir para `desc`.
+   *
    * @param {{ jobId?: string, tipo?: string, desde?: number, hasta?: number, limite?: number, orden?: 'asc'|'desc' }} [filtros]
    * @returns {object[]}
    */
   function listar({ jobId, tipo, desde, hasta, limite = 200, orden = 'desc' } = {}) {
-    let texto;
-    try {
-      texto = fs.readFileSync(archivo, 'utf8');
-    } catch {
-      return []; // sin registro todavía
-    }
     const eventos = [];
-    for (const linea of texto.split('\n')) {
-      if (linea.trim() === '') continue;
-      let evento;
+    // Primero el respaldo (eventos viejos), luego el archivo actual (más nuevos).
+    for (const ruta of [rotado, archivo]) {
+      let texto;
       try {
-        evento = JSON.parse(linea);
+        texto = fs.readFileSync(ruta, 'utf8');
       } catch {
-        continue; // línea corrupta: se ignora sin fallar
+        continue; // sin ese archivo: puede existir solo el otro
       }
-      if (evento === null || typeof evento !== 'object') continue;
-      if (jobId !== undefined && evento.jobId !== jobId) continue;
-      if (tipo !== undefined && evento.tipo !== tipo) continue;
-      if (desde !== undefined && !(evento.ts >= desde)) continue;
-      if (hasta !== undefined && !(evento.ts <= hasta)) continue;
-      eventos.push(evento);
+      for (const linea of texto.split('\n')) {
+        if (linea.trim() === '') continue;
+        let evento;
+        try {
+          evento = JSON.parse(linea);
+        } catch {
+          continue; // línea corrupta: se ignora sin fallar
+        }
+        if (evento === null || typeof evento !== 'object') continue;
+        if (jobId !== undefined && evento.jobId !== jobId) continue;
+        if (tipo !== undefined && evento.tipo !== tipo) continue;
+        if (desde !== undefined && !(evento.ts >= desde)) continue;
+        if (hasta !== undefined && !(evento.ts <= hasta)) continue;
+        eventos.push(evento);
+      }
     }
     if (orden !== 'asc') eventos.reverse();
     const tope = Number.isInteger(limite) && limite >= 0 ? limite : 200;

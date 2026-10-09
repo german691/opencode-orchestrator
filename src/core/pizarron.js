@@ -20,6 +20,22 @@ import path from 'node:path';
 /** Claves permitidas: cortas y sin caracteres que compliquen rutas o diffs. */
 const RE_CLAVE = /^[a-zA-Z0-9_.:/-]{1,80}$/;
 
+/**
+ * Claves que JAMÁS se aceptan aunque cumplan `RE_CLAVE`: asignarlas sobre un objeto
+ * normal dispara el prototipo (`__proto__`) o pisa miembros heredados (`constructor`,
+ * `prototype`). Rechazarlas es la primera barrera contra la contaminación de objetos;
+ * la segunda es usar `claves` sin prototipo (ver `documentoVacio`).
+ * @type {ReadonlySet<string>}
+ */
+const CLAVES_RESERVADAS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * Tope de bytes del archivo de aporte. Un aporte más grande se ignora SIN leerlo
+ * entero: se valida con `stat` antes de `readFileSync` (cada vigilancia de 30 s no
+ * debe cargar en memoria un archivo arbitrariamente grande).
+ */
+export const MAX_APORTE_BYTES = 1024 * 1024;
+
 /** Tope de bytes del `valor` ya serializado (8 KB). */
 const MAX_VALOR_BYTES = 8 * 1024;
 
@@ -63,7 +79,9 @@ function equivalente(a, b) {
  * @returns {{ version: number, actualizado: number, claves: object, notas: object[] }}
  */
 function documentoVacio() {
-  return { version: 0, actualizado: 0, claves: {}, notas: [] };
+  // `claves` sin prototipo: una clave `__proto__` queda como propiedad propia y no
+  // puede cambiar el prototipo del objeto (contaminación).
+  return { version: 0, actualizado: 0, claves: Object.create(null), notas: [] };
 }
 
 /**
@@ -75,8 +93,11 @@ function documentoVacio() {
 function normalizarDocumento(doc) {
   const clavesEntrantes = esObjetoPlano(doc.claves) ? doc.claves : {};
   /** @type {Record<string, object>} */
-  const claves = {};
+  const claves = Object.create(null);
   for (const [clave, entrada] of Object.entries(clavesEntrantes)) {
+    // Claves reservadas de un documento persistido (JSON.parse las crea como propias):
+    // se descartan para que no contaminen nada ni reaparezcan como claves válidas.
+    if (CLAVES_RESERVADAS.has(clave)) continue;
     if (!esObjetoPlano(entrada)) continue;
     claves[clave] = {
       valor: entrada.valor,
@@ -95,6 +116,48 @@ function normalizarDocumento(doc) {
 }
 
 /**
+ * ¿Por qué NO se debe leer este archivo de aporte? `null` si es legible y razonable.
+ *
+ * Se comprueba ANTES de `readFileSync` porque el aporte se relee en cada vigilancia
+ * (30 s): leer un archivo de gigabytes o seguir un enlace a una ruta arbitraria
+ * agotaría memoria o permitiría leer fuera del worktree. Un enlace cuyo destino real
+ * sale del worktree se rechaza aunque el texto de la ruta se vea inocente.
+ *
+ * @param {string} rutaAporte
+ * @param {string} [raizWorktree] raíz contra la que validar un symlink
+ * @returns {string|null} motivo de rechazo, o `null` si es válido
+ */
+export function motivoAporteInvalido(rutaAporte, raizWorktree) {
+  let info;
+  try {
+    info = fs.lstatSync(rutaAporte);
+  } catch {
+    return null; // ausente o ilegible: `fusionarAporte` lo tolera como hasta ahora
+  }
+  if (info.isSymbolicLink() && typeof raizWorktree === 'string' && raizWorktree !== '') {
+    let destinoReal;
+    let raizReal;
+    try {
+      destinoReal = fs.realpathSync(rutaAporte);
+      raizReal = fs.realpathSync(raizWorktree);
+    } catch {
+      return 'enlace_roto';
+    }
+    if (destinoReal !== raizReal && !destinoReal.startsWith(`${raizReal}${path.sep}`)) {
+      return 'fuera_del_worktree';
+    }
+  }
+  let tamano;
+  try {
+    tamano = fs.statSync(rutaAporte).size; // sigue el enlace: pesa el destino real
+  } catch {
+    return 'ilegible';
+  }
+  if (tamano > MAX_APORTE_BYTES) return 'demasiado_grande';
+  return null;
+}
+
+/**
  * Crea la vista del pizarrón sobre `dir`. El directorio puede no existir todavía:
  * se crea en la primera escritura.
  *
@@ -103,7 +166,7 @@ function normalizarDocumento(doc) {
  * @returns {{
  *   leer: () => object,
  *   post: (entrada: object) => { aplicado: boolean, conflicto: boolean, motivo?: string },
- *   fusionarAporte: (jobId: string, rutaAporte: string) => { fusionadas: number, ignoradas: number, conflictos?: number },
+ *   fusionarAporte: (jobId: string, rutaAporte: string, opciones?: { raizWorktree?: string }) => { fusionadas: number, ignoradas: number, conflictos?: number, invalido?: boolean, motivo?: string },
  *   rutaViva: () => string,
  *   version: () => number,
  * }}
@@ -189,6 +252,9 @@ export function crearPizarron({ dir, ahora = () => Date.now() } = {}) {
     if (!esObjetoPlano(entrada)) return null;
     const { clave, jobId } = entrada;
     if (typeof clave !== 'string' || !RE_CLAVE.test(clave)) return null;
+    // `__proto__`/`constructor`/`prototype` cumplen `RE_CLAVE` pero no deben tratarse
+    // como claves: se cuentan como inválidas (ignoradas) en lugar de dejar que rompan.
+    if (CLAVES_RESERVADAS.has(clave)) return null;
     if (typeof jobId !== 'string' || jobId === '') return null;
 
     let serializado;
@@ -226,7 +292,9 @@ export function crearPizarron({ dir, ahora = () => Date.now() } = {}) {
     const doc = leer();
     const ts = ahora();
     const nueva = { valor, nota, jobId, ts };
-    const actual = doc.claves[clave];
+    // `Object.hasOwn` y no `doc.claves[clave]`: con un objeto sin prototipo alcanza,
+    // pero además evita tratar un miembro heredado como clave existente.
+    const actual = Object.hasOwn(doc.claves, clave) ? doc.claves[clave] : undefined;
     let aplicado = true;
     let conflicto = false;
 
@@ -272,7 +340,7 @@ export function crearPizarron({ dir, ahora = () => Date.now() } = {}) {
    * @returns {boolean}
    */
   function yaFusionado(doc, clave, valor, nota, jobId) {
-    const actual = doc.claves?.[clave];
+    const actual = doc.claves && Object.hasOwn(doc.claves, clave) ? doc.claves[clave] : undefined;
     if (!actual || !Array.isArray(actual.historial) || actual.historial.length === 0) return false;
     const ultima = actual.historial[actual.historial.length - 1];
     return ultima.jobId === jobId && equivalente(ultima.valor, valor) && (ultima.nota ?? '') === nota;
@@ -280,13 +348,17 @@ export function crearPizarron({ dir, ahora = () => Date.now() } = {}) {
 
   /**
    * Fusiona el archivo de aporte de un trabajo. Es TOLERANTE: un archivo ausente
-   * o corrupto no lanza y no aporta nada.
+   * o corrupto no lanza y no aporta nada. Un aporte rechazado (gigante o con un
+   * enlace que escapa) se cuenta como ignorado y se informa `invalido`.
    *
    * @param {string} jobId
    * @param {string} rutaAporte
-   * @returns {{ fusionadas: number, ignoradas: number, conflictos?: number }}
+   * @param {{ raizWorktree?: string }} [opciones]
+   * @returns {{ fusionadas: number, ignoradas: number, conflictos?: number, invalido?: boolean, motivo?: string }}
    */
-  function fusionarAporte(jobId, rutaAporte) {
+  function fusionarAporte(jobId, rutaAporte, { raizWorktree } = {}) {
+    const rechazo = motivoAporteInvalido(rutaAporte, raizWorktree);
+    if (rechazo) return { fusionadas: 0, ignoradas: 1, invalido: true, motivo: rechazo };
     let texto;
     try {
       texto = fs.readFileSync(rutaAporte, 'utf8');

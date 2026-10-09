@@ -135,3 +135,26 @@ test('revisor: solo_aceptacion no se revisa (no hay diff del agente)', async (t)
 
   await gestor.cerrar();
 });
+
+test('revisor: la salida se acota a 8 KB (una respuesta enorme no satura la memoria)', async (t) => {
+  const m = await montar(t, { perfil: { revisor: { habilitado: true } } });
+  // El veredicto va PRIMERO y luego 20 KB de relleno: con el tope de 8 KB (se conserva
+  // la cola) el veredicto queda fuera y la revisión es INDETERMINADA. Sin tope se leería
+  // el veredicto completo.
+  const gestor = crearGestor(m.almacen, {
+    fake: m.fake,
+    entorno: entornoFalso({
+      ORQ_FAKE_ESCRIBIR: 'subA/x.js',
+      ORQ_FAKE_REVISOR: `VEREDICTO: APRUEBA\n${'x'.repeat(20000)}`,
+    }),
+    home: m.home,
+  });
+
+  const trabajo = await gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  const fin = await gestor.esperar(trabajo.id, 15000);
+  assert.equal(fin.estado, 'succeeded');
+  assert.equal(fin.resultado.revision.veredicto, 'INDETERMINADO');
+  assert.ok(fin.resultado.revision.crudo.length <= 8000, 'el texto crudo acotado no debe superar el tope');
+
+  await gestor.cerrar();
+});

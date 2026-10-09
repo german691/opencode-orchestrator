@@ -22,7 +22,7 @@ import { entornoFalso, leerEventos, montar, NODE } from './gestor-comun.js';
  * @param {{entorno: NodeJS.ProcessEnv, pizarron: object, home: string, fake: string, concurrencia?: number}} opciones
  * @returns {Gestor}
  */
-function crearGestorConPizarron(almacen, { entorno, pizarron, home, fake, concurrencia = 2 }) {
+function crearGestorConPizarron(almacen, { entorno, pizarron, home, fake, concurrencia = 2, vigilanciaAlcanceMs }) {
   return new Gestor({
     almacen,
     opencode: { cmd: NODE, argsPrefijo: [fake] },
@@ -31,6 +31,7 @@ function crearGestorConPizarron(almacen, { entorno, pizarron, home, fake, concur
     home,
     graceMs: 300,
     pizarron,
+    ...(vigilanciaAlcanceMs === undefined ? {} : { vigilanciaAlcanceMs }),
   });
 }
 
@@ -198,6 +199,45 @@ test('pizarrón habilitado: agrega las instrucciones al prompt del agente', asyn
   const prompt = info.args[info.args.length - 1];
   assert.match(prompt, /PIZARRÓN COMPARTIDO/);
   assert.match(prompt, /\.orq\/aporte\.json/);
+
+  await gestor.cerrar();
+});
+
+test('pizarrón: un aporte gigante se ignora y avisa UNA sola vez por trabajo', async (t) => {
+  const m = await montar(t, { perfil: { pizarron: { habilitado: true } } });
+  const pizarron = crearPizarron({ dir: path.join(m.base, 'pizarron') });
+  // Script que escribe un `.orq/aporte.json` de 1,1 MB y se queda un rato: así el
+  // vigilante de alcance (cada 150 ms) intenta fusionarlo varias veces.
+  const guion = path.join(m.base, 'opencode-aporte-grande.mjs');
+  fs.writeFileSync(
+    guion,
+    [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      "const destino = path.resolve(process.cwd(), '.orq/aporte.json');",
+      "fs.mkdirSync(path.dirname(destino), { recursive: true });",
+      "fs.writeFileSync(destino, '{\"entradas\":[' + ' '.repeat(1100000) + ']}');",
+      'await new Promise((resolve) => setTimeout(resolve, 1200));',
+      'process.exit(0);',
+      '',
+    ].join('\n'),
+  );
+  const gestor = crearGestorConPizarron(m.almacen, {
+    entorno: entornoFalso({}),
+    pizarron,
+    home: m.home,
+    fake: guion,
+    vigilanciaAlcanceMs: 150,
+  });
+
+  const trabajo = await gestor.enviar({ prompt: 'x', cwd: m.repo, mode: 'safe', writes: ['subA/**'] });
+  const fin = await gestor.esperar(trabajo.id, 15000);
+  assert.equal(fin.estado, 'succeeded');
+  assert.equal(pizarron.leer().version, 0, 'el aporte gigante no se fusiona');
+
+  const eventos = leerEventos(m.estadoDir, trabajo.id).filter((e) => e.tipo === 'pizarron.aporte_invalido');
+  assert.equal(eventos.length, 1, 'el aviso se emite una sola vez por trabajo');
+  assert.equal(eventos[0].motivo, 'demasiado_grande');
 
   await gestor.cerrar();
 });

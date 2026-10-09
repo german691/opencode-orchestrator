@@ -36,8 +36,9 @@ import {
   resolverModo,
 } from './opencode.js';
 import { resumirFallos } from './fallos.js';
-import { leerManifiesto, ejecutarMutaciones, nombreManifiesto } from './mutaciones.js';
+import { leerManifiesto, ejecutarMutaciones, nombreManifiesto, recuperarMutacionPendiente, TEXTO_MUTACION_RECUPERADA } from './mutaciones.js';
 import { ejecutarParalelo, normalizarParalelo } from './paralelo.js';
+import { motivoAporteInvalido } from './pizarron.js';
 import { elegibles } from './planificador.js';
 import { cargarPerfil, perfilPorDefecto, resolverRaizWorktrees } from './profile.js';
 import { expandirReceta } from './recetas.js';
@@ -240,6 +241,8 @@ export class Gestor {
     this.ejecuciones = new Map();
     /** @type {Map<string, { mtime: number, perfil: object }>} cache de perfiles por repo */
     this.perfiles = new Map();
+    /** @type {Set<string>} trabajos cuyo aporte inválido ya se avisó (una vez por trabajo) */
+    this.aportesInvalidosAvisados = new Set();
     /** @type {number} cantidad de fallos al registrar eventos globales (para loguear el 1º y cada 100) */
     this.fallosDeEvento = 0;
     this.cerrado = false;
@@ -409,7 +412,14 @@ export class Gestor {
     // nuevo parte del mismo commit base y recibe los archivos que dejó el anterior.
     let origen = null;
     if (spec.desde_job !== undefined && spec.desde_job !== null) {
-      origen = this.trabajos.get(String(spec.desde_job)) ?? null;
+      // `this.obtener` (y no el mapa en memoria): con la retención, un trabajo viejo
+      // puede estar solo en disco y `enviar` debe leerlo bajo demanda en vez de decir
+      // que no existe.
+      try {
+        origen = this.obtener(String(spec.desde_job));
+      } catch {
+        origen = null;
+      }
       if (!origen) throw new ErrorDeGestor(`desde_job: no existe el trabajo '${spec.desde_job}'`);
       if (!esTerminal(origen.estado)) {
         throw new ErrorDeGestor(`desde_job: el trabajo '${origen.id}' sigue ${origen.estado}; esperá a que termine`);
@@ -529,7 +539,13 @@ export class Gestor {
     }
     const after = lista(spec.after, 'after', []);
     for (const dep of after) {
-      if (!this.trabajos.has(dep)) throw new ErrorDeGestor(`after: no existe el trabajo '${dep}'`);
+      // Igual que `desde_job`: resolver con `obtener` para no depender de la retención.
+      // Además lo cachea en memoria, así el planificador ve su estado real.
+      try {
+        this.obtener(dep);
+      } catch {
+        throw new ErrorDeGestor(`after: no existe el trabajo '${dep}'`);
+      }
     }
     const files = lista(spec.files, 'files', []).map((f) => aRutaDelServidor(f));
 
@@ -625,12 +641,42 @@ export class Gestor {
     this.#evento({ tipo: 'servidor.arranque', detalle: { concurrencia: this.concurrencia, modelo: this.modelo } });
     if (Array.isArray(recuperados) && recuperados.length > 0) {
       this.#evento({ tipo: 'servidor.recuperacion', detalle: { recuperados } });
+      // Un trabajo que murió en medio de una mutación deja su worktree mutado. Al
+      // recuperarlo se restaura el original (verificando sha256) para no confundir ese
+      // cambio con trabajo real. Se registra una advertencia por cada restauración.
+      for (const id of recuperados) {
+        let trabajo;
+        try {
+          trabajo = this.obtener(id);
+        } catch {
+          continue;
+        }
+        if (!trabajo?.worktree) continue;
+        const recuperacion = recuperarMutacionPendiente(trabajo.worktree);
+        if (!recuperacion.recuperado) continue;
+        this.#evento({
+          tipo: 'servidor.recuperacion',
+          jobId: id,
+          detalle: { mutacionPendienteRecuperada: recuperacion.archivo, advertencia: TEXTO_MUTACION_RECUPERADA },
+        });
+        this.#eventoDeTrabajo(id, {
+          tipo: 'mutacion_pendiente_recuperada',
+          archivo: recuperacion.archivo,
+          advertencia: TEXTO_MUTACION_RECUPERADA,
+        });
+      }
     }
   }
 
   /** Lanza los trabajos que el planificador declara elegibles. */
   #bombear() {
     if (this.cerrado) return;
+    // Los recursos son POR TRABAJO: cada trabajo provisiona su propia instancia (p. ej.
+    // `postgres-db` con `{job}` en el nombre, una base por trabajo), así que dos trabajos
+    // que piden el mismo recurso NO se excluyen entre sí. La capacidad de cada recurso se
+    // fija al tope de concurrencia (`this.concurrencia`): el recurso no serializa por sí
+    // solo; lo que acota es el tope global/por repo. Si un recurso necesitara exclusión
+    // real habría que declararlo con capacidad 1 (hoy no hay ningún recurso así).
     const recursos = {};
     for (const id of [...this.cola, ...this.corriendo]) {
       for (const nombre of this.trabajos.get(id)?.resources ?? []) recursos[nombre] = this.concurrencia;
@@ -723,6 +769,9 @@ export class Gestor {
       // así que cualquier error posterior (p. ej. un perfil inválido) puede terminar en failed.
       this.#guardar(id, { estado: 'provisioning' });
       this.#eventoDeTrabajo(id, { tipo: 'provisionando' });
+      // Advertencias acumuladas durante el pipeline; se declaran acá arriba porque la
+      // recuperación de una mutación pendiente (desde_job) puede agregar una.
+      const advertencias = [];
       let job = this.trabajos.get(id);
       const perfil = await this.#perfilDe(job.repo);
       perfilDelTrabajo = perfil;
@@ -755,6 +804,19 @@ export class Gestor {
         this.#guardar(id, { worktree: wt.ruta, rama: wt.rama, baseCommit, enlacesCreados: enlaces });
         if (job.desdeJob) {
           const origen = this.trabajos.get(job.desdeJob);
+          // ANTES de trasladar: si el trabajo origen murió en medio de una mutación,
+          // su worktree quedó mutado. Se restaura el original para no trasladar (ni
+          // commitear después) ese cambio ajeno al trabajo.
+          const recuperacion = recuperarMutacionPendiente(origen.worktree);
+          if (recuperacion.recuperado) {
+            advertencias.push(TEXTO_MUTACION_RECUPERADA);
+            this.#eventoDeTrabajo(id, {
+              tipo: 'mutacion_pendiente_recuperada',
+              archivo: recuperacion.archivo,
+              advertencia: TEXTO_MUTACION_RECUPERADA,
+            });
+            this.#evento({ tipo: 'job.mutaciones', jobId: id, mutacionPendienteRecuperada: recuperacion.archivo });
+          }
           const traslado = await trasladarCambios({
             desde: origen.worktree,
             hacia: wt.ruta,
@@ -842,10 +904,6 @@ export class Gestor {
       // se encapsula y puede repetirse con el MISMO prompt en el MISMO worktree.
       this.#guardar(id, { estado: 'running' });
       this.#eventoDeTrabajo(id, { tipo: 'ejecutando' });
-
-      // Advertencias acumuladas antes de la verificación final: la reanudación por corte
-      // de transporte agrega la suya acá y el pipeline normal la reexpone.
-      const advertencias = [];
 
       /** Corre el agente UNA vez, con su vigilante de alcance/progreso. */
       const correrAgente = async () => {
@@ -1453,10 +1511,22 @@ export class Gestor {
     if (typeof raizTrabajo !== 'string' || raizTrabajo === '') return;
     try {
       const rutaAporte = path.join(raizTrabajo, DIR_ORQ, 'aporte.json');
+      // Validación ANTES de leer: cada vigilancia (30 s) relee el aporte; un archivo
+      // gigante o un enlace que escapa del worktree se ignora sin cargarlo en memoria.
+      // El aviso se emite UNA sola vez por trabajo (el archivo no cambia de tamaño solo).
+      const motivo = motivoAporteInvalido(rutaAporte, raizTrabajo);
+      if (motivo) {
+        if (!this.aportesInvalidosAvisados.has(id)) {
+          this.aportesInvalidosAvisados.add(id);
+          this.#evento({ tipo: 'pizarron.aporte_invalido', jobId: id, motivo });
+          this.#eventoDeTrabajo(id, { tipo: 'pizarron.aporte_invalido', motivo });
+        }
+        return;
+      }
       // Tope de entradas por trabajo: el aporte entero podría inundar el pizarrón. Se
       // recorta a un archivo temporal en el estado del trabajo (pizarron.js no se toca).
       const rutaRecortada = this.#aporteRecortado(id, rutaAporte, perfil.pizarron?.maxEntradasPorTrabajo);
-      const res = this.pizarron.fusionarAporte(id, rutaRecortada ?? rutaAporte);
+      const res = this.pizarron.fusionarAporte(id, rutaRecortada ?? rutaAporte, { raizWorktree: raizTrabajo });
       const fusionadas = res?.fusionadas ?? 0;
       const conflictos = res?.conflictos ?? 0;
       if (fusionadas > 0 || conflictos > 0) {
@@ -1638,6 +1708,9 @@ export class Gestor {
         signal: ctl.signal,
         onSalida: (evento) => {
           salida += evento.texto;
+          // Mismo tope que `#correrComando`: una respuesta enorme no debe acumularse
+          // sin límite en memoria mientras el revisor corre.
+          if (salida.length > TOPE_SALIDA_COMANDO) salida = salida.slice(-TOPE_SALIDA_COMANDO);
         },
       });
       if (resultado.motivo !== 'exit' || resultado.code !== 0) {

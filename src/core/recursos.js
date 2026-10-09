@@ -24,6 +24,11 @@
  * POR QUÉ `ejecutarPsql` es inyectable: permite probar toda la lógica (SQL exacto,
  * validaciones, idempotencia y el entorno recibido) sin una base de Postgres real;
  * el test de integración usa el real y se saltea si no está disponible.
+ *
+ * Los recursos son POR TRABAJO: `name` incluye `{job}` (p. ej. `compras_{job}_test`),
+ * así que cada trabajo obtiene su PROPIA base y dos trabajos con el mismo recurso no se
+ * pisan. Por eso el planificador no serializa por recurso: su capacidad es el tope de
+ * concurrencia, no 1 (ver el comentario de `#bombear` en gestor.js).
  */
 
 import { execFile } from 'node:child_process';
