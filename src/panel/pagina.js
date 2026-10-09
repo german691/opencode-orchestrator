@@ -177,7 +177,7 @@ function enlaceCargarMas(filtros, limite) {
  * Los filtros viajan por query string y se reenvían al registro.
  *
  * @param {{ eventos?: object[], tipos?: readonly string[], filtros?: object, disponible?: boolean,
- *   titulos?: Record<string,string>, limite?: number, hayMas?: boolean }} [datos]
+ *   titulos?: Record<string,string>, limite?: number, hayMas?: boolean, enTope?: boolean }} [datos]
  * @returns {string}
  */
 export function paginaAuditoria({
@@ -188,6 +188,7 @@ export function paginaAuditoria({
   titulos = {},
   limite = PASO_EVENTOS,
   hayMas = false,
+  enTope = false,
 } = {}) {
   const filas = eventos.map((evento) => filaAuditoria(evento, titulos)).join('');
   const tabla =
@@ -205,7 +206,12 @@ export function paginaAuditoria({
     : eventos.length === 0
       ? '<p class="vacia" role="status">Todavía no hay eventos. Acá se registran los cambios de estado de los trabajos, los merges, las limpiezas y los aportes al pizarrón.</p>'
       : '';
-  const paginacion = hayMas ? `<div class="paginacion">${enlaceCargarMas(filtros, limite)}</div>` : '';
+  // En el tope del límite «Cargar más» no puede avanzar (el tope lo frenaría): se oculta
+  // el enlace y se explica cómo seguir, para que lo viejo no quede inalcanzable en silencio.
+  const paginacion = hayMas && !enTope ? `<div class="paginacion">${enlaceCargarMas(filtros, limite)}</div>` : '';
+  const avisoTope = enTope
+    ? `<p class="nota" role="status">Mostrando los ${limite} más recientes; filtrá por fechas para ver más.</p>`
+    : '';
   const cuerpo = `<main id="contenido" class="pagina" tabindex="-1">
 <form method="get" action="/auditoria" class="filtros" role="search" aria-label="Filtrar eventos">
   <div class="campo">
@@ -231,6 +237,7 @@ export function paginaAuditoria({
 </form>
 ${tabla}
 ${vacio}
+${avisoTope}
 ${paginacion}
 </main>`;
   return armazonHtml({

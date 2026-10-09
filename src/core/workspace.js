@@ -479,21 +479,62 @@ async function limpiarSilencioso(repoRaiz, ruta, rama, rootDir) {
  * POR QUÉ atómica (tmp + rename): un lector concurrente nunca debe ver un JSON a medias.
  * Es best-effort: un fallo de escritura no puede tumbar al trabajo.
  *
- * @param {{ worktree: string, pizarron: { leer: () => object } }} opciones
- * @returns {boolean} `true` si la copia quedó escrita
+ * POR QUÉ se comprueban enlaces: el agente controla su worktree y puede reemplazar `.orq`
+ * o `pizarron.json.tmp` por un symlink hacia fuera; escribir "a ciegas" usaría el enlace y
+ * sobrescribiría un archivo ajeno. Ante cualquier anomalía se OMITE el refresco y se devuelve
+ * el motivo (con `conMotivo`) para que el gestor avise una sola vez por trabajo.
+ *
+ * @param {{ worktree: string, pizarron: { leer: () => object }, conMotivo?: boolean }} opciones
+ * @returns {boolean|{ ok: boolean, motivo: string|null }} `true` si la copia quedó escrita
+ *   (o `{ ok, motivo }` si `conMotivo` es `true`)
  */
-export function refrescarCopiaPizarron({ worktree, pizarron } = {}) {
-  if (typeof worktree !== 'string' || worktree === '') return false;
-  if (!pizarron || typeof pizarron.leer !== 'function') return false;
+export function refrescarCopiaPizarron({ worktree, pizarron, conMotivo = false } = {}) {
+  const resultado = intentarRefrescarCopiaPizarron(worktree, pizarron);
+  return conMotivo ? resultado : resultado.ok;
+}
+
+/**
+ * Intenta escribir la copia del pizarrón sin seguir enlaces y SIN lanzar. Devuelve
+ * siempre un `{ ok, motivo }` para poder reportar la causa del fallo.
+ * @param {unknown} worktree
+ * @param {{ leer?: () => object }|null|undefined} pizarron
+ * @returns {{ ok: boolean, motivo: string|null }}
+ */
+function intentarRefrescarCopiaPizarron(worktree, pizarron) {
+  if (typeof worktree !== 'string' || worktree === '') return { ok: false, motivo: 'sin_worktree' };
+  if (!pizarron || typeof pizarron.leer !== 'function') return { ok: false, motivo: 'sin_pizarron' };
   try {
-    const destino = path.join(worktree, DIR_ORQ, ARCHIVO_PIZARRON);
-    fs.mkdirSync(path.dirname(destino), { recursive: true });
+    const dirOrq = path.join(worktree, DIR_ORQ);
+    // `.orq` debe ser un directorio REAL: si es un enlace (o un archivo), escribir dentro
+    // dejaría la copia fuera del worktree. No se sigue el enlace.
+    const infoOrq = fs.lstatSync(dirOrq, { throwIfNoEntry: false });
+    if (!infoOrq || !infoOrq.isDirectory()) return { ok: false, motivo: 'orq_no_es_directorio' };
+
+    const destino = path.join(dirOrq, ARCHIVO_PIZARRON);
+    const infoDestino = fs.lstatSync(destino, { throwIfNoEntry: false });
+    // Un destino que es directorio no se puede reemplazar con `rename` de forma limpia:
+    // mejor omitir el refresco que romper la copia existente.
+    if (infoDestino && infoDestino.isDirectory()) return { ok: false, motivo: 'destino_es_directorio' };
+
     const temporal = `${destino}.tmp`;
-    fs.writeFileSync(temporal, JSON.stringify(pizarron.leer(), null, 2), 'utf8');
+    // El temporal es NUESTRO: si ya existe (corrida anterior o dejado por el agente, quizá
+    // como symlink), se borra SIN seguirlo antes de crear el archivo real con `wx`.
+    const infoTemporal = fs.lstatSync(temporal, { throwIfNoEntry: false });
+    if (infoTemporal) {
+      try {
+        fs.unlinkSync(temporal);
+      } catch {
+        return { ok: false, motivo: 'temporal_no_se_pudo_borrar' };
+      }
+    }
+
+    // `wx` falla si algo reapareció en el temporal: así nunca se escribe a través de un
+    // enlace preexistente hacia fuera del worktree.
+    fs.writeFileSync(temporal, JSON.stringify(pizarron.leer(), null, 2), { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(temporal, destino);
-    return true;
+    return { ok: true, motivo: null };
   } catch {
-    return false;
+    return { ok: false, motivo: 'escritura_fallida' };
   }
 }
 

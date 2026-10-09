@@ -925,3 +925,33 @@ test('crearWorktree con pizarrón escribe una COPIA (archivo regular) del docume
   assert.equal(fs.existsSync(path.join(sin.ruta, '.orq', 'pizarron.json')), false);
   assert.equal(refrescarCopiaPizarron({ worktree: '', pizarron }), false, 'sin worktree no escribe');
 });
+
+// --- SEGURIDAD: el refresco del pizarrón no debe seguir enlaces ----------------------
+
+test('refrescarCopiaPizarron: con `.orq` symlink a fuera no escribe y reporta el motivo', () => {
+  const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'orq-piz-'));
+  const dirExterno = fs.mkdtempSync(path.join(os.tmpdir(), 'orq-piz-externo-'));
+  fs.symlinkSync(dirExterno, path.join(worktree, '.orq'), 'dir');
+  const pizarron = { leer: () => ({ version: 1, claves: {}, notas: [] }) };
+
+  const res = refrescarCopiaPizarron({ worktree, pizarron, conMotivo: true });
+  assert.deepEqual(res, { ok: false, motivo: 'orq_no_es_directorio' });
+  assert.equal(fs.existsSync(path.join(dirExterno, 'pizarron.json')), false);
+  assert.deepEqual(fs.readdirSync(dirExterno), [], 'el directorio externo queda intacto');
+  assert.equal(refrescarCopiaPizarron({ worktree, pizarron }), false, 'sigue devolviendo boolean por defecto');
+  fs.rmSync(dirExterno, { recursive: true, force: true });
+});
+
+test('refrescarCopiaPizarron: con el temporal symlink a fuera no pisa el archivo externo', () => {
+  const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'orq-piz-'));
+  fs.mkdirSync(path.join(worktree, '.orq'));
+  const externo = path.join(os.tmpdir(), `orq-piz-tmp-${process.pid}-${Date.now()}.json`);
+  fs.writeFileSync(externo, 'contenido externo\n');
+  fs.symlinkSync(externo, path.join(worktree, '.orq', 'pizarron.json.tmp'));
+  const pizarron = { leer: () => ({ version: 2, claves: {}, notas: [] }) };
+
+  assert.equal(refrescarCopiaPizarron({ worktree, pizarron }), true);
+  assert.equal(fs.readFileSync(externo, 'utf8'), 'contenido externo\n', 'el externo queda intacto');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(worktree, '.orq', 'pizarron.json'), 'utf8')).version, 2);
+  fs.rmSync(externo, { force: true });
+});

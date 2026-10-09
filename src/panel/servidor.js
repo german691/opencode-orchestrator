@@ -161,11 +161,18 @@ function leerFiltros(params) {
   return filtros;
 }
 
+/**
+ * Tope duro de eventos por página. Por encima de este valor el enlace «Cargar más»
+ * pediría un límite que se recorta al mismo tope y no avanzaría: la página lo oculta
+ * y avisa que hay que filtrar por fechas.
+ */
+export const LIMITE_EVENTOS_MAX = 10_000;
+
 /** Normaliza el `limite` de eventos: por defecto 200, acotado a 1..10000. */
 function normalizarLimiteEventos(valor) {
   const n = Number(valor);
   if (!Number.isFinite(n) || n <= 0) return PASO_EVENTOS;
-  return Math.min(10_000, Math.trunc(n));
+  return Math.min(LIMITE_EVENTOS_MAX, Math.trunc(n));
 }
 
 /**
@@ -263,6 +270,9 @@ export function crearServidorPanel({
         const encontrados = historialEfectivo.listar({ ...filtros, limite: limite + 1 });
         const hayMas = encontrados.length > limite;
         const eventos = hayMas ? encontrados.slice(0, limite) : encontrados;
+        // En el tope, «Cargar más» no puede avanzar (el límite se recorta): la página
+        // lo oculta y avisa cómo seguir, para no dejar los eventos viejos inalcanzables.
+        const enTope = limite >= LIMITE_EVENTOS_MAX;
         res.writeHead(200, CABECERAS_HTML);
         res.end(
           paginaAuditoria({
@@ -272,7 +282,8 @@ export function crearServidorPanel({
             disponible: Boolean(registro),
             titulos: historialEfectivo.titulos(),
             limite,
-            hayMas,
+            hayMas: hayMas && !enTope,
+            enTope,
           }),
         );
         return;
@@ -309,7 +320,16 @@ export function crearServidorPanel({
         }
         const filtros = leerFiltros(url.searchParams);
         filtros.limite = normalizarLimiteEventos(filtros.limite);
-        responderJson(res, 200, { ahora: ahora(), eventos: historialEfectivo.listar(filtros) });
+        // Se pide uno de más para informar si hay más allá del límite. Los campos `hayMas`
+        // y `enTope` son ADITIVOS: `eventos` y el resto del formato no cambian.
+        const encontrados = historialEfectivo.listar({ ...filtros, limite: filtros.limite + 1 });
+        const hayMas = encontrados.length > filtros.limite;
+        responderJson(res, 200, {
+          ahora: ahora(),
+          eventos: hayMas ? encontrados.slice(0, filtros.limite) : encontrados,
+          hayMas,
+          enTope: filtros.limite >= LIMITE_EVENTOS_MAX,
+        });
         return;
       }
       if (pathname === '/api/estado') {
